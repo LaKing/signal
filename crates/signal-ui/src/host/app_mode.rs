@@ -116,7 +116,7 @@ impl Host {
     /// App mode: the status line every [`STATUS_EVERY`] while playing, and
     /// the `app` message whenever it changed.
     pub(super) fn push_app(&mut self) {
-        if let Some(document) = self.document.as_mut() {
+        if let Some(document) = self.opening.document.as_mut() {
             document.refresh();
         }
         self.answer_saves();
@@ -184,12 +184,12 @@ impl Host {
         };
         json!({
             "type": "app",
-            "generation": self.generation,
+            "generation": self.opening.generation,
             "project": mode.opened.then(|| json!({
-                "dir": self.dir.display().to_string(),
-                "file": self.document.as_ref().map(|d| d.file().display().to_string()),
+                "dir": self.opening.dir.display().to_string(),
+                "file": self.opening.document.as_ref().map(|d| d.file().display().to_string()),
                 "name": self.project_name(),
-                "edited": self.document.as_ref().is_some_and(Document::edited),
+                "edited": self.opening.document.as_ref().is_some_and(Document::edited),
                 "sampleRate": (mode.diagnostics.is_empty() && self.rate > 0).then_some(self.rate),
                 "diagnostics": mode.diagnostics,
                 "warnings": mode.warnings,
@@ -233,9 +233,9 @@ impl Host {
             return Err(fail("no-project", "open a project folder first"));
         }
         // Read before the load: a later edit makes it differ from the file.
-        let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
-        let state = FolderState::read(&self.dir).ok();
-        let dir = self.dir.clone();
+        let file = fs::read_to_string(self.opening.dir.join(signal_project::PROJECT_FILE)).ok();
+        let state = FolderState::read(&self.opening.dir).ok();
+        let dir = self.opening.dir.clone();
         let (project, plan, width) = match self.load(&dir) {
             Ok(loaded) => {
                 // Stopping again with the folder unchanged loads nothing.
@@ -258,7 +258,7 @@ impl Host {
         self.refresh_warnings();
         self.play_carried(carried.clone());
         // ADR 0038 §6 (M4.1): this project's devices.local.toml over the Setup.
-        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.dir);
+        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.opening.dir);
         let started = app::start(
             &self.backend,
             &self.devices,
@@ -283,7 +283,7 @@ impl Host {
                 return Err(fail("device", error));
             }
         };
-        let (watcher, reload) = match ProjectWatcher::new(&self.dir) {
+        let (watcher, reload) = match ProjectWatcher::new(&self.opening.dir) {
             Ok(watcher) => (Some(watcher), ("watching for edits".to_owned(), false)),
             Err(error) => (None, (format!("not watching: {error}"), true)),
         };

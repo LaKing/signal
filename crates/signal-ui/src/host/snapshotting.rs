@@ -109,7 +109,7 @@ impl Host {
     /// and every write pushes them: the file's `base` and each snapshot's
     /// name and values, in name order.
     fn snapshots_json(&self) -> Result<Value, Failure> {
-        let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
+        let (all, text) = snapshots::read(&self.opening.dir).map_err(snapshot_failure)?;
         Ok(snapshot_list_json(&all, text.as_deref()))
     }
 
@@ -123,7 +123,7 @@ impl Host {
             return Err(fail("no-project", "open a project folder first"));
         }
         if plans && self.run.is_none() {
-            match app::load(&self.dir, &self.registry) {
+            match app::load(&self.opening.dir, &self.registry) {
                 Ok((project, plan, _)) => {
                     let panel = Panel::new(&project, &self.registry);
                     self.reconcile(panel);
@@ -176,8 +176,9 @@ impl Host {
         let check = base_check(message)?;
         let values = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
         let count = values.len();
-        let (replaced, text, _) = snapshots::save(&self.dir, &name, values, overwrite, check)
-            .map_err(|e| self.snapshot_refused(e))?;
+        let (replaced, text, _) =
+            snapshots::save(&self.opening.dir, &name, values, overwrite, check)
+                .map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         Ok(json!({
             "type": "snapshot.saved",
@@ -195,8 +196,8 @@ impl Host {
         self.snapshot_project(false)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
-        let (values, text, _) =
-            snapshots::delete(&self.dir, &name, check).map_err(|e| self.snapshot_refused(e))?;
+        let (values, text, _) = snapshots::delete(&self.opening.dir, &name, check)
+            .map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         Ok(json!({
             "type": "snapshot.deleted",
@@ -219,7 +220,7 @@ impl Host {
             .ok_or_else(|| fail("bad-value", "`to` must be a place, a whole number from 0"))?;
         let to = usize::try_from(to).unwrap_or(usize::MAX);
         let check = base_check(message)?;
-        let (index, text, _) = snapshots::move_to(&self.dir, &name, to, check)
+        let (index, text, _) = snapshots::move_to(&self.opening.dir, &name, to, check)
             .map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         let all = snapshots::parse(&text).map_err(snapshot_failure)?;
@@ -277,7 +278,7 @@ impl Host {
         let ms = transition_of(message, "ms")?
             .ok_or_else(|| fail("bad-value", "`ms` must be a whole number of milliseconds"))?;
         let check = base_check(message)?;
-        let (text, _) = snapshots::set_transition(&self.dir, ms, check)
+        let (text, _) = snapshots::set_transition(&self.opening.dir, ms, check)
             .map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         Ok(json!({
@@ -327,16 +328,16 @@ impl Host {
         kind: &str,
         transition: Option<u32>,
     ) -> Result<Value, Failure> {
-        let lock = ProjectLock::acquire(&self.dir).map_err(|e| {
+        let lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| {
             fail(
                 "write-failed",
                 format!(
                     "{} was not written: {e}",
-                    self.dir.join(SNAPSHOTS_FILE).display()
+                    self.opening.dir.join(SNAPSHOTS_FILE).display()
                 ),
             )
         })?;
-        let edited = snapshots::edit_locked(&self.dir, &lock, check, |all| {
+        let edited = snapshots::edit_locked(&self.opening.dir, &lock, check, |all| {
             let before = all.undo.clone();
             let values = take(all)?;
             let undo = snapshot::undo_of(&self.panel, &values, |i, p| self.live_base(i, p));
@@ -462,7 +463,7 @@ impl Host {
                 )
             })
             .collect();
-        let chosen = write_project_chosen_locked(&self.dir, &lock, &texts, &|text, i| {
+        let chosen = write_project_chosen_locked(&self.opening.dir, &lock, &texts, &|text, i| {
             restore.edits.get(i).is_some_and(|e| !e.held_by(text))
         });
         // A control whose file holds the value is only sent, and only when
@@ -560,7 +561,7 @@ impl Host {
             // before the restore, which is what an undo must bring back.
             (Some(_), Some(_)) if reached => "new",
             (Some(_), Some((written, before))) => {
-                match snapshots::put_back(&self.dir, &lock, written, before) {
+                match snapshots::put_back(&self.opening.dir, &lock, written, before) {
                     Ok(true) => "previous",
                     Ok(false) => {
                         undo_note = Some(format!(
@@ -655,21 +656,21 @@ impl Host {
             )
         };
         let (instance, parameter) = control_of(&port).ok_or_else(not_editable)?;
-        let path = self.dir.join(signal_project::PROJECT_FILE);
+        let path = self.opening.dir.join(signal_project::PROJECT_FILE);
         let failed = |error: String| {
             fail(
                 "write-failed",
                 format!("{address} was not written to {}: {error}", path.display()),
             )
         };
-        let lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
+        let lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
         let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
         let after = signal_project::write_snapshot_exclude(&before, &instance, &parameter, exclude)
             .map_err(|e| failed(e.to_string()))?;
         // Checked on the text read under the lock, as it would be left: a
         // control of the project as it plans then (never a stale panel's).
         let text = after.as_deref().unwrap_or(&before);
-        let checked = signal_project::read_sources(&self.dir)
+        let checked = signal_project::read_sources(&self.opening.dir)
             .map_err(|e| fail("does-not-load", e.to_string()))
             .and_then(|mut files| {
                 for file in files
@@ -678,7 +679,7 @@ impl Host {
                 {
                     text.clone_into(&mut file.text);
                 }
-                let project = Project::from_sources_in(files, &self.dir)
+                let project = Project::from_sources_in(files, &self.opening.dir)
                     .map_err(|d| fail("does-not-load", lines(&d)))?;
                 let planned = project.plan(&self.registry);
                 Ok((project, planned))
@@ -773,7 +774,7 @@ impl Host {
                     }
                 }
                 None => {
-                    if let Ok((project, plan, _)) = app::load(&self.dir, &self.registry) {
+                    if let Ok((project, plan, _)) = app::load(&self.opening.dir, &self.registry) {
                         self.reconcile(Panel::new(&project, &self.registry));
                         self.plan = Some(plan);
                     }
@@ -798,7 +799,7 @@ impl Host {
 
     /// The SHA-256 of `snapshots.toml` now, `None` without one.
     fn snapshot_base(&self) -> Option<String> {
-        let path = self.dir.join(SNAPSHOTS_FILE);
+        let path = self.opening.dir.join(SNAPSHOTS_FILE);
         // A link is never read (its target's bytes are not the file's).
         if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return None;

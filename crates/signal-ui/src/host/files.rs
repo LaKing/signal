@@ -61,7 +61,7 @@ impl Host {
                 format!("{file} is reached through a link: only the project's own files are read"),
             ));
         }
-        match fs::read_to_string(self.dir.join(&file)) {
+        match fs::read_to_string(self.opening.dir.join(&file)) {
             Ok(text) => Ok(json!({
                 "type": "file.read",
                 "file": file,
@@ -102,7 +102,7 @@ impl Host {
                 ),
             ));
         }
-        let path = self.dir.join(&file);
+        let path = self.opening.dir.join(&file);
         let current = || -> Result<Option<String>, Failure> {
             match fs::read_to_string(&path) {
                 Ok(text) => Ok(Some(text)),
@@ -123,7 +123,7 @@ impl Host {
         if hash.as_deref() != base {
             return Err(conflict(before));
         }
-        let mut sources = signal_project::read_sources(&self.dir)
+        let mut sources = signal_project::read_sources(&self.opening.dir)
             .map_err(|e| fail("does-not-load", e.to_string()))?;
         sources.retain(|s| s.path != file);
         sources.push(signal_project::SourceFile {
@@ -131,7 +131,7 @@ impl Host {
             text: text.to_owned(),
         });
         let does_not_load = |diagnostics: Vec<Diagnostic>| {
-            let lines: Vec<String> = located(&self.dir, diagnostics)
+            let lines: Vec<String> = located(&self.opening.dir, diagnostics)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
@@ -141,12 +141,12 @@ impl Host {
                 json!({"file": file, "diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources_in(sources, &self.dir))
+        self.loads_as_edit(Project::from_sources_in(sources, &self.opening.dir))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
-        let _lock = ProjectLock::acquire(&self.dir)
+        let _lock = ProjectLock::acquire(&self.opening.dir)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current()?;
         if now != before {
@@ -192,7 +192,7 @@ impl Host {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
         }
-        let own = fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        let own = fs::canonicalize(&self.opening.dir).unwrap_or_else(|_| self.opening.dir.clone());
         let folders = |dir: &Path, prefix: &str| -> Vec<(String, PathBuf)> {
             let mut found: Vec<(String, PathBuf)> = fs::read_dir(dir)
                 .into_iter()
@@ -212,7 +212,7 @@ impl Host {
             found.truncate(SLOT_PROJECTS);
             found
         };
-        let mut candidates = folders(&self.dir, "./");
+        let mut candidates = folders(&self.opening.dir, "./");
         if let Some(parent) = own.parent() {
             candidates.extend(folders(parent, "../"));
         }
@@ -261,7 +261,7 @@ impl Host {
                 "vendor needs `base`, the SHA-256 of project.toml",
             )
         })?;
-        let now = fs::read(self.dir.join(PROJECT_FILE))
+        let now = fs::read(self.opening.dir.join(PROJECT_FILE))
             .ok()
             .map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
@@ -283,11 +283,12 @@ impl Host {
             VendorError::Changed(ref file) => fail_with(
                 "conflict",
                 error.to_string(),
-                json!({"file": file, "base": fs::read(self.dir.join(file)).ok().map(|bytes| sha256_hex(&bytes))}),
+                json!({"file": file, "base": fs::read(self.opening.dir.join(file)).ok().map(|bytes| sha256_hex(&bytes))}),
             ),
             VendorError::Io { .. } => fail("write-failed", error.to_string()),
         };
-        let prepared = vendor::prepare(&self.dir, composite, name, library).map_err(refused)?;
+        let prepared =
+            vendor::prepare(&self.opening.dir, composite, name, library).map_err(refused)?;
         // What was prepared is the version `base` names (the file may have
         // changed since the check above); `vendor::write` then commits it
         // only while the files are still the ones prepared (ADR 0040).
@@ -312,7 +313,7 @@ impl Host {
             ));
         }
         let does_not_load = |diagnostics: Vec<Diagnostic>| {
-            let lines: Vec<String> = located(&self.dir, diagnostics)
+            let lines: Vec<String> = located(&self.opening.dir, diagnostics)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
@@ -322,9 +323,12 @@ impl Host {
                 json!({"diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources_in(prepared.after(), &self.dir))
-            .map_err(does_not_load)?;
-        let vendored = vendor::write(&self.dir, prepared, library).map_err(refused)?;
+        self.loads_as_edit(Project::from_sources_in(
+            prepared.after(),
+            &self.opening.dir,
+        ))
+        .map_err(does_not_load)?;
+        let vendored = vendor::write(&self.opening.dir, prepared, library).map_err(refused)?;
         if self.run.is_none() {
             self.push_graph(false);
         }
@@ -350,7 +354,7 @@ impl Host {
         if !name.ends_with(".html") {
             return Err(unknown());
         }
-        let path = crate::http::file(&project_ui(&self.dir), name).ok_or_else(unknown)?;
+        let path = crate::http::file(&project_ui(&self.opening.dir), name).ok_or_else(unknown)?;
         let text = std::fs::read_to_string(path).map_err(|_| unknown())?;
         let plan = self
             .plan
@@ -395,7 +399,7 @@ impl Host {
         if !name.ends_with(".html") {
             return Err(unknown());
         }
-        let ui = project_ui(&self.dir);
+        let ui = project_ui(&self.opening.dir);
         // Written only where it resolves inside the project served, never
         // through a link (a linked `ui/` or file is served, not edited).
         let link =
@@ -413,7 +417,7 @@ impl Host {
             ));
         }
         if let Some(path) = crate::http::file(&ui, name) {
-            let project = fs::canonicalize(&self.dir).map_err(|_| unknown())?;
+            let project = fs::canonicalize(&self.opening.dir).map_err(|_| unknown())?;
             return if path.starts_with(&project) {
                 Ok((path, true))
             } else {
@@ -457,7 +461,7 @@ impl Host {
                 ),
             ));
         }
-        let folder = self.dir.join(PATTERNS);
+        let folder = self.opening.dir.join(PATTERNS);
         let path = folder.join(format!("{name}.toml"));
         let link =
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
@@ -557,7 +561,7 @@ impl Host {
         }
         // The project with the new text, loaded and compiled as a reload
         // would: the pattern's own errors and those of the instances naming it.
-        let mut sources = signal_project::read_sources(&self.dir)
+        let mut sources = signal_project::read_sources(&self.opening.dir)
             .map_err(|e| fail("does-not-load", e.to_string()))?;
         sources.retain(|s| s.path != file);
         sources.push(signal_project::SourceFile {
@@ -565,7 +569,7 @@ impl Host {
             text: text.to_owned(),
         });
         let does_not_load = |diagnostics: Vec<Diagnostic>| {
-            let lines: Vec<String> = located(&self.dir, diagnostics)
+            let lines: Vec<String> = located(&self.opening.dir, diagnostics)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
@@ -575,12 +579,12 @@ impl Host {
                 json!({"name": name, "file": file, "diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources_in(sources, &self.dir))
+        self.loads_as_edit(Project::from_sources_in(sources, &self.opening.dir))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
-        let _lock = ProjectLock::acquire(&self.dir)
+        let _lock = ProjectLock::acquire(&self.opening.dir)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current(&path)?;
         if now != before {
@@ -687,7 +691,7 @@ impl Host {
         check_content(html).map_err(|why| fail("bad-html", format!("not written: {why}")))?;
         // The version check and the write under the project's writer lock
         // (ADR 0040), on the file as it is now.
-        let _lock = ProjectLock::acquire(&self.dir)
+        let _lock = ProjectLock::acquire(&self.opening.dir)
             .map_err(|e| fail("write-failed", format!("ui/{name} was not written: {e}")))?;
         let before = match fs::read_to_string(&path) {
             Ok(text) => Some(text),

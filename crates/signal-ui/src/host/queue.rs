@@ -50,6 +50,12 @@ const ORDERED: [&str; 2] = ["project.open", "project.revert"];
 /// opening's edits nor save or switch it away.
 const PROJECT_CHANGES: [&str; 3] = ["project.save", "project.revert", "project.open"];
 
+/// Whether the message `kind` is a mutation, which names the project it
+/// means ([`Opening::admit`](super::opening::Opening::admit)).
+fn mutates(kind: &str) -> bool {
+    WRITES_FILES.contains(&kind) || LIVE_EDITS.contains(&kind) || PROJECT_CHANGES.contains(&kind)
+}
+
 /// What the host does with a message while requests wait for the lock.
 enum Order {
     /// It writes the project's files: run holding the lock, or queued.
@@ -134,7 +140,7 @@ impl Host {
         // project's files runs holding the writer lock, taken without
         // waiting; when another writer holds it (or requests wait already,
         // to keep their order) it waits in the queue, not on this thread.
-        if let Err(failure) = self.same_project(kind, &message) {
+        if let Err(failure) = self.opening.admit(mutates(kind), &message) {
             let error = json!({
                 "type": "error",
                 "id": id,
@@ -162,7 +168,7 @@ impl Host {
         match Host::order_of(kind, &message) {
             Order::Write => {
                 if self.waiting.is_empty() {
-                    match ProjectLock::try_hold(&self.dir) {
+                    match ProjectLock::try_hold(&self.opening.dir) {
                         Ok(Some(holding)) => {
                             self.respond(client, id, kind, &message);
                             drop(holding);
@@ -186,48 +192,6 @@ impl Host {
                 self.wait_for_lock(queue(false));
             }
             _ => self.respond(client, id, kind, &message),
-        }
-    }
-
-    /// A mutation (a file write, a live edit, `project.save`, and the open
-    /// project's `project.revert` or another `project.open`) names the
-    /// project it means, or is taken to mean the open one (ADR 0049): a
-    /// `generation` (the open project's, as `welcome`, `describe`, `graph`
-    /// and `app` give it) must be the open project's generation, else a
-    /// `projectId` (`graph.projectId`) must be its id; either one not
-    /// matching is `project-changed`, and nothing is done. A message
-    /// without either is taken to mean the open project (MCP, the CLI and
-    /// pages that send none).
-    fn same_project(&self, kind: &str, message: &Value) -> Result<(), Failure> {
-        let mutation = WRITES_FILES.contains(&kind)
-            || LIVE_EDITS.contains(&kind)
-            || PROJECT_CHANGES.contains(&kind);
-        if !mutation {
-            return Ok(());
-        }
-        let changed = |what: &str| {
-            Err(fail(
-                "project-changed",
-                format!(
-                    "not done: the request names {what} of a project no longer open (another project, or a new opening of it, is open now)"
-                ),
-            ))
-        };
-        match message.get("generation") {
-            None | Some(Value::Null) => {}
-            Some(given) => {
-                return match given.as_u64() {
-                    Some(g) if g == self.generation => Ok(()),
-                    Some(_) => changed("the generation"),
-                    None => Err(fail("bad-value", "`generation` must be a whole number")),
-                };
-            }
-        }
-        match message.get("projectId") {
-            None | Some(Value::Null) => Ok(()),
-            Some(Value::String(id)) if *id == self.project_id() => Ok(()),
-            Some(Value::String(_)) => changed("the id"),
-            Some(_) => Err(fail("bad-value", "`projectId` must be a string")),
         }
     }
 
@@ -277,9 +241,9 @@ impl Host {
     /// Whether a Save now would have to wait for the writer lock: its
     /// corrections are pending and another writer holds the lock.
     pub(super) fn save_must_wait(&self) -> bool {
-        self.document.is_some()
+        self.opening.document.is_some()
             && !self.pending_corrections().is_empty()
-            && matches!(ProjectLock::try_hold(&self.dir), Ok(None))
+            && matches!(ProjectLock::try_hold(&self.opening.dir), Ok(None))
     }
 
     /// Queues `job` until the project's writer lock is free
@@ -299,7 +263,7 @@ impl Host {
             |w| matches!(&w.job, Job::Message { kind, .. } if ORDERED.contains(&kind.as_str())),
         );
         self.waiting.push_back(Waiting {
-            generation: (named || !behind_an_open).then_some(self.generation),
+            generation: (named || !behind_an_open).then_some(self.opening.generation),
             since: Instant::now(),
             job,
         });
@@ -334,7 +298,10 @@ impl Host {
     /// (another was opened since it was queued) is refused unrun.
     pub(super) fn run_waiting(&mut self) {
         while let Some(front) = self.waiting.front() {
-            if front.generation.is_some_and(|g| g != self.generation) {
+            if front
+                .generation
+                .is_some_and(|g| g != self.opening.generation)
+            {
                 if let Some(stale) = self.waiting.pop_front() {
                     let failure = fail(
                         "project-changed",
@@ -346,7 +313,7 @@ impl Host {
             }
             // A live edit or an open kept in order needs no lock.
             let lock = !matches!(front.job, Job::Message { lock: false, .. });
-            let holding = match lock.then(|| ProjectLock::try_hold(&self.dir)) {
+            let holding = match lock.then(|| ProjectLock::try_hold(&self.opening.dir)) {
                 None => None,
                 Some(Ok(Some(holding))) => Some(holding),
                 Some(Ok(None)) if front.since.elapsed() < self.lock_wait => break,
@@ -367,7 +334,7 @@ impl Host {
                 } => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
                         // The project it names, against the opening now.
-                        match self.same_project(&kind, &message) {
+                        match self.opening.admit(mutates(&kind), &message) {
                             Ok(()) => self.respond(client, id, &kind, &message),
                             Err(failure) => {
                                 let job = Job::Message {
@@ -445,8 +412,8 @@ mod tests {
             plays: false,
         };
         let mut host = Host::new_app(config).unwrap();
-        host.dir = base.join("project");
-        host.generation = 7;
+        host.opening.dir = base.join("project");
+        host.opening.generation = 7;
         host
     }
 
@@ -535,9 +502,9 @@ mod tests {
     #[test]
     fn a_mutation_names_the_open_project() {
         let host = idle_host("same-project");
-        let id = host.project_id();
+        let id = host.opening.project_id();
         for kind in MUTATIONS {
-            let check = |message: Value| code_of(host.same_project(kind, &message));
+            let check = |message: Value| code_of(host.opening.admit(mutates(kind), &message));
             assert_eq!(check(json!({})), "ok", "{kind}");
             assert_eq!(check(json!({"generation": null, "projectId": null})), "ok");
             assert_eq!(check(json!({"generation": 7})), "ok", "{kind}");
@@ -561,14 +528,22 @@ mod tests {
         }
         for kind in ["ping", "describe", "subscribe", "file.read", "app.get", ""] {
             let message = json!({"generation": 8, "projectId": 3});
-            assert_eq!(code_of(host.same_project(kind, &message)), "ok", "{kind}");
+            assert_eq!(
+                code_of(host.opening.admit(mutates(kind), &message)),
+                "ok",
+                "{kind}"
+            );
         }
-        let changed = host.same_project("commit", &json!({"generation": 8}));
+        let changed = host
+            .opening
+            .admit(mutates("commit"), &json!({"generation": 8}));
         assert_eq!(
             changed.err().map(|failure| failure.message),
             Some("not done: the request names the generation of a project no longer open (another project, or a new opening of it, is open now)".to_owned())
         );
-        let changed = host.same_project("commit", &json!({"projectId": "x"}));
+        let changed = host
+            .opening
+            .admit(mutates("commit"), &json!({"projectId": "x"}));
         assert_eq!(
             changed.err().map(|failure| failure.message),
             Some("not done: the request names the id of a project no longer open (another project, or a new opening of it, is open now)".to_owned())

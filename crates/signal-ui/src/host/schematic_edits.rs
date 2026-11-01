@@ -115,11 +115,11 @@ impl Host {
     /// `schematic.reset`: removes the table of `level`, or without one the
     /// whole `ui/schematic.toml`.
     pub(super) fn schematic_reset(&mut self, message: &Value) -> Result<Value, Failure> {
-        let path = self.dir.join(SCHEMATIC_FILE);
+        let path = self.opening.dir.join(SCHEMATIC_FILE);
         match message.get("level") {
             None | Some(Value::Null) => {
                 self.schematic_unlinked()?;
-                let _lock = ProjectLock::acquire(&self.dir)
+                let _lock = ProjectLock::acquire(&self.opening.dir)
                     .map_err(|e| fail("write-failed", format!("{}: {e}", path.display())))?;
                 match fs::remove_file(&path) {
                     Ok(()) => {}
@@ -151,14 +151,14 @@ impl Host {
         edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), Failure> {
         self.schematic_unlinked()?;
-        let path = self.dir.join(SCHEMATIC_FILE);
+        let path = self.opening.dir.join(SCHEMATIC_FILE);
         let failed = |error: String| {
             fail(
                 "write-failed",
                 format!("{} was not written: {error}", path.display()),
             )
         };
-        let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
+        let _lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
         // Edited again if it changes before the rename (ADR 0040).
         transaction::edit_text(&path, |before| edit(before).map(Some)).map_err(failed)?;
         self.counts.2 += 1;
@@ -173,7 +173,7 @@ impl Host {
     pub(super) fn schematic_unlinked(&self) -> Result<(), Failure> {
         let link =
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-        if link(&project_ui(&self.dir)) || link(&self.dir.join(SCHEMATIC_FILE)) {
+        if link(&project_ui(&self.opening.dir)) || link(&self.opening.dir.join(SCHEMATIC_FILE)) {
             return Err(fail(
                 "write-failed",
                 format!(

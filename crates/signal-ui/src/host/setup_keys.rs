@@ -173,7 +173,7 @@ impl Host {
                 "a run that records a session or its audio is not rebound (a recording covers one run from frame 0)",
             ));
         }
-        let dir = self.dir.clone();
+        let dir = self.opening.dir.clone();
         let routed = if route {
             crate::devices::route(message, &mut self.setup, Some(&dir))
         } else {
@@ -213,7 +213,7 @@ impl Host {
             "path": self.setup_path.display().to_string(),
             "setup": self.setup_json(),
             // ADR 0038 §6 (M4.1, additive): this project's devices.local.toml.
-            "local": crate::devices::local_json(&self.dir),
+            "local": crate::devices::local_json(&self.opening.dir),
             "problems": self.setup_problems,
             "playing": self.run.is_some(),
             "run": self.run_json(),

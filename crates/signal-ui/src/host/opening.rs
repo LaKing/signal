@@ -1,5 +1,7 @@
 //! Opening, reopening and reverting the project.
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -10,6 +12,7 @@ use signal_project::live::FolderState;
 use crate::app;
 use crate::document::{Document, project_name};
 use crate::panel::Panel;
+use crate::panel_write::sha256_hex;
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
@@ -29,7 +32,7 @@ pub(super) fn folder_of(path: &Path) -> PathBuf {
 /// Why a project is opened: it only changes what the window says of the
 /// unsaved values let go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Opening {
+enum Why {
     /// Another project (or the same one), opened by `project.open`, the
     /// window's Open…, a drop or Save As.
     Another,
@@ -37,12 +40,92 @@ enum Opening {
     Revert,
 }
 
+/// The open project: its folder, its generation, and what it was opened
+/// from.
+pub(super) struct Opening {
+    /// The project folder.
+    pub(super) dir: PathBuf,
+    /// The open project's generation: a new one each time another project
+    /// (or a new copy of it) is opened, so a request queued for the old one
+    /// is never run on the new one.
+    pub(super) generation: u64,
+    /// The project as given to `signal ui` (its folder or `.signal` file).
+    pub(super) source: PathBuf,
+    /// `signal ui`'s temporary folder of a `.signal` file.
+    pub(super) temporary: Option<TempProject>,
+    /// App mode: where `.signal` files are unpacked.
+    pub(super) open_root: PathBuf,
+    /// App mode: the open `.signal` file and its working folder.
+    pub(super) document: Option<Document>,
+    /// ADR 0046 §8: the SHA-256 of every presentation text a patch of this
+    /// host wrote or replaced (`ui/…`): a client's `panel.restore` of one
+    /// of them (an undo or redo the host made) is taken whole; any other
+    /// text is judged strictly ([`Host::panel_restore_allowed`]).
+    pub(super) restorable: HashSet<String>,
+}
+
+impl Opening {
+    /// A new opening of the folder `dir`: the only place the generation
+    /// changes.
+    pub(super) fn begin(&mut self, dir: &Path) {
+        self.dir = dir.to_owned();
+        self.generation += 1;
+    }
+
+    /// A mutation (a file write, a live edit, `project.save`, and the open
+    /// project's `project.revert` or another `project.open`) names the
+    /// project it means, or is taken to mean the open one (ADR 0049): a
+    /// `generation` (the open project's, as `welcome`, `describe`, `graph`
+    /// and `app` give it) must be the open project's generation, else a
+    /// `projectId` (`graph.projectId`) must be its id; either one not
+    /// matching is `project-changed`, and nothing is done. A message
+    /// without either is taken to mean the open project (MCP, the CLI and
+    /// pages that send none).
+    pub(super) fn admit(&self, mutation: bool, message: &Value) -> Result<(), Failure> {
+        if !mutation {
+            return Ok(());
+        }
+        let changed = |what: &str| {
+            Err(fail(
+                "project-changed",
+                format!(
+                    "not done: the request names {what} of a project no longer open (another project, or a new opening of it, is open now)"
+                ),
+            ))
+        };
+        match message.get("generation") {
+            None | Some(Value::Null) => {}
+            Some(given) => {
+                return match given.as_u64() {
+                    Some(g) if g == self.generation => Ok(()),
+                    Some(_) => changed("the generation"),
+                    None => Err(fail("bad-value", "`generation` must be a whole number")),
+                };
+            }
+        }
+        match message.get("projectId") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(id)) if *id == self.project_id() => Ok(()),
+            Some(Value::String(_)) => changed("the id"),
+            Some(_) => Err(fail("bad-value", "`projectId` must be a string")),
+        }
+    }
+
+    /// `graph.projectId` (M2.9-3): which project folder this is, opaque (the
+    /// SHA-256 of its canonical path; the path itself is not sent), so a
+    /// page's patch history stays with the project it was written in even
+    /// when two have the same folder name and project name.
+    pub(super) fn project_id(&self) -> String {
+        let dir = fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        sha256_hex(dir.as_os_str().as_encoded_bytes())
+    }
+}
+
 impl Host {
     /// App mode: opens the project folder `dir` (stopped) for its rate,
     /// panel and diagnostics, and serves its `ui/`.
     fn open(&mut self, dir: &Path) {
-        self.dir = dir.to_owned();
-        self.generation += 1;
+        self.opening.begin(dir);
         self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
         let state = FolderState::read(dir).ok();
@@ -101,22 +184,17 @@ impl Host {
             }
         };
         let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
-        self.open_with(&path, edits, Opening::Another)
+        self.open_with(&path, edits, Why::Another)
     }
 
     /// App mode: opens the folder (or its `project.toml`) or the `.signal`
     /// file at `path`, as `project.open` does; the error is what to show.
     pub fn open_project(&mut self, path: &Path, edits: Edits) -> Result<(), String> {
-        self.open_project_as(path, edits, Opening::Another)
+        self.open_project_as(path, edits, Why::Another)
     }
 
     /// [`Host::open_project`], saying why it opens (the window's message).
-    fn open_project_as(
-        &mut self,
-        path: &Path,
-        edits: Edits,
-        opening: Opening,
-    ) -> Result<(), String> {
+    fn open_project_as(&mut self, path: &Path, edits: Edits, opening: Why) -> Result<(), String> {
         match self.open_with(path, edits, opening) {
             // As after a `project.open`: every client is told.
             Ok(_) => {
@@ -134,7 +212,7 @@ impl Host {
         }
     }
 
-    fn open_with(&mut self, path: &Path, edits: Edits, opening: Opening) -> Result<Value, Failure> {
+    fn open_with(&mut self, path: &Path, edits: Edits, opening: Why) -> Result<Value, Failure> {
         let opened = self.open_stopped(path, edits, opening)?;
         // ADR 0033: switched on, it plays (a failure is the window's message).
         self.autoplay();
@@ -142,12 +220,7 @@ impl Host {
     }
 
     /// [`Host::open_with`] without playing.
-    fn open_stopped(
-        &mut self,
-        path: &Path,
-        edits: Edits,
-        opening: Opening,
-    ) -> Result<Value, Failure> {
+    fn open_stopped(&mut self, path: &Path, edits: Edits, opening: Why) -> Result<Value, Failure> {
         if self.app.is_none() {
             return Err(app_only());
         }
@@ -156,8 +229,8 @@ impl Host {
         // Writes waiting for the writer lock are edits not made yet (ADR
         // 0048 item 5): asked about as edits, a Save refused until they are
         // written, a Discard lets them go (each answered `project-changed`).
-        let queued = self.document.is_some() && !self.waiting.is_empty();
-        let edited = self.document.as_mut().is_some_and(Document::check) || queued;
+        let queued = self.opening.document.is_some() && !self.waiting.is_empty();
+        let edited = self.opening.document.as_mut().is_some_and(Document::check) || queued;
         if edited && edits == Edits::Ask {
             return Err(fail(
                 "edited",
@@ -172,7 +245,7 @@ impl Host {
         // changes nothing.
         // A folder named `*.signal` is a folder.
         let prepared = if archive::is_project_file(path) && !path.is_dir() {
-            Some(Document::open(path, &self.open_root).map_err(|m| fail("archive", m))?)
+            Some(Document::open(path, &self.opening.open_root).map_err(|m| fail("archive", m))?)
         } else {
             None
         };
@@ -187,7 +260,7 @@ impl Host {
         // the window says so.
         let unsaved = self.unsaved().len();
         self.stop_app();
-        if let Some(previous) = self.document.take() {
+        if let Some(previous) = self.opening.document.take() {
             // Not edited, saved, or let go on request.
             previous.close(true);
         }
@@ -195,7 +268,7 @@ impl Host {
             Some(document) => document.working().to_owned(),
             None => folder_of(path),
         };
-        self.document = prepared;
+        self.opening.document = prepared;
         self.open(&dir);
         self.live.failed.clear();
         app::opened(&mut self.setup, path.to_owned());
@@ -205,16 +278,16 @@ impl Host {
             mode.message = match (&saved, unsaved, opening) {
                 (Err(message), _, _) => Some(message.clone()),
                 (Ok(()), 0, _) => None,
-                (Ok(()), 1, Opening::Another) => {
+                (Ok(()), 1, Why::Another) => {
                     Some("1 unsaved edit of the previous project was not written".to_owned())
                 }
-                (Ok(()), n, Opening::Another) => Some(format!(
+                (Ok(()), n, Why::Another) => Some(format!(
                     "{n} unsaved edits of the previous project were not written"
                 )),
-                (Ok(()), 1, Opening::Revert) => {
+                (Ok(()), 1, Why::Revert) => {
                     Some("1 unsaved edit was discarded by Revert to Saved".to_owned())
                 }
-                (Ok(()), n, Opening::Revert) => Some(format!(
+                (Ok(()), n, Why::Revert) => Some(format!(
                     "{n} unsaved edits were discarded by Revert to Saved"
                 )),
             };
@@ -226,7 +299,7 @@ impl Host {
         Ok(json!({
             "type": "project",
             "dir": dir.display().to_string(),
-            "file": self.document.as_ref().map(|d| d.file().display().to_string()),
+            "file": self.opening.document.as_ref().map(|d| d.file().display().to_string()),
             "loads": diagnostics.is_empty(),
             "diagnostics": diagnostics,
         }))
@@ -240,13 +313,13 @@ impl Host {
     /// removed) and played from frame 0. The error is what to show.
     pub fn revert_project(&mut self) -> Result<(), String> {
         let file = self.revert_file().map_err(|failure| failure.message)?;
-        self.open_project_as(&file, Edits::Discard, Opening::Revert)
+        self.open_project_as(&file, Edits::Discard, Why::Revert)
     }
 
     /// `project.revert`: [`Host::revert_project`] for a client.
     pub(super) fn project_revert(&mut self) -> Result<Value, Failure> {
         let file = self.revert_file()?;
-        self.open_with(&file, Edits::Discard, Opening::Revert)
+        self.open_with(&file, Edits::Discard, Why::Revert)
     }
 
     /// The file Revert to Saved… opens again: the open project's `.signal`
@@ -265,7 +338,7 @@ impl Host {
         if !mode.opened {
             return Err(fail("no-project", "no project is open"));
         }
-        if self.document.is_none() {
+        if self.opening.document.is_none() {
             return Err(fail(
                 "no-file",
                 format!(
@@ -302,9 +375,9 @@ impl Host {
     /// App mode, at start: opens `path`, a folder or a `.signal` file.
     pub(super) fn open_path(&mut self, path: &Path) -> Result<(), String> {
         if archive::is_project_file(path) && !path.is_dir() {
-            let document = Document::open(path, &self.open_root)?;
+            let document = Document::open(path, &self.opening.open_root)?;
             let dir = document.working().to_owned();
-            self.document = Some(document);
+            self.opening.document = Some(document);
             self.open(&dir);
         } else {
             self.open(&folder_of(path));
@@ -316,15 +389,16 @@ impl Host {
     /// The project folder's name, telling a client's drawing of one project
     /// from a `graph.error` of another (`graph`, `graph.error`).
     pub(super) fn folder_name(&self) -> Option<String> {
-        self.dir
+        self.opening
+            .dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
     }
 
     pub(super) fn project_name(&self) -> String {
-        match &self.document {
+        match &self.opening.document {
             Some(document) => document.name(),
-            None => project_name(&self.dir),
+            None => project_name(&self.opening.dir),
         }
     }
 
@@ -334,7 +408,7 @@ impl Host {
     /// and "Revert to Saved?" prompts); `None` without one.
     pub fn project_status(&mut self) -> Option<ProjectStatus> {
         self.finish_saves();
-        if let Some(document) = self.document.as_mut() {
+        if let Some(document) = self.opening.document.as_mut() {
             document.check();
         }
         let unsaved = self.unsaved().len();
@@ -349,10 +423,10 @@ impl Host {
             return None;
         }
         Some(ProjectStatus {
-            dir: self.dir.clone(),
-            file: self.document.as_ref().map(|d| d.file().to_owned()),
+            dir: self.opening.dir.clone(),
+            file: self.opening.document.as_ref().map(|d| d.file().to_owned()),
             name: self.project_name(),
-            edited: self.document.as_ref().is_some_and(Document::edited),
+            edited: self.opening.document.as_ref().is_some_and(Document::edited),
             unsaved: self.unsaved_count(),
         })
     }
@@ -368,9 +442,11 @@ impl Host {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         };
-        let served = same(asked, &self.source)
+        let served = same(asked, &self.opening.source)
             || (asked.file_name().is_some_and(|n| n == PROJECT_FILE)
-                && asked.parent().is_some_and(|p| same(p, &self.source)));
+                && asked
+                    .parent()
+                    .is_some_and(|p| same(p, &self.opening.source)));
         if !served {
             return Err(app_only());
         }
@@ -380,24 +456,23 @@ impl Host {
                 "a run that records a session or its audio is not reopened (a recording covers one run from frame 0)",
             ));
         }
-        let temporary = match &self.temporary {
-            Some(_) => Some(
-                TempProject::unpack(&self.source)
-                    .map_err(|e| fail("archive", format!("{}: {e}", self.source.display())))?,
-            ),
-            None => None,
-        };
+        let temporary =
+            match &self.opening.temporary {
+                Some(_) => Some(TempProject::unpack(&self.opening.source).map_err(|e| {
+                    fail("archive", format!("{}: {e}", self.opening.source.display()))
+                })?),
+                None => None,
+            };
         if let Some(old) = self.run.take() {
             stop(old);
         }
         self.abandon();
         self.live.failed.clear();
         if let Some(temporary) = temporary {
-            self.dir = temporary.dir().to_owned();
-            self.generation += 1;
+            self.opening.begin(temporary.dir());
             // The previous copy is removed once its run is stopped.
-            self.temporary = Some(temporary);
-            self.server.set_project_ui(project_ui(&self.dir));
+            self.opening.temporary = Some(temporary);
+            self.server.set_project_ui(project_ui(&self.opening.dir));
         }
         let built = self.build(true);
         let error = built.as_ref().err().cloned();
@@ -408,8 +483,8 @@ impl Host {
         }
         Ok(json!({
             "type": "project",
-            "dir": self.dir.display().to_string(),
-            "file": self.temporary.as_ref().map(|_| self.source.display().to_string()),
+            "dir": self.opening.dir.display().to_string(),
+            "file": self.opening.temporary.as_ref().map(|_| self.opening.source.display().to_string()),
             "loads": error.is_none(),
             "diagnostics": error.into_iter().collect::<Vec<_>>(),
         }))

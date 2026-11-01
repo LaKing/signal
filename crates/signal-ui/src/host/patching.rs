@@ -73,7 +73,7 @@ impl Host {
                 self.panel_restore_allowed(file, text)?;
             }
         }
-        let sources = signal_project::read_sources(&self.dir)
+        let sources = signal_project::read_sources(&self.opening.dir)
             .map_err(|e| fail("does-not-load", e.to_string()))?;
         // The level's file is one the project read: never a path from the client.
         let file = if level.is_empty() {
@@ -111,7 +111,7 @@ impl Host {
                 json!({"level": level, "file": file, "base": current}),
             ));
         }
-        let positions_path = self.dir.join(SCHEMATIC_FILE);
+        let positions_path = self.opening.dir.join(SCHEMATIC_FILE);
         let positions = match fs::read_to_string(&positions_path) {
             Ok(text) => Some(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -122,7 +122,7 @@ impl Host {
         let loaded = match &self.run {
             Some(run) if run.current.files == sources => Some(&run.current),
             _ => {
-                parsed = Project::from_sources_in(sources.clone(), &self.dir).ok();
+                parsed = Project::from_sources_in(sources.clone(), &self.opening.dir).ok();
                 parsed.as_ref()
             }
         };
@@ -161,7 +161,7 @@ impl Host {
         // ADR 0037: the slot ops' templates, and what a content offers (a
         // Replace keeps the `map` and `set` entries it accepts).
         let templates = signal_project::interface_templates(&sources);
-        let dir = self.dir.clone();
+        let dir = self.opening.dir.clone();
         let content = |load: &str| signal_project::content_names(loaded, &dir, load, registry);
         // ADR 0037, editable insides: a slot's own inside, the patch's other
         // file; ADR 0046: a slot's part and the panels (`ui/…`), read now.
@@ -176,7 +176,7 @@ impl Host {
         };
         let source = |load: &str| signal_project::inside::source(&sources, load, registry);
         // ADR 0046 §8: what the host's panels bind on an instance of the level.
-        let ui_dir = project_ui(&self.dir);
+        let ui_dir = project_ui(&self.opening.dir);
         let level_paths: Vec<String> = if level.is_empty() {
             vec![String::new()]
         } else {
@@ -223,7 +223,7 @@ impl Host {
                 });
             }
         }
-        let new = Project::from_sources_in(edited.clone(), &self.dir);
+        let new = Project::from_sources_in(edited.clone(), &self.opening.dir);
         // The edited project when the current one does not load: a level's
         // edit leaves its exports and the paths of its instances as they were,
         // unless it edits the exports too (ADR 0037, editable insides: an
@@ -265,7 +265,7 @@ impl Host {
         };
         // The edited project, loaded and compiled as a reload would.
         let does_not_load = |diagnostics: Vec<Diagnostic>| {
-            let lines: Vec<String> = located(&self.dir, diagnostics)
+            let lines: Vec<String> = located(&self.opening.dir, diagnostics)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
@@ -338,12 +338,12 @@ impl Host {
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
-        let path = self.dir.join(&file);
+        let path = self.opening.dir.join(&file);
         #[cfg(feature = "test-hooks")]
         if let Some(hook) = self.before_lock.as_mut() {
             hook();
         }
-        let lock = ProjectLock::acquire(&self.dir)
+        let lock = ProjectLock::acquire(&self.opening.dir)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
@@ -380,7 +380,7 @@ impl Host {
         // a new or changed one is written before the level's file (which
         // may name it), a removed one after.
         for change in &patched.files {
-            let now = transaction::current(&self.dir.join(&change.path))
+            let now = transaction::current(&self.opening.dir.join(&change.path))
                 .ok()
                 .flatten();
             if now.as_deref() != change.before.as_deref().map(str::as_bytes) {
@@ -537,7 +537,7 @@ impl Host {
             }
             // What this host wrote and replaced: its undo and redo restore it whole.
             for text in [&change.before, &change.after].into_iter().flatten() {
-                self.restorable.insert(sha256_hex(text.as_bytes()));
+                self.opening.restorable.insert(sha256_hex(text.as_bytes()));
             }
             self.seen(Path::new(&change.path));
             if !name.ends_with(".html") {
@@ -599,7 +599,7 @@ impl Host {
                         .and_then(|p| p.strip_suffix(".toml"));
                     // A removal that was kept: its file as it is now.
                     let base = if kept.contains(&c.path.as_str()) {
-                        fs::read(self.dir.join(&c.path))
+                        fs::read(self.opening.dir.join(&c.path))
                             .ok()
                             .map(|b| sha256_hex(&b))
                     } else {
@@ -630,7 +630,7 @@ impl Host {
     /// (`forward`) or put back, only while it holds the text the other
     /// side names (ADR 0040); `Ok(false)` when it does not.
     fn write_side(&self, change: &patch::FileChange, forward: bool) -> std::io::Result<bool> {
-        let path = self.dir.join(&change.path);
+        let path = self.opening.dir.join(&change.path);
         let (expected, target) = if forward {
             (&change.before, &change.after)
         } else {
@@ -693,7 +693,7 @@ impl Host {
                     .map(move |(old, new)| (format!("{path}/{old}"), format!("{path}/{new}")))
             })
             .collect();
-        let ui = project_ui(&self.dir);
+        let ui = project_ui(&self.opening.dir);
         if fs::symlink_metadata(&ui).is_ok_and(|m| m.file_type().is_symlink()) {
             notes.push(
                 "ui/: its bindings were not rewritten (it is reached through a link)".to_owned(),
@@ -778,14 +778,14 @@ impl Host {
         let mut written = Vec::new();
         for (path, renames) in by_part {
             if self.linked_file(&path) {
-                if self.dir.join(&path).exists() {
+                if self.opening.dir.join(&path).exists() {
                     notes.push(format!(
                         "{path}: its bindings were not rewritten (it is reached through a link)"
                     ));
                 }
                 continue;
             }
-            let full = self.dir.join(&path);
+            let full = self.opening.dir.join(&path);
             let Ok(text) = fs::read_to_string(&full) else {
                 continue;
             };
@@ -832,7 +832,7 @@ impl Host {
         follow: &[(String, Option<String>)],
         notes: &mut Vec<String>,
     ) -> bool {
-        if follow.is_empty() || !self.dir.join(SNAPSHOTS_FILE).exists() {
+        if follow.is_empty() || !self.opening.dir.join(SNAPSHOTS_FILE).exists() {
             return false;
         }
         let apply = |values: &mut snapshots::Values| {
@@ -848,7 +848,7 @@ impl Host {
             moved
         };
         let edited = snapshots::edit_locked(
-            &self.dir,
+            &self.opening.dir,
             lock,
             |_| Ok(()),
             |all| {
@@ -886,12 +886,12 @@ impl Host {
     pub(super) fn linked_file(&self, file: &str) -> bool {
         let link =
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-        link(&self.dir.join(file))
-            || (file.starts_with("composites/") && link(&self.dir.join("composites")))
-            || (file.starts_with("interfaces/") && link(&self.dir.join("interfaces")))
-            || (file.starts_with("ui/") && link(&project_ui(&self.dir)))
-            || (file.starts_with("ui/parts/") && link(&self.dir.join("ui/parts")))
-            || (file.starts_with("ui/") && !crate::own_file(&self.dir, file))
+        link(&self.opening.dir.join(file))
+            || (file.starts_with("composites/") && link(&self.opening.dir.join("composites")))
+            || (file.starts_with("interfaces/") && link(&self.opening.dir.join("interfaces")))
+            || (file.starts_with("ui/") && link(&project_ui(&self.opening.dir)))
+            || (file.starts_with("ui/parts/") && link(&self.opening.dir.join("ui/parts")))
+            || (file.starts_with("ui/") && !crate::own_file(&self.opening.dir, file))
     }
 
     /// ADR 0046: a presentation file of the project (`ui/main.html`,
@@ -901,7 +901,7 @@ impl Host {
         if self.linked_file(file) {
             return None;
         }
-        crate::read_own_file(&self.dir, file).ok().flatten()
+        crate::read_own_file(&self.opening.dir, file).ok().flatten()
     }
 
     /// ADR 0046 §7–8: the panels' side of a patch, added to `patched` as
@@ -1138,7 +1138,11 @@ impl Host {
     fn panel_restore_allowed(&self, file: &str, text: &str) -> Result<(), Failure> {
         let refused = |why: String| fail("bad-value", format!("panel.restore of ui/{file}: {why}"));
         // What this host itself wrote or replaced (an undo, a redo): whole.
-        if self.restorable.contains(&sha256_hex(text.as_bytes())) {
+        if self
+            .opening
+            .restorable
+            .contains(&sha256_hex(text.as_bytes()))
+        {
             return Ok(());
         }
         if file == "windows.toml" {

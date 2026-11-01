@@ -414,7 +414,7 @@ impl Host {
     /// Plays the folder's project: with the first run's options, or with
     /// the Setup's (as the dialog's Apply plays again).
     pub(super) fn build(&self, first: bool) -> Result<(Run, Vec<String>), String> {
-        let dir = &self.dir;
+        let dir = &self.opening.dir;
         // Read before the load: a later edit makes it differ from the file.
         let file = fs::read_to_string(dir.join(signal_project::PROJECT_FILE)).ok();
         let project = Project::load(dir).map_err(|error| match error {

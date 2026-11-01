@@ -68,6 +68,7 @@ use audition::Auditions;
 use clients::{Client, Clients};
 use failure::fail;
 use live::LiveState;
+use opening::Opening;
 use project_io::SaveWait;
 use queue::Waiting;
 use run::{Muted, Run};
@@ -204,7 +205,6 @@ pub struct Finished {
 /// The protocol's host.
 pub struct Host {
     registry: Registry,
-    dir: PathBuf,
     setup_path: PathBuf,
     setup: Setup,
     setup_problems: Vec<String>,
@@ -241,14 +241,9 @@ pub struct Host {
     messages: Vec<String>,
     /// Signal.app's state, in app mode.
     app: Option<AppMode>,
-    /// The project as given to `signal ui` (its folder or `.signal` file).
-    source: PathBuf,
-    /// `signal ui`'s temporary folder of a `.signal` file.
-    temporary: Option<TempProject>,
-    /// App mode: where `.signal` files are unpacked.
-    open_root: PathBuf,
-    /// App mode: the open `.signal` file and its working folder.
-    document: Option<Document>,
+    /// The open project: its folder, generation, `.signal` file or
+    /// temporary folder, and the presentation texts it may restore.
+    opening: Opening,
     /// App mode: the document's saves not yet answered, in the order asked.
     saves: Vec<SaveWait>,
     /// Live notes each client holds (`note`, ADR 0039), and the note-offs
@@ -288,18 +283,9 @@ pub struct Host {
     keys_stamp: Option<(SystemTime, u64)>,
     keys_polled: Instant,
     keys_version: u64,
-    /// ADR 0046 §8: the SHA-256 of every presentation text a patch of this
-    /// host wrote or replaced (`ui/…`): a client's `panel.restore` of one
-    /// of them (an undo or redo the host made) is taken whole; any other
-    /// text is judged strictly ([`Host::panel_restore_allowed`]).
-    restorable: std::collections::HashSet<String>,
     /// ADR 0048: the file requests waiting for
     /// another writer to release the project's lock, in order.
     waiting: VecDeque<Waiting>,
-    /// The open project's generation: a new one each time another project
-    /// (or a new copy of it) is opened, so a request queued for the old one
-    /// is never run on the new one.
-    generation: u64,
     /// How long a request waits for the lock before it fails.
     lock_wait: Duration,
 }
@@ -422,7 +408,7 @@ impl Host {
             ..AppMode::default()
         };
         let mut host = Host::blank(config, server, Some(mode));
-        host.open_root = open_root;
+        host.opening.open_root = open_root;
         if let Some(path) = app::initial_project(project, &host.setup) {
             // A refused .signal opens nothing; the window says why.
             if let Err(message) = host.open_path(&path) {
@@ -453,7 +439,6 @@ impl Host {
         let keys = Keys::load(&keys_file);
         let mut host = Host {
             registry: config.registry,
-            dir: config.dir,
             setup_path: config.setup_path,
             setup,
             setup_problems,
@@ -484,10 +469,19 @@ impl Host {
             writes: 0,
             messages: Vec::new(),
             app,
-            source: config.source,
-            temporary: config.temporary,
-            open_root: PathBuf::new(),
-            document: None,
+            opening: Opening {
+                dir: config.dir,
+                // Unique across runs of the app (a page reconnecting to a new
+                // run never matches an old opening); no semantics depend on it.
+                generation: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(1, |d| u64::try_from(d.as_millis()).unwrap_or(1)),
+                source: config.source,
+                temporary: config.temporary,
+                open_root: PathBuf::new(),
+                document: None,
+                restorable: std::collections::HashSet::new(),
+            },
             saves: Vec::new(),
             auditions: Auditions::default(),
             unsaved_pushed: None,
@@ -503,13 +497,7 @@ impl Host {
             keys_stamp,
             keys_polled: Instant::now(),
             keys_version: 0,
-            restorable: std::collections::HashSet::new(),
             waiting: VecDeque::new(),
-            // Unique across runs of the app (a page reconnecting to a new
-            // run never matches an old opening); no semantics depend on it.
-            generation: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_or(1, |d| u64::try_from(d.as_millis()).unwrap_or(1)),
             lock_wait: transaction::LOCK_WAIT,
         };
         for problem in host.keys.report() {
@@ -551,7 +539,7 @@ impl Host {
     pub fn close(&mut self, window: Option<Window>, discard: bool) -> Vec<String> {
         self.stop_app();
         self.finish_saves();
-        if let Some(document) = self.document.take() {
+        if let Some(document) = self.opening.document.take() {
             let name = document.name();
             if let Some(kept) = document.close(discard) {
                 self.messages.push(format!(
@@ -666,7 +654,7 @@ impl Host {
     /// Test hooks: the open `.signal` project, for one.
     #[cfg(feature = "test-hooks")]
     pub fn document(&self) -> Option<&Document> {
-        self.document.as_ref()
+        self.opening.document.as_ref()
     }
 
     /// Stops the run; the Runner is dropped here.
@@ -792,7 +780,7 @@ impl Host {
                     "sampleRate": self.rate,
                     "frame": self.run.as_ref().map(|r| r.controller.status().next_frame.0),
                     "planVersion": self.run.as_ref().map(|r| r.version),
-                    "generation": self.generation,
+                    "generation": self.opening.generation,
                 });
                 // Before the client can subscribe: one that connects while
                 // the app is off streams nothing (M2.8-11).

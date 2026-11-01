@@ -71,7 +71,7 @@ impl Host {
         run.retry = false;
         self.reloads += 1;
         // Read before the reload: a later edit makes it differ from the file.
-        let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
+        let file = fs::read_to_string(self.opening.dir.join(signal_project::PROJECT_FILE)).ok();
         run.file = None;
         let mut observed = Observed {
             values: &mut self.live.values,
@@ -83,7 +83,7 @@ impl Host {
             &mut run.live,
             &mut observed,
             &mut run.current,
-            &self.dir,
+            &self.opening.dir,
             &self.registry,
         );
         // This run's, taken now: a later run must never show them.
@@ -208,7 +208,7 @@ impl Host {
             return;
         }
         let Some((watcher, polled)) = self.idle_watch.as_mut() else {
-            self.idle_watch = ProjectWatcher::new(&self.dir)
+            self.idle_watch = ProjectWatcher::new(&self.opening.dir)
                 .ok()
                 .map(|w| (w, Instant::now()));
             return;

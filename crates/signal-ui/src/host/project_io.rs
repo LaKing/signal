@@ -52,7 +52,7 @@ impl Host {
     pub fn write_windows_then(&mut self, dir: &Path, edit: WindowsEdit, done: SaveDone) {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         if self.waiting.is_empty() {
-            match ProjectLock::try_hold(&self.dir) {
+            match ProjectLock::try_hold(&self.opening.dir) {
                 Ok(Some(holding)) => {
                     done(self.write_windows_now(dir, edit));
                     drop(holding);
@@ -76,24 +76,24 @@ impl Host {
         edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), String> {
         let file = Path::new(crate::WINDOWS_FILE);
-        if self.dir != dir || self.app.as_ref().is_some_and(|m| !m.opened) {
+        if self.opening.dir != dir || self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(format!(
                 "{} was not written: {} is not the open project",
                 file.display(),
                 dir.display()
             ));
         }
-        let path = self.dir.join(file);
+        let path = self.opening.dir.join(file);
         let link =
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-        if link(&project_ui(&self.dir)) || link(&path) {
+        if link(&project_ui(&self.opening.dir)) || link(&path) {
             return Err(format!(
                 "{} was not written: it is reached through a link, and the layout is written only into the project's own files",
                 file.display()
             ));
         }
         let failed = |error: String| format!("{} was not written: {error}", path.display());
-        let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
+        let _lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
         // Edited again if it changes before the rename (ADR 0040).
         let written = transaction::edit_text(&path, |before| {
             edit(before).map(|after| (after != before).then_some(after))
@@ -113,7 +113,7 @@ impl Host {
     /// Save made now would leave out writes asked before it, and an Open
     /// after it would then refuse them as another project's.
     pub fn save_document(&mut self) -> Result<(), String> {
-        if self.document.is_some() && !self.waiting.is_empty() {
+        if self.opening.document.is_some() && !self.waiting.is_empty() {
             self.answer_saves();
             return Err(format!(
                 "not saved: {} request(s) wait for another writer to release the project's lock; try again once they are written",
@@ -124,7 +124,7 @@ impl Host {
             self.answer_saves();
             return Err(error);
         }
-        let result = match self.document.as_mut() {
+        let result = match self.opening.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
         };
@@ -156,7 +156,7 @@ impl Host {
         if let Err(error) = self.correct_before_save() {
             return done(Err(error));
         }
-        match self.document.as_mut() {
+        match self.opening.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save();
                 self.saves.push(SaveWait {
@@ -172,7 +172,7 @@ impl Host {
     /// Whether a save of the document is running or waiting to start (the
     /// control loop then steps rather than sleeping in a wait).
     pub fn saving(&self) -> bool {
-        self.document.as_ref().is_some_and(Document::saving)
+        self.opening.document.as_ref().is_some_and(Document::saving)
     }
 
     /// Save As (app mode), waiting for it: the project written to the
@@ -218,7 +218,7 @@ impl Host {
         if let Err(error) = self.correct_before_save() {
             return done(Err(error));
         }
-        match self.document.as_mut() {
+        match self.opening.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save_as(file);
                 self.saves.push(SaveWait {
@@ -228,7 +228,7 @@ impl Host {
                 });
             }
             None => {
-                let saved = archive::pack(&self.dir)
+                let saved = archive::pack(&self.opening.dir)
                     .and_then(|bytes| archive::write_atomic(file, &bytes))
                     .map_err(|e| format!("{} was not saved: {e}", file.display()));
                 done(saved.and_then(|()| self.open_project(file, Edits::Discard)));
@@ -238,7 +238,7 @@ impl Host {
 
     /// Waits for the document's saves to finish, and answers them.
     pub(super) fn finish_saves(&mut self) {
-        if let Some(document) = self.document.as_mut() {
+        if let Some(document) = self.opening.document.as_mut() {
             document.finish_saves();
         }
         self.answer_saves();
@@ -249,7 +249,7 @@ impl Host {
     /// answered `saved` (or `not-saved`) and is the window's message, as an
     /// app message's outcome is.
     pub(super) fn answer_saves(&mut self) {
-        let Some(document) = self.document.as_mut() else {
+        let Some(document) = self.opening.document.as_mut() else {
             return;
         };
         let finished = document.take_saved();
@@ -316,13 +316,13 @@ impl Host {
         if self.app.is_none() {
             return Err(app_only());
         }
-        if self.document.is_none() {
+        if self.opening.document.is_none() {
             self.noted(Ok::<(), Failure>(()))?;
             return Ok(Some(json!({"type": "saved", "file": null})));
         }
         self.correct_before_save()
             .map_err(|error| fail("not-saved", error))?;
-        let Some(document) = self.document.as_mut() else {
+        let Some(document) = self.opening.document.as_mut() else {
             return Ok(Some(json!({"type": "saved", "file": null})));
         };
         let ticket = document.start_save();

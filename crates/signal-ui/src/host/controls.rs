@@ -78,14 +78,14 @@ impl Host {
     /// whenever the panel is rebuilt (opened, played, reloaded, written).
     pub(super) fn refresh_warnings(&mut self) {
         let mut warnings: Vec<String> =
-            signal_project::located(&self.dir, self.panel.corrected_warnings().to_vec())
+            signal_project::located(&self.opening.dir, self.panel.corrected_warnings().to_vec())
                 .iter()
                 .map(ToString::to_string)
                 .collect();
         let count = self.panel.corrections().len();
         if count > 0 {
             let values = if count == 1 { "value" } else { "values" };
-            warnings.push(match self.document {
+            warnings.push(match self.opening.document {
                 Some(_) => format!("{count} {values} will be written corrected on the next Save"),
                 None => format!(
                     "{count} {values} will be written corrected when each is next written (a commit or a restore)"
@@ -110,11 +110,11 @@ impl Host {
     /// written first, and a Save without them would lose them (ADR 0048).
     /// The queued Saves come here holding the lock; it never waits.
     pub(super) fn correct_before_save(&mut self) -> Result<(), String> {
-        if self.document.is_none() {
+        if self.opening.document.is_none() {
             return Ok(());
         }
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        let holding = match ProjectLock::try_hold(&self.dir) {
+        let holding = match ProjectLock::try_hold(&self.opening.dir) {
             Ok(Some(holding)) => Some(holding),
             Ok(None) if !self.pending_corrections().is_empty() => {
                 return Err(
@@ -183,7 +183,7 @@ impl Host {
                 )
             })
             .collect();
-        let chosen = write_project_chosen(&self.dir, &texts, &|text, i| {
+        let chosen = write_project_chosen(&self.opening.dir, &texts, &|text, i| {
             pending.get(i).is_some_and(|(e, from)| {
                 signal_project::read_parameter(text, &e.instance, &e.parameter)
                     .is_some_and(|v| v.to_bits() == from.to_bits())
@@ -417,7 +417,7 @@ impl Host {
                 )
             })
             .collect();
-        let (before, after) = match write_project_all(&self.dir, &texts) {
+        let (before, after) = match write_project_all(&self.opening.dir, &texts) {
             Ok(texts) => texts,
             Err(error) => {
                 self.controls_unwritten(edits, &sent, &error.to_string());
@@ -542,7 +542,7 @@ impl Host {
             })
             .collect();
         let current = self.run.as_mut().map(|r| &mut r.current);
-        match after_write_all(current, &self.dir, &written, &self.registry) {
+        match after_write_all(current, &self.opening.dir, &written, &self.registry) {
             // The plan too, which `describe` reads the instances' (and so a
             // composite's inner parameters') bases from.
             Written::Taken(panel) => {
@@ -584,7 +584,7 @@ impl Host {
         // between the write and the stamp; a later one differs from it).
         if held
             && let Some(stamp) = stamp
-            && fs::read_to_string(self.dir.join(file)).is_ok_and(|text| text == after)
+            && fs::read_to_string(self.opening.dir.join(file)).is_ok_and(|text| text == after)
             && let Some(run) = self.run.as_mut()
         {
             run.file = Some(after);

@@ -158,7 +158,7 @@ impl Host {
         let mut describe = json!({
             "type": "describe",
             "planVersion": self.run.as_ref().map(|r| r.version),
-            "generation": self.generation,
+            "generation": self.opening.generation,
             "sampleRate": self.rate,
             "project": self.run.as_ref().map(|r| r.current.name.clone()),
             "playing": self.run.is_some(),
@@ -207,7 +207,7 @@ impl Host {
         let structure = project.structure(plan, &self.registry);
         let modules = project.modules(&self.registry);
         self.graph_stopped = Some((
-            self.dir.clone(),
+            self.opening.dir.clone(),
             state,
             project.name.clone(),
             structure,
@@ -239,13 +239,12 @@ impl Host {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
         }
-        let state = FolderState::read(&self.dir).ok();
-        let cached = self
-            .graph_stopped
-            .as_ref()
-            .is_some_and(|(dir, seen, ..)| *dir == self.dir && seen.is_some() && *seen == state);
+        let state = FolderState::read(&self.opening.dir).ok();
+        let cached = self.graph_stopped.as_ref().is_some_and(|(dir, seen, ..)| {
+            *dir == self.opening.dir && seen.is_some() && *seen == state
+        });
         if !cached {
-            let dir = self.dir.clone();
+            let dir = self.opening.dir.clone();
             let (project, plan, _) = self
                 .load(&dir)
                 .map_err(|diagnostics| fail("does-not-load", diagnostics.join("\n")))?;
@@ -275,7 +274,7 @@ impl Host {
                 structure.get("insides").cloned(),
             )
         };
-        let (positions, error) = match fs::read_to_string(self.dir.join(SCHEMATIC_FILE)) {
+        let (positions, error) = match fs::read_to_string(self.opening.dir.join(SCHEMATIC_FILE)) {
             Ok(text) => match schematic::read_positions(&text) {
                 Ok(positions) => (positions, None),
                 Err(error) => (Default::default(), Some(error)),
@@ -302,8 +301,8 @@ impl Host {
             "type": "graph",
             "project": name,
             "folder": self.folder_name(),
-            "projectId": self.project_id(),
-            "generation": self.generation,
+            "projectId": self.opening.project_id(),
+            "generation": self.opening.generation,
             "planVersion": self.run.as_ref().map(|r| r.version),
             "top": top,
             "composites": composites,
@@ -419,7 +418,7 @@ impl Host {
                 })
             })
             .collect();
-        let sources = signal_project::read_sources(&self.dir).unwrap_or_default();
+        let sources = signal_project::read_sources(&self.opening.dir).unwrap_or_default();
         for (name, interface) in signal_project::interface_templates(&sources) {
             let base = sources
                 .iter()
@@ -436,21 +435,12 @@ impl Host {
         Value::Array(list)
     }
 
-    /// `graph.projectId` (M2.9-3): which project folder this is, opaque (the
-    /// SHA-256 of its canonical path; the path itself is not sent), so a
-    /// page's patch history stays with the project it was written in even
-    /// when two have the same folder name and project name.
-    pub(super) fn project_id(&self) -> String {
-        let dir = fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
-        sha256_hex(dir.as_os_str().as_encoded_bytes())
-    }
-
     /// `graph.files` (M2.9-3): the SHA-256 of `project.toml` (`""`) and of
     /// each `composites/<name>.toml` (by name) as they are now, the bases a
     /// `patch` names.
     fn files_json(&self) -> Value {
         let mut files = serde_json::Map::new();
-        let sources = signal_project::read_sources(&self.dir).unwrap_or_default();
+        let sources = signal_project::read_sources(&self.opening.dir).unwrap_or_default();
         // A pattern's base is `pattern.read`'s, not a patch's.
         let patterns = format!("{PATTERNS}/");
         for source in sources.iter().filter(|s| !s.path.starts_with(&patterns)) {
@@ -565,7 +555,9 @@ impl Host {
             .iter()
             .flat_map(|path| names.iter().map(move |name| format!("{path}/{name}")))
             .collect();
-        for (file, line, address) in crate::bindings::references(&self.dir.join("ui"), &prefixes) {
+        for (file, line, address) in
+            crate::bindings::references(&self.opening.dir.join("ui"), &prefixes)
+        {
             found.push(json!({"file": format!("ui/{file}"), "line": line, "text": address}));
         }
         found
