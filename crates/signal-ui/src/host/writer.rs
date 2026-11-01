@@ -2,7 +2,10 @@
 //! writes the project's files is given to write them with. A writer takes
 //! the project's writer lock only through its [`WriteCtx`]: this is the
 //! one module of the host that calls `ProjectLock::acquire` and
-//! `ProjectLock::try_hold` (`crates/signal-ui/clippy.toml`).
+//! `ProjectLock::try_hold` itself (`crates/signal-ui/clippy.toml`). The
+//! library writers the host calls (`signal_project`'s snapshot edits and
+//! `vendor::write`) still take the lock inside; the gate sees only direct
+//! calls.
 #![allow(clippy::disallowed_methods)]
 
 use std::io;
@@ -23,7 +26,8 @@ pub(super) struct WriteCtx {
 impl WriteCtx {
     /// The project's writer lock, for one change (ADR 0040): taken at once
     /// when this thread holds it already (a request run holding it), else
-    /// waited for as [`ProjectLock::acquire`] does.
+    /// waited for as [`ProjectLock::acquire`] does (inside a
+    /// [`NoWait`](signal_project::transaction::NoWait), not waited for).
     pub(super) fn lock(&self) -> io::Result<ProjectLock> {
         ProjectLock::acquire(&self.dir)
     }

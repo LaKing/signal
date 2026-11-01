@@ -186,11 +186,13 @@ impl LockQueue {
     }
 }
 
-/// A request to the host, from any of its four entry paths: a client's
-/// message ([`Host::handle`]), the window layout's write
-/// ([`Host::write_windows_then`]), and the window's Save and Save As
-/// ([`Host::save_document_then`], [`Host::save_as_then`]). Each goes
-/// through [`Host::submit`]: run at once, or queued behind the writer lock.
+/// A request to the host, from any of its entry paths: a client's message
+/// ([`Host::handle`]), the window layout's write
+/// ([`Host::write_windows_then`]), and the window's Saves and Save As
+/// ([`Host::save_document`], [`Host::save_document_then`],
+/// [`Host::save_as_then`]). Each goes through [`Host::submit`]: run at
+/// once, queued behind the writer lock, or (a Save that refuses to wait)
+/// refused.
 pub(super) enum Request {
     /// A client's message, parsed.
     Message {
