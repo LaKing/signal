@@ -18,7 +18,16 @@
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
+mod app_mode;
+mod controls;
 mod failure;
+mod graph;
+mod opening;
+mod patching;
+mod run;
+mod setup_keys;
+mod snapshotting;
+mod subs;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -38,8 +47,8 @@ use signal_core::{
     Curve, Direction as PortDirection, EventPayload, Frame, PortAddress, PortShape, Registry,
 };
 use signal_engine::{
-    CommandId, ControlSink, FaultReason, HangLine, LogLine, Outcome, ParameterValue, Provenance,
-    RealtimeConfig, Report, RtOptions, RtPolicy, RunnerStatus, SentCommand, Stamp,
+    CommandId, Outcome, ParameterValue, Provenance, RealtimeConfig, Report, RtOptions, RtPolicy,
+    RunnerStatus, Stamp,
 };
 use signal_graph::ExecutionPlan;
 use signal_output::{
@@ -79,7 +88,18 @@ use crate::setup::{
 use crate::snapshot;
 use signal_project::snapshot::{self as snapshots, SNAPSHOTS_FILE, SnapshotError};
 
+use app_mode::{app_only, power_json, powered_off};
+use controls::{ControlWrite, ControlsWritten, bits, control_of, plan_base};
 use failure::{Failure, fail, fail_with};
+use graph::level_of;
+use opening::folder_of;
+use patching::unrestored;
+use run::{Muted, Observed, module_at, muted_message, ready_at, stop, take_muted};
+use setup_keys::{buffer_of, device_name};
+use snapshotting::{
+    BaseCheck, base_check, snapshot_failure, snapshot_list_json, snapshot_name, transition_of,
+};
+use subs::{rate_interval, rate_of, scope_decimation, vector_decimation, vector_shape};
 
 /// ADR 0037 §7: how many project folders `slot.projects` lists of each
 /// place (the project's subfolders, its siblings).
@@ -204,8 +224,6 @@ const NOTE_VELOCITY: f64 = 0.8;
 const KEYS_POLL: Duration = Duration::from_millis(250);
 /// How often the status line is pushed while playing (app mode).
 const STATUS_EVERY: Duration = Duration::from_millis(250);
-/// The fastest parameter and meter streams.
-const MAX_RATE_HZ: f64 = 60.0;
 /// How often the output is looked at again while a run stopped by the
 /// device waits for it (app mode, `plays`): the device list is read again.
 const DEVICE_POLL: Duration = Duration::from_secs(1);
@@ -577,163 +595,6 @@ impl Aim {
     }
 }
 
-/// The values, reports and mutes of one poll, beside the session recorder.
-struct Observed<'a> {
-    values: &'a mut BTreeMap<PortAddress, ParameterValue>,
-    reports: &'a mut Vec<Report>,
-    muted: &'a mut Vec<Muted>,
-}
-
-/// An instance the fault guard muted (`docs/semantics.md` §7, §14): it is
-/// never called again in this run, so its outputs stay 0 whatever its
-/// parameters are set to.
-#[derive(Clone, Debug, PartialEq)]
-struct Muted {
-    frame: Frame,
-    address: String,
-    reason: FaultReason,
-    /// The instance's module type when it was muted (from the plan then):
-    /// a swap that removes the instance or gives the address another type
-    /// brings a new, unfaulted one (`semantics.md` §14), and the entry goes.
-    module: Option<String>,
-}
-
-/// How many other muted instances the note names before "and N more".
-const MUTED_LISTED: usize = 8;
-
-impl Muted {
-    /// What the operator is told: which instance, why, and how it comes back.
-    fn message(&self) -> String {
-        let (why, back) = match self.reason {
-            FaultReason::NonFinite => (
-                "an output or event value that is not finite",
-                "with its values back in range, play the project again",
-            ),
-            FaultReason::Magnitude => (
-                "an output or event value beyond ±10⁶",
-                "with its values back in range, play the project again",
-            ),
-            FaultReason::EventOverflow => (
-                "more than 16 events on an output in one frame",
-                "with fewer events reaching it, play the project again",
-            ),
-            FaultReason::Panic => (
-                "its call panicked",
-                "its module broke the module contract; play the project again",
-            ),
-            FaultReason::LateResult => ("a late result", "play the project again"),
-        };
-        format!(
-            "{} was muted at frame {} ({why}): it stays silent for the rest of this run, \
-             whatever its parameters are set to; {back} (Project ▸ Restart from Files, or the \
-             power off and on) to hear it",
-            self.address, self.frame.0
-        )
-    }
-}
-
-/// Signal.app's note for the instances muted in a run: the first one's
-/// message, the addresses of up to [`MUTED_LISTED`] others and how many
-/// more, and, when the run dropped log records, that the list may be short
-/// (a fault record may be among them). `None` when there is nothing to say.
-fn muted_message(muted: &[Muted], log_lost: bool) -> Option<String> {
-    const LOST: &str =
-        "log records were dropped, so an instance the fault guard muted may be missing here";
-    let Some((first, rest)) = muted.split_first() else {
-        return log_lost.then(|| format!("Some {LOST}"));
-    };
-    let mut text = first.message();
-    if !rest.is_empty() {
-        let named: Vec<&str> = rest
-            .iter()
-            .take(MUTED_LISTED)
-            .map(|m| m.address.as_str())
-            .collect();
-        let more = rest.len().saturating_sub(MUTED_LISTED);
-        let tail = if more > 0 {
-            format!(" and {more} more")
-        } else {
-            String::new()
-        };
-        text = format!("{text} (also muted: {}{tail})", named.join(", "));
-    }
-    if log_lost {
-        text = format!("{text}; some {LOST}");
-    }
-    Some(text)
-}
-
-/// Takes the mutes `pending` (from a poll, or a reload's poll) into `run`,
-/// each said once in `messages`, with the instance's module type from
-/// `plan`; the note is made again when anything was taken.
-fn take_muted(
-    pending: &mut Vec<Muted>,
-    run: &mut Run,
-    plan: Option<&ExecutionPlan>,
-    messages: &mut Vec<String>,
-) {
-    if pending.is_empty() {
-        return;
-    }
-    for mut muted in pending.drain(..) {
-        muted.module = plan.and_then(|plan| module_at(plan, &muted.address));
-        messages.push(muted.message());
-        run.muted.push(muted);
-    }
-    run.muted_note = muted_message(&run.muted, run.log_lost);
-}
-
-/// The module type of the instance at `address` in `plan`.
-fn module_at(plan: &ExecutionPlan, address: &str) -> Option<String> {
-    plan.instances
-        .iter()
-        .find(|i| i.address.as_str() == address)
-        .map(|i| i.descriptor.type_name.to_owned())
-}
-
-impl ControlSink for Observed<'_> {
-    fn report(&mut self, report: &Report, _command: &SentCommand) {
-        self.reports.push(*report);
-    }
-    /// A fault that mutes its instance for the run: every reason but
-    /// `late_result`, which only silences one block of its own (§7).
-    fn log(&mut self, line: LogLine<'_>) {
-        if let LogLine::Fault {
-            frame,
-            address,
-            reason,
-            ..
-        } = line
-            && reason != FaultReason::LateResult
-        {
-            self.muted.push(Muted {
-                frame,
-                address: address.to_string(),
-                reason,
-                module: None,
-            });
-        }
-    }
-    fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
-        match self.values.get_mut(port) {
-            Some(known) => *known = value,
-            None => {
-                self.values.insert(port.clone(), value);
-            }
-        }
-    }
-    /// A hung callback (M2.7-9): a diagnosis on stderr, not recorded.
-    fn hang(&mut self, line: HangLine<'_>) {
-        let running: Vec<String> = line.running.iter().map(ToString::to_string).collect();
-        eprintln!(
-            "signal: hang: callback {} has not returned after {:.1} ms; still running: {}",
-            line.callback,
-            line.waited.as_secs_f64() * 1e3,
-            running.join(", ")
-        );
-    }
-}
-
 /// What a finished save of the document is told to: Signal.app's window
 /// (its answer), or the client that sent `project.save` (`saved`, or
 /// `not-saved`, with its message's id).
@@ -894,59 +755,10 @@ fn with(mut object: Value, key: &str, value: Value) -> Value {
     object
 }
 
-/// The top-level instance and parameter of a control address `/<instance>.<parameter>`.
-fn control_of(port: &PortAddress) -> Option<(String, String)> {
-    let instance = port.instance();
-    let name = instance.as_str().strip_prefix('/')?;
-    (!name.contains('/')).then(|| (name.to_owned(), port.port().to_owned()))
-}
-
 /// `value` in `[min, max]`; never panics, whatever the range (`f64::clamp`
 /// does when `min > max`).
-/// The base of plan parameter `port` as the plan was built (its files'
-/// value, or its default).
-fn plan_base(plan: Option<&ExecutionPlan>, port: &PortAddress) -> Option<f64> {
-    let instance = plan?
-        .instances
-        .iter()
-        .find(|i| i.address == port.instance())?;
-    let descriptor = instance
-        .descriptor
-        .parameters
-        .iter()
-        .find(|p| p.name == port.port())?;
-    Some(
-        instance
-            .parameters
-            .get(descriptor.name)
-            .copied()
-            .unwrap_or(descriptor.default),
-    )
-}
-
-/// A file value as compared: its bits, and whether the file sets it.
-fn bits(base: Option<(f64, bool)>) -> Option<(u64, bool)> {
-    base.map(|(value, in_file)| (value.to_bits(), in_file))
-}
-
 fn within(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
-}
-
-/// Controls written as one change ([`Host::write_controls`]).
-struct ControlWrite {
-    address: String,
-    instance: String,
-    parameter: String,
-    target: Target,
-    value: Option<f64>,
-}
-
-/// What [`Host::write_controls`] did: whether each value's live send was
-/// taken, and a note on the running project.
-struct ControlsWritten {
-    sent: Vec<bool>,
-    note: Option<String>,
 }
 
 /// Diagnostics as lines, for a message.
@@ -956,137 +768,6 @@ fn lines(diagnostics: &[Diagnostic]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// The `snapshots` message of `all` read from `text` (ADR 0041): the base,
-/// the snapshots in the person's order (§9), the undo snapshot apart (§7).
-fn snapshot_list_json(all: &snapshots::Snapshots, text: Option<&str>) -> Value {
-    let list: Vec<Value> = all
-        .names()
-        .iter()
-        .filter_map(|name| {
-            let values = all.snapshots.get(name)?;
-            Some(json!({"name": name, "count": values.len(), "values": values}))
-        })
-        .collect();
-    json!({
-        "type": "snapshots",
-        "file": SNAPSHOTS_FILE,
-        "base": text.map(|t| sha256_hex(t.as_bytes())),
-        "snapshots": list,
-        "undo": all.undo.is_some(),
-        "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
-        "undoValues": all.undo,
-        "transitionMs": all.transition_ms,
-    })
-}
-
-/// A message's transition time under `key` (`transitionMs` on a restore or
-/// undo, `ms` on `snapshot.transition`, and only that key): absent `None`;
-/// else a whole number of milliseconds from 0 to 60000 (`bad-value`).
-fn transition_of(message: &Value, key: &str) -> Result<Option<u32>, Failure> {
-    match message.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_u64()
-            .and_then(|ms| u32::try_from(ms).ok())
-            .filter(|ms| *ms <= snapshots::MAX_TRANSITION_MS)
-            .map(Some)
-            .ok_or_else(|| {
-                fail(
-                    "bad-value",
-                    format!(
-                        "`{key}`: a transition is a whole number of milliseconds from 0 to {}",
-                        snapshots::MAX_TRANSITION_MS
-                    ),
-                )
-            }),
-    }
-}
-
-/// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
-fn snapshot_name(message: &Value) -> Result<String, Failure> {
-    let raw = message
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| fail("bad-value", "a snapshot message needs `name` (text)"))?;
-    snapshots::name(raw).map_err(snapshot_failure)
-}
-
-/// A snapshot write's check of the file's version (`base`).
-type BaseCheck = Box<dyn FnOnce(Option<&str>) -> Result<(), SnapshotError>>;
-
-/// A snapshot message's `base`: absent takes the file as it is; null asks
-/// that there be no `snapshots.toml`; else the SHA-256 it was listed with.
-fn base_check(message: &Value) -> Result<BaseCheck, Failure> {
-    let expected: Option<Option<String>> = match message.get("base") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(Value::String(base)) => Some(Some(base.clone())),
-        Some(_) => return Err(fail("bad-value", "`base` must be a SHA-256 or null")),
-    };
-    Ok(Box::new(move |text: Option<&str>| {
-        let Some(expected) = expected else {
-            return Ok(());
-        };
-        let now = text.map(|t| sha256_hex(t.as_bytes()));
-        if now == expected {
-            Ok(())
-        } else {
-            Err(SnapshotError::Changed(format!(
-                "{SNAPSHOTS_FILE} changed since it was listed (base); nothing was written"
-            )))
-        }
-    }))
-}
-
-fn snapshot_failure(error: SnapshotError) -> Failure {
-    fail(error.code(), error.to_string())
-}
-
-/// A message's `rate`, `default` without one: a number of at least 1.
-fn rate_of(message: &Value, default: f64) -> Result<f64, Failure> {
-    let rate = match message.get("rate") {
-        None => default,
-        Some(rate) => rate.as_f64().unwrap_or(f64::NAN),
-    };
-    if rate.is_finite() && rate >= 1.0 {
-        Ok(rate)
-    } else {
-        Err(fail("bad-rate", "rate must be a number of at least 1"))
-    }
-}
-
-/// The interval of a parameter or meter stream: its `rate` (default 30)
-/// from 1 to 60 per second, faster ones taken as 60.
-fn rate_interval(message: &Value) -> Result<Duration, Failure> {
-    let rate = rate_of(message, 30.0)?.min(MAX_RATE_HZ);
-    Duration::try_from_secs_f64(1.0 / rate).map_err(|e| fail("bad-rate", e.to_string()))
-}
-
-/// A scope's decimation at `sample_rate`: its `rate` in points per second
-/// (default and at most the sample rate; at least 1).
-fn scope_decimation(message: &Value, sample_rate: u32) -> Result<u64, Failure> {
-    let sample_rate = f64::from(sample_rate.max(1));
-    let rate = rate_of(message, sample_rate)?.min(sample_rate);
-    // From 1 to the sample rate, so this is a finite number of frames.
-    Ok((sample_rate / rate).round().max(1.0) as u64)
-}
-
-/// A vector stream's decimation: its `rate` in snapshots per second
-/// (default 60; at least 1, at most the port's tick rate), as a whole number
-/// of the port's ticks, so every snapshot is a tick.
-fn vector_decimation(rate: f64, sample_rate: u32, divisor: u64) -> u64 {
-    let divisor = divisor.max(1);
-    let ticks = f64::from(sample_rate.max(1)) / divisor as f64;
-    let rate = rate.min(ticks.max(1.0));
-    divisor * (ticks / rate).round().max(1.0) as u64
-}
-
-/// Vector output `port` of `plan`: its elements and rate divisor
-/// ([`signal_output::vector_shape`]); `None` without a plan.
-fn vector_shape(plan: Option<&ExecutionPlan>, port: &PortAddress) -> Option<(usize, u64)> {
-    signal_output::vector_shape(plan?, port)
 }
 
 impl Host {
@@ -9350,218 +9031,14 @@ impl Host {
     }
 }
 
-/// `buffer` of a message (1 to 8192 frames), else `default`.
-fn buffer_of(message: &Value, default: u32) -> Result<u32, Failure> {
-    match message.get("buffer") {
-        None => Ok(default),
-        // ADR 0036: the device's own buffer (`setup.apply`).
-        Some(Value::String(device)) if device == "device" => Ok(default),
-        Some(v) => v
-            .as_u64()
-            .filter(|b| (1..=8192).contains(b))
-            .map(|b| b as u32)
-            .ok_or_else(|| fail("bad-value", "buffer is 1 to 8192 frames")),
-    }
-}
-
-/// The refusal of an app message outside app mode.
-/// The folder of `path`: its parent for a project's `project.toml`.
-fn folder_of(path: &Path) -> PathBuf {
-    match path.parent() {
-        Some(dir) if path.file_name().is_some_and(|n| n == PROJECT_FILE) && path.is_file() => {
-            dir.to_owned()
-        }
-        _ => path.to_owned(),
-    }
-}
-
-fn app_only() -> Failure {
-    fail(
-        "not-allowed",
-        "only Signal.app's server opens projects and plays or stops them",
-    )
-}
-
-/// Level `level` of a `graph` message: `""` the top level, else a composite.
-fn level_of<'a>(graph: &'a Value, level: &str) -> Result<&'a Value, Failure> {
-    let found = if level.is_empty() {
-        graph.get("top")
-    } else {
-        graph.get("composites").and_then(|c| c.get(level))
-    };
-    found.ok_or_else(|| {
-        fail(
-            "unknown-level",
-            format!("the project uses no composite `{level}`"),
-        )
-    })
-}
-
-/// The refusal of what needs the app switched on.
-fn powered_off() -> Failure {
-    fail("powered-off", "Signal is switched off")
-}
-
-/// Whether an output as [`output_state`] gives it can play: it is there, at
-/// any rate (ADR 0036: a run plays at the rate the output runs at).
-fn ready_at(state: Option<&(String, Option<u32>)>) -> bool {
-    state.is_some()
-}
-
-/// The power switch as `welcome`, `app` and `power` carry it.
-fn power_json(power: app::Power) -> Value {
-    json!(if power.is_on() { "on" } else { "off" })
-}
-
-/// The output device's name, for `setup.get`'s run.
-fn device_name(output: &Output) -> String {
-    match output {
-        Output::Device(driver) => driver.name().to_owned(),
-        Output::Null(..) => "null".to_owned(),
-    }
-}
-
-/// Stops a run on this thread; its Runner and streams are dropped here.
-fn stop(mut run: Run) {
-    let _ = run.output.stop();
-}
-
 /// The folder's `ui/`, which the HTTP server serves under `/project/`.
 pub fn project_ui(dir: &Path) -> PathBuf {
     dir.join("ui")
 }
 
-/// ADR 0037, editable insides: what a patch's other files that could not be
-/// put back say (`"; composites/x.toml could not be put back (…): it holds
-/// the patch"`), empty when every one was.
-fn unrestored(results: &[(String, std::io::Result<bool>)]) -> String {
-    results
-        .iter()
-        .filter_map(|(path, result)| match result {
-            Ok(true) => None,
-            Ok(false) => Some(format!(
-                "; {path} could not be put back (another writer changed it meanwhile; its edit is kept)"
-            )),
-            Err(error) => Some(format!(
-                "; {path} could not be put back ({error}): it holds the patch"
-            )),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// ADR 0037, editable insides: a failed put-back is said, never "nothing changed".
-    #[test]
-    fn a_side_file_not_put_back_is_said() {
-        assert_eq!(
-            unrestored(&[("composites/a.toml".to_owned(), Ok(true))]),
-            ""
-        );
-        let said = unrestored(&[
-            ("composites/a.toml".to_owned(), Ok(false)),
-            (
-                "composites/b.toml".to_owned(),
-                Err(std::io::Error::other("disk full")),
-            ),
-        ]);
-        assert_eq!(
-            said,
-            "; composites/a.toml could not be put back (another writer changed it meanwhile; its edit is kept); composites/b.toml could not be put back (disk full): it holds the patch"
-        );
-    }
-
-    fn muted(address: &str, reason: FaultReason) -> Muted {
-        Muted {
-            frame: Frame(7),
-            address: address.to_owned(),
-            reason,
-            module: None,
-        }
-    }
-
-    /// The note: the recovery said by reason; dropped log records said,
-    /// alone too; nothing to say without either.
-    #[test]
-    fn the_muted_note_says_how_and_whether_the_list_is_whole() {
-        assert_eq!(muted_message(&[], false), None);
-        let lost = muted_message(&[], true).unwrap();
-        assert!(lost.starts_with("Some log records were dropped"), "{lost}");
-        let magnitude = muted_message(&[muted("/a", FaultReason::Magnitude)], false).unwrap();
-        assert!(
-            magnitude.contains("with its values back in range"),
-            "{magnitude}"
-        );
-        let panic = muted("/b", FaultReason::Panic).message();
-        assert!(
-            panic.contains("its call panicked") && panic.contains("broke the module contract"),
-            "{panic}"
-        );
-        assert!(!panic.contains("values back in range"), "{panic}");
-        let overflow = muted("/c", FaultReason::EventOverflow).message();
-        assert!(
-            overflow.contains("with fewer events reaching it"),
-            "{overflow}"
-        );
-        let both = muted_message(&[muted("/a", FaultReason::NonFinite)], true).unwrap();
-        assert!(
-            both.starts_with("/a was muted at frame 7")
-                && both.ends_with("an instance the fault guard muted may be missing here"),
-            "{both}"
-        );
-    }
-
-    /// auditor-1-rate-panic: no client rate panics; the unsupported ones are
-    /// refused with `bad-rate`.
-    #[test]
-    fn rates_are_checked_without_panicking() {
-        fn refused<T>(result: Result<T, Failure>) -> bool {
-            matches!(
-                result,
-                Err(Failure {
-                    code: "bad-rate",
-                    ..
-                })
-            )
-        }
-        for rate in [
-            json!(1e-20),
-            json!(1e-320),
-            json!(0),
-            json!(-1),
-            json!(0.5),
-            json!(f64::NAN),
-            json!("NaN"),
-            json!(null),
-        ] {
-            let message = json!({"rate": rate});
-            assert!(refused(rate_interval(&message)), "{message}");
-            assert!(refused(scope_decimation(&message, 48_000)), "{message}");
-        }
-        let huge = json!({"rate": 1e300});
-        assert_eq!(
-            rate_interval(&huge).ok(),
-            Some(Duration::from_secs_f64(1.0 / 60.0))
-        );
-        assert_eq!(scope_decimation(&huge, 48_000).ok(), Some(1));
-        let slow = json!({"rate": 1});
-        assert_eq!(rate_interval(&slow).ok(), Some(Duration::from_secs(1)));
-        assert_eq!(scope_decimation(&slow, 48_000).ok(), Some(48_000));
-        assert_eq!(
-            rate_interval(&json!({})).ok(),
-            Some(Duration::from_secs_f64(1.0 / 30.0))
-        );
-        assert_eq!(scope_decimation(&json!({}), 48_000).ok(), Some(1));
-        // A range whose ends cross (an export's targets) clamps, never panics.
-        assert_eq!(within(5.0, 3.0, 1.0), 1.0);
-        assert_eq!(within(-5.0, 0.0, 1.0), 0.0);
-        assert_eq!(
-            scope_decimation(&json!({"rate": 4800}), 48_000).ok(),
-            Some(10)
-        );
-    }
 
     /// A host with no project open (app mode, the null driver), for the
     /// request-ordering checks below; its folder and generation are set by
