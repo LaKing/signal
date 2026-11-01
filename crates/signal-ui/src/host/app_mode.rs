@@ -260,7 +260,7 @@ impl Host {
         self.refresh_warnings();
         self.play_carried(carried.clone());
         // ADR 0038 §6 (M4.1): this project's devices.local.toml over the Setup.
-        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.opening.dir);
+        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.local_dir());
         let started = app::start(
             &self.backend,
             &self.devices,

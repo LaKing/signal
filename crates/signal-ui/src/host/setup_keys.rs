@@ -190,7 +190,17 @@ impl Host {
                 "a run that records a session or its audio is not rebound (a recording covers one run from frame 0)",
             ));
         }
-        let dir = self.opening.dir.clone();
+        // A `.signal` project's state folder is made only for a write to it.
+        let dir = if message.get("scope").and_then(Value::as_str) == Some("project") {
+            self.local_dir_for_write().map_err(|e| {
+                fail(
+                    "write-failed",
+                    format!("{}: {e}", crate::devices::LOCAL_FILE),
+                )
+            })?
+        } else {
+            self.local_dir()
+        };
         let routed = if route {
             crate::devices::route(message, &mut self.setup, Some(&dir))
         } else {
@@ -230,7 +240,7 @@ impl Host {
             "path": self.setup_path.display().to_string(),
             "setup": self.setup_json(),
             // ADR 0038 §6 (M4.1, additive): this project's devices.local.toml.
-            "local": crate::devices::local_json(&self.opening.dir),
+            "local": crate::devices::local_json(&self.local_dir()),
             "problems": self.setup_problems,
             "playing": self.run.is_some(),
             "run": self.run_json(),

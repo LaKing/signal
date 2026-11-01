@@ -19,6 +19,9 @@
 //!   `devices.local.toml` (atomically, comments kept; the first write
 //!   inside a git work tree appends `devices.local.toml` to the project
 //!   folder's `.gitignore`, ADR 0038 §6).
+//! - **Which folder:** a folder project's own; a `.signal` project's state
+//!   folder outside it (`crate::local_state`, ADR 0038 §6's amendment of
+//!   2026-11-01), which the host passes as `dir`.
 //! - Routing `main` to another device moves the clock: `[output]` becomes
 //!   that device (one clocked device in v1, ADR 0038 §8).
 
@@ -561,7 +564,9 @@ fn write_local(
 /// appends `devices.local.toml` to `dir`'s `.gitignore` unless that exact
 /// line is there; the note to show when it did.
 fn ignore_in_git(dir: &Path) -> Result<Option<String>, String> {
-    if !inside_git(dir) {
+    // A `.signal` project's state folder (`crate::local_state`) is no
+    // project folder: only a folder holding `project.toml` gains the line.
+    if !dir.join(signal_project::PROJECT_FILE).is_file() || !inside_git(dir) {
         return Ok(None);
     }
     let path = dir.join(".gitignore");
@@ -828,7 +833,14 @@ mod tests {
         let project = base.join("song");
         fs::create_dir_all(base.join(".git")).unwrap();
         fs::create_dir_all(&project).unwrap();
+        // A state folder outside any project (a `.signal` project's,
+        // `crate::local_state`) inside the work tree gains no line.
+        let state = base.join("Local/0123456789abcdef0123456789abcdef");
+        fs::create_dir_all(&state).unwrap();
         let mut notes = Vec::new();
+        write_local(&state, "cue", Some((&[3, 4], None)), &mut notes).unwrap();
+        assert!(notes.is_empty() && !state.join(".gitignore").exists());
+        fs::write(project.join("project.toml"), "").unwrap();
         write_local(&project, "cue", Some((&[3, 4], None)), &mut notes).unwrap();
         assert_eq!(notes.len(), 1);
         write_local(&project, "monitor", Some((&[3, 4], None)), &mut notes).unwrap();

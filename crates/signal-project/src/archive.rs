@@ -32,6 +32,9 @@ pub const EXTENSION: &str = "signal";
 /// What the archive comment says before the library version.
 const LIBRARY_COMMENT: &str = "signal-library ";
 
+/// What the archive comment's second line says before the project id.
+const PROJECT_COMMENT: &str = "project ";
+
 /// The file type bits of a Unix mode.
 const TYPE_BITS: u32 = 0o170_000;
 const REGULAR: u32 = 0o100_000;
@@ -224,6 +227,20 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
 
 /// The project folder `dir` as a `.signal` archive.
 pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
+    pack_identified(dir, None)
+}
+
+/// Whether `id` is a project id: 32 lowercase hex digits (a name safe as a
+/// folder's, since it comes from a file that may come from anywhere).
+pub fn valid_project_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// [`pack`], its comment also recording the project id `id` (ADR 0038 §6,
+/// amendment of 2026-11-01): the same entries, byte for byte, as [`pack`]
+/// makes; only the comment differs. An id that is not
+/// [`valid_project_id`] is left out.
+pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
     let files = project_files(dir)?;
     // ADR 0035 §13: an include's files are not the folder's; packing the
     // folder alone would make an archive that does not load.
@@ -248,7 +265,13 @@ pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
         .system(System::Unix);
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     writer
-        .set_comment(format!("{LIBRARY_COMMENT}{}", crate::Library::VERSION))
+        .set_comment(match id.filter(|id| valid_project_id(id)) {
+            Some(id) => format!(
+                "{LIBRARY_COMMENT}{}\n{PROJECT_COMMENT}{id}",
+                crate::Library::VERSION
+            ),
+            None => format!("{LIBRARY_COMMENT}{}", crate::Library::VERSION),
+        })
         .map_err(zip_error)?;
     let mut total = 0u64;
     for (name, path) in &files {
@@ -344,8 +367,27 @@ pub fn library_version(bytes: &[u8]) -> Result<Option<String>, ArchiveError> {
 
 fn comment_version(comment: &[u8]) -> Option<String> {
     let comment = std::str::from_utf8(comment).ok()?;
-    let version = comment.strip_prefix(LIBRARY_COMMENT)?.trim();
+    let line = comment.lines().next()?;
+    let version = line.strip_prefix(LIBRARY_COMMENT)?.trim();
     (!version.is_empty()).then(|| version.to_owned())
+}
+
+/// The project id the archive `bytes` records in its comment
+/// ([`pack_identified`]); `None` when it records none, or one that is not
+/// [`valid_project_id`].
+pub fn project_id(bytes: &[u8]) -> Result<Option<String>, ArchiveError> {
+    let archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_error)?;
+    Ok(comment_project_id(archive.comment()))
+}
+
+fn comment_project_id(comment: &[u8]) -> Option<String> {
+    let comment = std::str::from_utf8(comment).ok()?;
+    comment
+        .lines()
+        .filter_map(|line| line.strip_prefix(PROJECT_COMMENT))
+        .map(str::trim)
+        .find(|id| valid_project_id(id))
+        .map(str::to_owned)
 }
 
 /// Why an entry's name is refused, if it is.
@@ -600,6 +642,33 @@ mod tests {
             "ui",
         ] {
             assert!(!read_by_project(not), "{not}");
+        }
+    }
+
+    /// ADR 0038 §6 (amendment of 2026-11-01): the project id is the
+    /// comment's second line, never an entry: the same entries as `pack`'s,
+    /// the library version still read, an id that is not 32 lowercase hex
+    /// digits never read (nor written).
+    #[test]
+    fn the_project_id_is_in_the_comment_only() {
+        let kick = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/kick");
+        let plain = pack(&kick).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        let identified = pack_identified(&kick, Some(id)).unwrap();
+        assert_ne!(plain, identified);
+        assert!(packs_to(&kick, &identified).unwrap());
+        assert_eq!(project_id(&identified).unwrap().as_deref(), Some(id));
+        assert_eq!(project_id(&plain).unwrap(), None);
+        assert_eq!(
+            library_version(&identified).unwrap().as_deref(),
+            Some(crate::Library::VERSION)
+        );
+        for bad in ["../../x", "0123456789ABCDEF0123456789ABCDEF", "abc"] {
+            assert_eq!(pack_identified(&kick, Some(bad)).unwrap(), plain, "{bad}");
+            assert!(
+                comment_project_id(format!("signal-library 0.3\nproject {bad}").as_bytes())
+                    .is_none()
+            );
         }
     }
 }

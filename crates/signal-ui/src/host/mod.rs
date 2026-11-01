@@ -482,6 +482,7 @@ impl Host {
                 temporary: config.temporary,
                 open_root: PathBuf::new(),
                 document: None,
+                local_id: None,
                 restorable: std::collections::HashSet::new(),
             },
             saves: Vec::new(),
@@ -505,6 +506,8 @@ impl Host {
         for problem in host.keys.report() {
             host.messages.push(format!("keys: {problem}"));
         }
+        // `signal ui` of a `.signal` file: its machine-local state.
+        host.identify();
         host.list_devices();
         host
     }

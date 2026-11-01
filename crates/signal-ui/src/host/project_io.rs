@@ -233,9 +233,16 @@ impl Host {
                 });
             }
             None => {
-                let saved = archive::pack(&self.opening.dir)
+                // The new file's own id, and the folder's machine-local
+                // state copied to it (ADR 0038 §6, amendment of
+                // 2026-11-01); the folder keeps its own.
+                let id = crate::local_state::fresh_id(file);
+                let saved = archive::pack_identified(&self.opening.dir, Some(&id))
                     .and_then(|bytes| archive::write_atomic(file, &bytes))
                     .map_err(|e| format!("{} was not saved: {e}", file.display()));
+                if saved.is_ok() {
+                    self.copy_folder_state(file, &id);
+                }
                 done(saved.and_then(|()| self.open_project(file, Edits::Discard)));
             }
         }
@@ -259,6 +266,8 @@ impl Host {
         };
         let finished = document.take_saved();
         let saved_any = finished.iter().any(|(_, result)| result.is_ok());
+        // A Save As written: this machine's state follows the new file.
+        self.follow_saved_id();
         for (ticket, result) in finished {
             let (answered, waiting): (Vec<SaveWait>, Vec<SaveWait>) =
                 std::mem::take(&mut self.saves)

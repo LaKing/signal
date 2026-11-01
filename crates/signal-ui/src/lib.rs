@@ -42,6 +42,7 @@ mod http;
 pub mod keys;
 #[cfg(feature = "in-process")]
 mod local;
+pub mod local_state;
 pub mod panel;
 pub mod panel_write;
 pub mod parts;

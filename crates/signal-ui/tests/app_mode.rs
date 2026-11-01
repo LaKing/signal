@@ -1122,6 +1122,140 @@ fn save_keeps_a_value_another_writer_changed(transport: Transport) {
     rig.finish();
 }
 
+/// `setup.get`'s `local.play.cue.channels`: this project's routing of
+/// `cue` on this machine.
+fn local_cue(rig: &mut Rig, ws: &mut common::Ws, id: u64) -> Value {
+    let setup = rig.request(ws, id, json!({"type": "setup.get"}), "setup");
+    setup["local"]["play"]["cue"]["channels"].clone()
+}
+
+/// The state folders under `local` that hold a `devices.local.toml`.
+fn states(local: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(local)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join("devices.local.toml").is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// ADR 0038 §6, amendment of 2026-11-01 (review 2026-11-01,
+/// adr-0051-prerequisites-and-local-state): a `.signal` project's routing
+/// for this project on this machine is kept outside the project, in
+/// `Local/<id>/` beside the (scratch) Setup, keyed by the id its saves
+/// write in the archive's comment. Reopened, moved, it is found again; Save
+/// As copies it to the new file's own id; the archive's entries are the
+/// project's as before (no machine state, the same files), so renders are
+/// untouched.
+fn a_signal_project_keeps_its_routing_outside_the_file(transport: Transport) {
+    let mut rig = app_rig("signal-local-state", transport, None);
+    let file = packed(&rig, "tone");
+    let local = rig.setup.with_file_name("Local");
+    let folder = rig.dir.clone();
+    let (mut ws, _) = rig.client();
+    let open = |rig: &mut Rig, ws: &mut common::Ws, id: u64, path: &Path| {
+        let opened = rig.request(
+            ws,
+            id,
+            json!({"type": "project.open", "path": path.display().to_string(), "unsaved": "discard"}),
+            "project",
+        );
+        assert_eq!(opened["loads"], true, "{opened}");
+        PathBuf::from(opened["dir"].as_str().unwrap())
+    };
+    let working = open(&mut rig, &mut ws, 1, &file);
+    assert_eq!(local_cue(&mut rig, &mut ws, 2), Value::Null);
+    let routed = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "device.route", "role": "cue", "channels": [3, 4], "scope": "project"}),
+        "applied",
+    );
+    assert_eq!(routed["routed"]["scope"], "project", "{routed}");
+    assert_eq!(routed["routed"]["notes"], json!([]), "no .gitignore line");
+    assert_eq!(local_cue(&mut rig, &mut ws, 4), json!([3, 4]));
+    assert!(
+        !working.join("devices.local.toml").exists(),
+        "not in the working folder, which goes on close"
+    );
+    let first = states(&local);
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    // Reopened before any save (the file records no id yet): found by path.
+    open(&mut rig, &mut ws, 5, &folder);
+    assert!(!working.exists(), "the working folder went");
+    assert_eq!(
+        local_cue(&mut rig, &mut ws, 6),
+        Value::Null,
+        "the folder's own"
+    );
+    open(&mut rig, &mut ws, 7, &file);
+    assert_eq!(local_cue(&mut rig, &mut ws, 8), json!([3, 4]));
+
+    // Saved: the id is the comment's, the entries the project's alone.
+    rig.request(&mut ws, 9, json!({"type": "project.save"}), "saved");
+    let bytes = fs::read(&file).unwrap();
+    let id = archive::project_id(&bytes).unwrap().expect("an id");
+    assert_eq!(first, vec![local.join(&id)]);
+    assert!(
+        archive::packs_to(&rig.dir, &bytes).unwrap(),
+        "the same entries"
+    );
+    let unpacked = archive::unpack(&bytes, &rig.setup.with_file_name("check")).unwrap();
+    assert!(
+        !unpacked.files.iter().any(|f| f.contains("devices")),
+        "{:?}",
+        unpacked.files
+    );
+    let base = rig.setup.parent().unwrap().display().to_string();
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(!raw.contains(&base) && !raw.contains("channels = [3, 4]"));
+
+    // Moved: found again by its id.
+    let moved = rig.setup.with_file_name("moved.signal");
+    open(&mut rig, &mut ws, 10, &folder);
+    fs::rename(&file, &moved).unwrap();
+    open(&mut rig, &mut ws, 11, &moved);
+    assert_eq!(local_cue(&mut rig, &mut ws, 12), json!([3, 4]));
+
+    // Save As: the new file's own id, the routing copied, each its own.
+    let other = rig.setup.with_file_name("other.signal");
+    rig.host().save_as(&other).unwrap();
+    let other_id = archive::project_id(&fs::read(&other).unwrap())
+        .unwrap()
+        .expect("an id");
+    assert_ne!(other_id, id);
+    assert_eq!(states(&local), {
+        let mut both = vec![local.join(&id), local.join(&other_id)];
+        both.sort();
+        both
+    });
+    rig.request(
+        &mut ws,
+        13,
+        json!({"type": "device.route", "role": "cue", "channels": [5, 6], "scope": "project"}),
+        "applied",
+    );
+    assert_eq!(local_cue(&mut rig, &mut ws, 14), json!([5, 6]));
+    open(&mut rig, &mut ws, 15, &moved);
+    assert_eq!(
+        local_cue(&mut rig, &mut ws, 16),
+        json!([3, 4]),
+        "the original's own"
+    );
+
+    // Another project file, never opened here: no routing.
+    let fresh = packed(&rig, "fresh");
+    open(&mut rig, &mut ws, 17, &fresh);
+    assert_eq!(local_cue(&mut rig, &mut ws, 18), Value::Null);
+    rig.finish();
+}
+
 /// Review of 5b54fc5, 2: Save As of a folder project leaves the folder's
 /// files as they are (they are the user's own); the new `.signal` file
 /// opens with the corrections pending, for its own next Save.
@@ -3372,6 +3506,7 @@ both!(
     a_signal_file_with_corrected_values_is_not_edited,
     save_keeps_a_value_another_writer_changed,
     save_as_of_a_folder_leaves_its_files,
+    a_signal_project_keeps_its_routing_outside_the_file,
     a_failed_correction_does_not_block_the_save,
     a_panel_write_marks_a_signal_project_edited,
     a_pattern_write_marks_a_signal_project_edited,

@@ -430,7 +430,7 @@ impl Host {
         let seed = project.seed;
         // ADR 0038 (M4.1): several play sides, or roles the Setup binds
         // (devices.local.toml over it), are routed by `crate::devices`.
-        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, dir);
+        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.local_dir());
         let sides = signal_project::device::play_sides(&project, &plan);
         let routed = crate::devices::routed(&setup, sides.len());
         // ADR 0036: the run plays at the rate the output runs at, never

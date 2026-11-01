@@ -11,7 +11,10 @@
 //! Saves too (audit: a 64 MiB asset held the control thread 728 ms): each
 //! packs and writes on a thread of its own, one at a time in the order
 //! asked, and clears *edited* only if the folder did not change since it
-//! started.
+//! started. Every save writes the project's id in the archive's comment
+//! (never an entry), by which its machine-local state is found again
+//! (`crate::local_state`, ADR 0038 §6's amendment of 2026-11-01); a Save As
+//! writes a fresh one.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -138,6 +141,9 @@ struct Saving {
     ticket: Ticket,
     file: PathBuf,
     rename: bool,
+    /// The project id written in the archive's comment (a Save As: the new
+    /// file's own, fresh).
+    id: String,
     look: Look,
     result: mpsc::Receiver<Packed>,
 }
@@ -147,10 +153,16 @@ struct Saving {
 /// say whether that packing settled. Packed without the project's writer
 /// lock (ADR 0040 §2): the working folder is this process's own, and
 /// holding the lock for a whole pack would stall every writer.
-fn pack_and_write(working: &Path, file: &Path, expect: Option<&str>, hold: &SaveHold) -> Packed {
+fn pack_and_write(
+    working: &Path,
+    file: &Path,
+    id: &str,
+    expect: Option<&str>,
+    hold: &SaveHold,
+) -> Packed {
     let failed = |e: ArchiveError| format!("{} was not saved: {e}", file.display());
     let (bytes, settled) = settle(
-        || archive::pack(working),
+        || archive::pack_identified(working, Some(id)),
         |bytes| archive::packs_to(working, bytes).is_ok_and(|same| same),
     )
     .map_err(failed)?;
@@ -271,6 +283,11 @@ impl Hold {
 pub struct Document {
     file: PathBuf,
     working: PathBuf,
+    /// The project's id (ADR 0038 §6, amendment of 2026-11-01): the one the
+    /// file records, else the one the host gives it ([`Document::set_id`]);
+    /// every save writes it into the archive's comment, a Save As a fresh
+    /// one for the new file.
+    id: Option<String>,
     /// What the working folder packed to when opened or last saved; shared
     /// with a comparison's thread.
     saved: Arc<Vec<u8>>,
@@ -324,6 +341,7 @@ impl Document {
             }
         };
         Ok(Document {
+            id: archive::project_id(&bytes).ok().flatten(),
             file: file.to_owned(),
             on_disk: sha256_hex(&bytes),
             look: look(&working),
@@ -349,6 +367,21 @@ impl Document {
     /// The `.signal` file.
     pub fn file(&self) -> &Path {
         &self.file
+    }
+
+    /// The project id: the file's, or the one given ([`Document::set_id`]);
+    /// after a Save As, the new file's.
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The project id the next saves write, for a file that records none
+    /// (`crate::local_state::resolve` finds it); one the file records is
+    /// kept.
+    pub fn set_id(&mut self, id: &str) {
+        if self.id.is_none() && archive::valid_project_id(id) {
+            self.id = Some(id.to_owned());
+        }
     }
 
     /// The working folder.
@@ -635,6 +668,7 @@ impl Document {
                 if job.rename {
                     self.file = job.file.clone();
                 }
+                self.id = Some(job.id.clone());
                 self.on_disk = sha256_hex(&bytes);
                 self.saved = Arc::new(bytes);
                 // A comparison still running compared with the old content.
@@ -667,6 +701,12 @@ impl Document {
             };
             let rename = asked.file.is_some();
             let file = asked.file.unwrap_or_else(|| self.file.clone());
+            // A Save As makes another project file: its own id.
+            let id = match (&self.id, rename) {
+                (Some(id), false) => id.clone(),
+                _ => crate::local_state::fresh_id(&file),
+            };
+            let written = id.clone();
             // Looked at before it packs: a change from here on keeps the
             // folder edited.
             let started = look(&self.working);
@@ -681,15 +721,22 @@ impl Document {
             let spawned = thread::Builder::new()
                 .name("signal-save".to_owned())
                 .spawn(move || {
-                    let _ = send.send(pack_and_write(&working, &target, checked.as_deref(), &hold));
+                    let _ = send.send(pack_and_write(
+                        &working,
+                        &target,
+                        &written,
+                        checked.as_deref(),
+                        &hold,
+                    ));
                 });
             let made = spawned.is_ok();
             let packed = (!made)
-                .then(|| pack_and_write(&self.working, &file, expect.as_deref(), &no_hold()));
+                .then(|| pack_and_write(&self.working, &file, &id, expect.as_deref(), &no_hold()));
             self.saving = Some(Saving {
                 ticket: asked.ticket,
                 file,
                 rename,
+                id,
                 look: started,
                 result,
             });
@@ -816,6 +863,7 @@ mod tests {
                 ticket: 7,
                 file: file.clone(),
                 rename: false,
+                id: "0123456789abcdef0123456789abcdef".to_owned(),
                 look: look(document.working()),
                 result,
             });

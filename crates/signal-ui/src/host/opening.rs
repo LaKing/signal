@@ -11,6 +11,7 @@ use signal_project::live::FolderState;
 
 use crate::app;
 use crate::document::{Document, project_name};
+use crate::local_state;
 use crate::panel::Panel;
 use crate::panel_write::sha256_hex;
 
@@ -57,6 +58,11 @@ pub(super) struct Opening {
     pub(super) open_root: PathBuf,
     /// App mode: the open `.signal` file and its working folder.
     pub(super) document: Option<Document>,
+    /// The open `.signal` file's project id (ADR 0038 §6, amendment of
+    /// 2026-11-01): its machine-local state is `Local/<id>/` beside the
+    /// Setup ([`Host::local_dir`]). `None` for a folder project, whose
+    /// `devices.local.toml` is in its folder.
+    pub(super) local_id: Option<String>,
     /// ADR 0046 §8: the SHA-256 of every presentation text a patch of this
     /// host wrote or replaced (`ui/…`): a client's `panel.restore` of one
     /// of them (an undo or redo the host made) is taken whole; any other
@@ -125,10 +131,112 @@ impl Opening {
 }
 
 impl Host {
+    /// The open project's identity for its machine-local state (ADR 0038
+    /// §6, amendment of 2026-11-01): a `.signal` file's project id
+    /// ([`local_state::resolve`]), which the document's saves write when
+    /// the file records none; `None` for a folder project.
+    pub(super) fn identify(&mut self) {
+        let root = local_state::root(&self.setup_path);
+        self.opening.local_id = match (&mut self.opening.document, &self.opening.temporary) {
+            (Some(document), _) => {
+                let id = local_state::resolve(&root, document.file(), document.id());
+                document.set_id(&id);
+                Some(id)
+            }
+            (None, Some(_)) => {
+                let source = &self.opening.source;
+                let archived = archive::read_archive(source)
+                    .ok()
+                    .and_then(|bytes| archive::project_id(&bytes).ok().flatten());
+                Some(local_state::resolve(&root, source, archived.as_deref()))
+            }
+            (None, None) => None,
+        };
+    }
+
+    /// The folder of this project's `devices.local.toml`: a folder
+    /// project's own folder, a `.signal` project's state folder beside the
+    /// Setup (made when first written: [`Host::local_dir_for_write`]).
+    pub(super) fn local_dir(&self) -> PathBuf {
+        match &self.opening.local_id {
+            Some(id) => local_state::dir(&local_state::root(&self.setup_path), id),
+            None => self.opening.dir.clone(),
+        }
+    }
+
+    /// [`Host::local_dir`], made (with its record) if it is a state folder.
+    pub(super) fn local_dir_for_write(&self) -> std::io::Result<PathBuf> {
+        let file = match (&self.opening.document, &self.opening.temporary) {
+            (Some(document), _) => document.file().to_owned(),
+            (None, Some(_)) => self.opening.source.clone(),
+            (None, None) => return Ok(self.opening.dir.clone()),
+        };
+        match &self.opening.local_id {
+            Some(id) => local_state::prepare(&local_state::root(&self.setup_path), id, &file),
+            None => Ok(self.opening.dir.clone()),
+        }
+    }
+
+    /// After saves: a Save As gave the document another id (the new
+    /// file's), so this project's machine-local state is copied to it
+    /// (ADR 0038 §6, amendment of 2026-11-01).
+    pub(super) fn follow_saved_id(&mut self) {
+        let Some(document) = &self.opening.document else {
+            return;
+        };
+        let Some(id) = document.id().map(str::to_owned) else {
+            return;
+        };
+        if self.opening.local_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        let file = document.file().to_owned();
+        let root = local_state::root(&self.setup_path);
+        let Some(old) = self.opening.local_id.replace(id.clone()) else {
+            return;
+        };
+        let (from, to) = (local_state::dir(&root, &old), local_state::dir(&root, &id));
+        let copied = local_state::copy_state(&from, &to).and_then(|()| {
+            if to.is_dir() {
+                local_state::prepare(&root, &id, &file).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = copied {
+            self.messages.push(format!(
+                "this machine's routing was not copied to {}: {error}",
+                file.display()
+            ));
+        }
+    }
+
+    /// Save As of a folder project to `file`, whose id is `id`: the
+    /// folder's `devices.local.toml` copied to the new file's state folder
+    /// (the folder keeps its own).
+    pub(super) fn copy_folder_state(&mut self, file: &Path, id: &str) {
+        let from = self.opening.dir.join(crate::devices::LOCAL_FILE);
+        if !from.is_file() {
+            return;
+        }
+        let root = local_state::root(&self.setup_path);
+        let copied = local_state::prepare(&root, id, file).and_then(|to| {
+            let bytes = fs::read(&from)?;
+            signal_project::transaction::write_atomic(&to.join(crate::devices::LOCAL_FILE), &bytes)
+        });
+        if let Err(error) = copied {
+            self.messages.push(format!(
+                "this machine's routing was not copied to {}: {error}",
+                file.display()
+            ));
+        }
+    }
+
     /// App mode: opens the project folder `dir` (stopped) for its rate,
     /// panel and diagnostics, and serves its `ui/`.
     fn open(&mut self, dir: &Path) {
         self.opening.begin(dir);
+        self.identify();
         self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
         let state = FolderState::read(dir).ok();
@@ -477,6 +585,7 @@ impl Host {
             self.opening.begin(temporary.dir());
             // The previous copy is removed once its run is stopped.
             self.opening.temporary = Some(temporary);
+            self.identify();
             self.server.set_project_ui(project_ui(&self.opening.dir));
         }
         let built = self.build(true);
