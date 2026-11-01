@@ -39,6 +39,7 @@ import './controls/panel.test.js';
 import './controls/entry-field.test.js';
 import './controls/out-of-range.test.js';
 import './controls/scope.test.js';
+import './controls/skin-dom.test.js';
 import './lib/schematic-view.test.js';
 import './lib/schematic-layout.test.js';
 import './lib/schematic-wire.test.js';
