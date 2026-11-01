@@ -148,3 +148,27 @@ test('polylines: collinear points dropped, corners rounded', () => {
   assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]), 'M0 0 L10 0 L10 10');
   assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 4), 'M0 0 L6 0 Q10 0 10 4 L10 10');
 });
+
+test('every port and cable of the studio’s Wiring is hit at its own place, at the Wiring level’s scale', async () => {
+  const { hitItem } = await import('./plane-hit.js');
+  const s = studio();
+  const layout = studioLayout(s.stack);
+  const model = wiringModel(s.stack, s.owner, s.stackOf, s.instances, s.connections, s.pins);
+  const w = wiringLayout(model, layout, new Map(pinPlaces(s.pins, layout.rects).map((p) => [`${p.side} ${p.address}`, p.y])));
+  const items = [...w.boxes.map((b) => ({ kind: 'box', id: `box ${b.entry}`, ...b })), ...w.cables.map((c) => ({ kind: 'cable', id: c.id, points: c.points })), ...w.ports.map((p) => ({ kind: 'port', id: p.id, x: p.x, y: p.y }))];
+  const k = 2.2;
+  for (const p of w.ports) assert.equal(hitItem(items, { x: p.x + 1, y: p.y - 1 }, k)?.item.id, p.id);
+  for (const c of w.cables) {
+    // The middle of its longest segment: no pin is near there.
+    let best = null;
+    for (let i = 1; i < c.points.length; i++) {
+      const a = c.points[i - 1];
+      const b = c.points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      if (!best || len > best.len) best = { len, at: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+    }
+    const hit = hitItem(items, best.at, k)?.item.id;
+    // Cables of one net share their trunk: either of them is the right answer there.
+    assert.ok(hit === c.id || w.cables.find((x) => x.id === hit)?.from === c.from, `${c.id} hit (got ${hit})`);
+  }
+});
