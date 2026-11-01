@@ -6,7 +6,9 @@
 //!   `slot.part` and `describe.parts` rooted, both panels passing
 //!   `panel.check`; its undo gives `project.toml`, `ui/main.html` and
 //!   `ui/windows.toml` back byte for byte and leaves no part; its redo
-//!   groups again. A card moved whole renames its id in `ui/windows.toml`.
+//!   groups again. A card moved whole renames its id in `ui/windows.toml`,
+//!   and its `card:<id>` entry in `ui/plane.toml` becomes the slot, in its
+//!   place in the Stack, in the same write: `signal ui check` finds nothing.
 //! - The bookkeeping of §7 on a scratch project: an interface rename
 //!   rewrites the part, a remove is `in-use` while the part binds the port
 //!   (and with `removeControls` takes its controls, undone byte for byte),
@@ -91,7 +93,12 @@ fn grouping_moves_the_controls_and_is_undone_byte_for_byte(transport: Transport)
     let mut rig = studio("parts-group", transport);
     let (mut ws, _) = rig.client();
     let dir = rig.dir.clone();
-    let files = ["project.toml", "ui/main.html", "ui/windows.toml"];
+    let files = [
+        "project.toml",
+        "ui/main.html",
+        "ui/windows.toml",
+        "ui/plane.toml",
+    ];
     let before: Vec<Option<String>> = files.iter().map(|f| read(&dir, f)).collect();
 
     let reply = patch(
@@ -197,8 +204,29 @@ fn grouping_moves_the_controls_and_is_undone_byte_for_byte(transport: Transport)
     );
     let main = read(&dir, "ui/main.html").unwrap();
     assert!(!main.contains("TAPE ECHO"));
+    // The plane's Stack: `card:tape-echo` is now the slot, in its place.
+    let plane = read(&dir, "ui/plane.toml").unwrap();
+    let was = before[3].as_ref().unwrap();
+    assert!(was.contains("  \"card:tape-echo\",\n"), "{was}");
+    assert_eq!(plane, was.replace("\"card:tape-echo\"", "\"echo\""));
+    let all = checked(&dir);
+    let plane_findings: Vec<String> = all
+        .iter()
+        .flat_map(|c| &c.findings)
+        .map(|f| f.diagnostic.message.clone())
+        .filter(|m| m.contains("plane.toml"))
+        .collect();
+    assert!(plane_findings.is_empty(), "{plane_findings:?}");
+    let written: Vec<&str> = echo["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert!(written.contains(&"ui/plane.toml"), "{echo}");
     patch(&mut rig, &mut ws, 12, echo["inverse"].clone());
     assert_eq!(read(&dir, "ui/windows.toml"), before[2]);
+    assert_eq!(read(&dir, "ui/plane.toml"), before[3]);
     rig.finish();
 }
 

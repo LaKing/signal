@@ -39,10 +39,11 @@ pub fn part_path(level: &str, slot: &str) -> String {
 }
 
 /// Whether `file` (relative to `ui/`) is a presentation file a
-/// `panel.restore` may write: `main.html`, `windows.toml` or a part,
+/// `panel.restore` may write: `main.html`, `windows.toml`, `plane.toml`
+/// (ADR 0051) or a part,
 /// `parts/<slot>.html` or `parts/<composite>.<slot>.html`.
 pub fn restorable(file: &str) -> bool {
-    if file == "main.html" || file == "windows.toml" {
+    if file == "main.html" || file == "windows.toml" || file == "plane.toml" {
         return true;
     }
     let Some(key) = file
@@ -270,7 +271,7 @@ impl Patching<'_> {
     ) -> Result<Op, PatchError> {
         if !restorable(file) {
             return Err(bad(format!(
-                "panel.restore writes ui/main.html, ui/windows.toml or a slot's part (ui/parts/<slot>.html), not ui/{file}"
+                "panel.restore writes ui/main.html, ui/windows.toml, ui/plane.toml or a slot's part (ui/parts/<slot>.html), not ui/{file}"
             )));
         }
         let path = format!("ui/{file}");

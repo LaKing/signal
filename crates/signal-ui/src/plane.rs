@@ -413,6 +413,79 @@ pub fn check(file: &str, text: &str, panel: &[Card], slots: &[String]) -> Vec<Fi
     found
 }
 
+/// ADR 0046 §8 with ADR 0051 §4: `ui/plane.toml`'s `text` after Group
+/// into slot `slot` renamed the main panel's cards (`renames`, old → new,
+/// [`crate::parts::Grouped::cards`]), in the same write. An entry
+/// `card:<old>` of a card moved into the slot's part (`<slot>:<id>`)
+/// becomes the slot's name, the instrument that card now is, in its place;
+/// a second such entry (two cards moved into one part) is removed, since
+/// the one instrument is listed once; a card left whose id the move
+/// shifted is renamed (`card:<new>`). All renames at once. `None` when
+/// nothing changes or the file does not read.
+pub fn rename_instruments(text: &str, renames: &[(String, String)], slot: &str) -> Option<String> {
+    if renames.is_empty() {
+        return None;
+    }
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    let stacks = doc
+        .get_mut("stack")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)?;
+    let part = format!("{slot}:");
+    let mut listed = stacks.iter().any(|stack| {
+        stack
+            .get("instruments")
+            .and_then(toml_edit::Item::as_array)
+            .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(slot)))
+    });
+    let mut changed = false;
+    for stack in stacks.iter_mut() {
+        let Some(list) = stack
+            .get_mut("instruments")
+            .and_then(toml_edit::Item::as_array_mut)
+        else {
+            continue;
+        };
+        let mut i = 0;
+        while i < list.len() {
+            let renamed = list
+                .get(i)
+                .and_then(toml_edit::Value::as_str)
+                .and_then(|entry| entry.strip_prefix(CARD_PREFIX))
+                .and_then(|id| renames.iter().find(|(old, _)| old == id))
+                .map(|(_, new)| new.clone());
+            let Some(new) = renamed else {
+                i += 1;
+                continue;
+            };
+            changed = true;
+            let entry = if new.starts_with(&part) {
+                (!std::mem::replace(&mut listed, true)).then(|| slot.to_owned())
+            } else {
+                Some(format!("{CARD_PREFIX}{new}"))
+            };
+            match (entry, list.get_mut(i)) {
+                (Some(entry), Some(value)) => {
+                    let decor = value.decor().clone();
+                    let mut written = toml_edit::Value::from(entry);
+                    *written.decor_mut() = decor;
+                    *value = written;
+                    i += 1;
+                }
+                _ => {
+                    // The next entry takes its spacing and any comment before it.
+                    let removed = list.remove(i);
+                    if let (Some(prefix), Some(next)) =
+                        (removed.decor().prefix().cloned(), list.get_mut(i))
+                    {
+                        next.decor_mut().set_prefix(prefix);
+                    }
+                }
+            }
+        }
+    }
+    changed.then(|| doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +646,34 @@ mod tests {
         let found = check("ui/plane.toml", text, &[], &[]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].diagnostic.line, 6, "at the second Stack's header");
+    }
+
+    #[test]
+    fn group_into_slot_keeps_the_instruments() {
+        let text = "schema_version = 1\n\n# the column\n[[stack]]\nname = \"primary\"\ninstruments = [\n  \"card:transport\",\n  \"card:tape-echo\", # the echo\n  \"card:echo-2\",\n  \"card:out-2\",\n]\n\n[[stack]]\nname = \"side\"\ninstruments = [\"card:spare\", \"card:master\"]\n";
+        let renames = [
+            ("tape-echo".to_owned(), "echo:tape-echo".to_owned()),
+            ("echo-2".to_owned(), "echo:echo-2".to_owned()),
+            ("out-2".to_owned(), "out".to_owned()),
+            ("spare".to_owned(), "echo:spare".to_owned()),
+        ];
+        let new = rename_instruments(text, &renames, "echo").unwrap();
+        assert_eq!(
+            new,
+            "schema_version = 1\n\n# the column\n[[stack]]\nname = \"primary\"\ninstruments = [\n  \"card:transport\",\n  \"echo\", # the echo\n  \"card:out\",\n]\n\n[[stack]]\nname = \"side\"\ninstruments = [\"card:master\"]\n"
+        );
+        // Nothing renamed, or no file that reads: no write.
+        assert_eq!(rename_instruments(text, &[], "echo"), None);
+        assert_eq!(
+            rename_instruments(text, &[("x".to_owned(), "y".to_owned())], "echo"),
+            None
+        );
+        assert_eq!(rename_instruments("[[stack", &renames, "echo"), None);
+        // The slot listed already: the moved card's entry goes.
+        let listed = "schema_version = 1\n[[stack]]\nname = \"a\"\ninstruments = [\"echo\", \"card:tape-echo\"]\n";
+        assert_eq!(
+            rename_instruments(listed, &renames, "echo").unwrap(),
+            "schema_version = 1\n[[stack]]\nname = \"a\"\ninstruments = [\"echo\"]\n"
+        );
     }
 }

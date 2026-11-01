@@ -92,6 +92,7 @@ A new patch op, **`slot.group {instance, controls?}`**: Edit patch's menu on any
   - A card left holding nothing but moved controls is replaced, in its place, by the open slot card, and the part keeps that card's heading and id.
   - A card that also holds other controls keeps them, and the open slot card is inserted after it.
   - `ui/windows.toml` entries naming a moved card's id are rewritten to `synth:<id>` in the same write.
+  - `ui/plane.toml` (ADR 0051, added 2026-11-01): a Stack's `card:<id>` entry of a moved card becomes the slot's name (`synth`), in its place, in the same write; `panel.restore` writes it back on undo.
   - Without `ui/main.html`, no part is written: the default panel already gives the slot a card.
   - Other panel files keep their controls, which go on working because the addresses are unchanged.
 - **Undo** restores every file byte for byte, as one entry:

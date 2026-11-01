@@ -916,7 +916,8 @@ impl Host {
     /// more of its files with their `panel.restore` inverses (the undo puts
     /// them back first): Group into slot at the top level moves the main
     /// panel's controls on the instance into its new part, the open slot
-    /// card in their place, and `ui/windows.toml` follows the moved cards;
+    /// card in their place, and `ui/windows.toml` and `ui/plane.toml` follow
+    /// the moved cards;
     /// an interface edit that removes a port a part binds is `in-use`,
     /// unless `removeControls`, which removes those controls from the part.
     fn part_edits(
@@ -1006,6 +1007,13 @@ impl Host {
                         && let Some(new) = crate::parts::rename_cards(&text, &grouped.cards, Some(instance))
                     {
                         set(&mut files, Some(text), windows, Some(new));
+                    }
+                    // ADR 0051 §4: the plane's Stacks follow too, the moved card's entry now the slot's.
+                    let plane = format!("ui/{}", crate::plane::PLANE_FILE);
+                    if let Some(text) = now(&files, patched, &plane)
+                        && let Some(new) = crate::plane::rename_instruments(&text, &grouped.cards, instance)
+                    {
+                        set(&mut files, Some(text), &plane, Some(new));
                     }
                 }
                 Op::SlotGroup { instance, .. } => patched.notes.push(format!(
@@ -1142,7 +1150,8 @@ impl Host {
     /// `<signal-panel>` content in its canonical form (the whitelist, no
     /// comment) and, outside that element, what the file holds now; a part
     /// that does not exist exactly as a new part is written
-    /// ([`crate::parts::part_text`]). `ui/windows.toml` must read as TOML.
+    /// ([`crate::parts::part_text`]). `ui/windows.toml` and `ui/plane.toml`
+    /// must read as TOML.
     fn panel_restore_allowed(&self, file: &str, text: &str) -> Result<(), Failure> {
         let refused = |why: String| fail("bad-value", format!("panel.restore of ui/{file}: {why}"));
         // What this host itself wrote or replaced (an undo, a redo): whole.
@@ -1153,7 +1162,7 @@ impl Host {
         {
             return Ok(());
         }
-        if file == "windows.toml" {
+        if file == "windows.toml" || file == crate::plane::PLANE_FILE {
             return text
                 .parse::<toml_edit::DocumentMut>()
                 .map(|_| ())
