@@ -27,19 +27,35 @@ export function deviceKey(device) {
   return device?.id ? `id:${device.id}` : `name:${device?.name ?? ''}`;
 }
 
-/** The playback ports of a device of `n` channels, in stereo pairs: `[{key, name, channels}]` ("Out 1–2"; an odd last one "Out 5"). */
+/** A box shows at most this many port rows per edge; the channels past them are one row ("Out 11–64"), so a 64-channel loopback device stays a box. */
+export const MAX_PORT_ROWS = 6;
+
+const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+/** The rest of a device's channels from `from` to `n`, one row: `{key, name, channels, rest: true}`. */
+function restPort(prefix, key, from, n) {
+  return { key: `${key}-${from}`, name: from === n ? `${prefix} ${from}` : `${prefix} ${from}–${n}`, channels: range(from, n), rest: true };
+}
+
+/** The playback ports of a device of `n` channels, in stereo pairs: `[{key, name, channels}]` ("Out 1–2"; an odd last one "Out 5"; past MAX_PORT_ROWS, one row of the rest). */
 export function playbackPorts(n) {
   const ports = [];
+  const pairs = Math.ceil(n / 2);
   for (let c = 1; c <= n; c += 2) {
+    if (pairs > MAX_PORT_ROWS && ports.length === MAX_PORT_ROWS - 1) {
+      ports.push(restPort('Out', 'out', c, n));
+      break;
+    }
     const channels = c + 1 <= n ? [c, c + 1] : [c];
     ports.push({ key: `out-${c}`, name: channels.length === 2 ? `Out ${c}–${c + 1}` : `Out ${c}`, channels });
   }
   return ports;
 }
 
-/** The capture ports of a device of `n` channels, one per channel ("In 1"). */
+/** The capture ports of a device of `n` channels, one per channel ("In 1"; past MAX_PORT_ROWS, one row of the rest). */
 export function capturePorts(n) {
-  return Array.from({ length: n }, (_, i) => ({ key: `in-${i + 1}`, name: `In ${i + 1}`, channels: [i + 1] }));
+  if (n <= MAX_PORT_ROWS) return range(1, n).map((c) => ({ key: `in-${c}`, name: `In ${c}`, channels: [c] }));
+  return [...range(1, MAX_PORT_ROWS - 1).map((c) => ({ key: `in-${c}`, name: `In ${c}`, channels: [c] })), restPort('In', 'in', MAX_PORT_ROWS, n)];
 }
 
 /**

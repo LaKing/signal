@@ -39,11 +39,9 @@ export const PRIMARY = 'primary';
 const TOP_KEYS = ['schema_version', 'stack'];
 const STACK_KEYS = ['name', 'at', 'width', 'instruments'];
 
-/** A card's id from its heading's text: lowercase, every run of other characters one `-`, none at the ends. */
+/** A card's id from its heading's text: lowercase, every run of characters other than a-z and 0-9 one `-`, none at the ends (crates/signal-ui/src/plane.rs has the same rule). */
 export function cardSlug(text) {
   return String(text ?? '')
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');

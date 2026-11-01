@@ -18,13 +18,13 @@ export const STACK_GAP_PU = 24;
 /** Between the Stacks and the peripherals: room for the Setup cables, in pu. */
 export const CABLE_GAP_PU = 56;
 /** A peripheral box: its width, its title's height, a port's pitch and a channel's, in pu. */
-export const BOX_PU = Object.freeze({ w: 36, title: 7, port: 7, channel: 2.5, pad: 2 });
+export const BOX_PU = Object.freeze({ w: 56, title: 11, port: 10, channel: 3, pad: 3 });
 /** Between peripheral boxes, in pu. */
 export const BOX_GAP_PU = 6;
 /** An edge pin's pitch within its instrument, in pu. */
 export const PIN_PITCH_PU = 3;
 /** The tray of unstacked instances: its width, in pu. */
-export const TRAY_PU = 36;
+export const TRAY_PU = 56;
 
 /**
  * One Stack's instruments laid out (ADR 0051 §4, "Equal width"): `stack`
@@ -88,8 +88,10 @@ export function boxPorts(box) {
   const place = (ports, x) =>
     ports.map((p, i) => {
       const y = (BOX_PU.title + i * BOX_PU.port) * PU;
-      const first = y + ((BOX_PU.port - (p.channels.length - 1) * BOX_PU.channel) / 2) * PU;
-      return { ...p, x, y, h: BOX_PU.port * PU, pins: p.channels.map((channel, j) => ({ channel, y: first + j * BOX_PU.channel * PU })) };
+      // A row of the rest of many channels spreads its pins over the row; a port of one or two at the channel pitch.
+      const pitch = p.channels.length > 2 ? ((BOX_PU.port - 2) * PU) / (p.channels.length - 1) : BOX_PU.channel * PU;
+      const first = y + (BOX_PU.port * PU - (p.channels.length - 1) * pitch) / 2;
+      return { ...p, x, y, h: BOX_PU.port * PU, pins: p.channels.map((channel, j) => ({ channel, y: first + j * pitch })) };
     });
   return { inputs: place(box.inputs, 0), outputs: place(box.outputs, w) };
 }
@@ -137,7 +139,7 @@ export function planeLayout({ stacks = [], boxes = [], tray = 0 } = {}) {
       ly += size.h + BOX_GAP_PU * PU;
     }
   }
-  const trayRect = tray > 0 ? { x: minX - CABLE_GAP_PU * PU - TRAY_PU * PU, y: ly, w: TRAY_PU * PU, h: (BOX_PU.title + tray * 3 + BOX_PU.pad) * PU } : null;
+  const trayRect = tray > 0 ? { x: minX - CABLE_GAP_PU * PU - TRAY_PU * PU, y: ly, w: TRAY_PU * PU, h: (BOX_PU.title + tray * 4 + BOX_PU.pad) * PU } : null;
   const all = [...rects, ...boxRects.values(), ...(trayRect ? [trayRect] : [])];
   const bounds = all.length
     ? (() => {

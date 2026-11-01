@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { boundChannels, capturePorts, deviceBoxes, endpointLabel, mainBinding, peripherals, playbackPortOf, playbackPorts, setupCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, boundChannels, capturePorts, deviceBoxes, endpointLabel, mainBinding, peripherals, playbackPortOf, playbackPorts, setupCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -97,4 +97,13 @@ test('no audio device, or headless: role endpoints only, not heard on this machi
   assert.equal(bindings[0].device, null);
   assert.equal(bindings[0].note, 'not heard on this machine');
   assert.deepEqual(setupCables(new Map([['primary', [{ side: 'out', address: '/limiter.out', outside: ['/out.l'] }]]]), bindings), []);
+});
+
+test('a device of many channels stays a box: past MAX_PORT_ROWS one row holds the rest, and a role on it still finds its port', () => {
+  assert.deepEqual(playbackPorts(64).map((p) => p.name), ['Out 1–2', 'Out 3–4', 'Out 5–6', 'Out 7–8', 'Out 9–10', 'Out 11–64']);
+  assert.deepEqual(capturePorts(64).map((p) => p.name), ['In 1', 'In 2', 'In 3', 'In 4', 'In 5', 'In 6–64']);
+  assert.equal(playbackPorts(64).length, MAX_PORT_ROWS);
+  assert.equal(playbackPorts(12).length, MAX_PORT_ROWS, 'six pairs fit');
+  const [box] = deviceBoxes([{ index: 0, name: 'Loopback', id: 'l', direction: 'output', configs: [config(64)] }]);
+  assert.equal(playbackPortOf(box, 33).name, 'Out 11–64');
 });

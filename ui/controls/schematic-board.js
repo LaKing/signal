@@ -29,6 +29,8 @@ export const PLATE_FILE = 'main.html';
 export const BOARD_CSS = `
 /* ADR 0047 §5: the layer switch and the kinds on the bar. */
 .layers { display: inline-flex; flex: none; }
+/* ADR 0051 §8: inside the Signal Project plane (<signal-plane>) the board lies under the plane's own front panels: no layer switch. */
+:host([plane]) .layers { display: none; }
 .layers > button { border-radius: 0; margin-left: -1px; }
 .layers > button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
 .layers > button:last-child { border-radius: 0 4px 4px 0; }
@@ -195,6 +197,8 @@ export class SchematicBoard {
 
   /** The key's step to the next layer. */
   stepLayer() {
+    // ADR 0051 §8: inside the plane the layer is the board's, always.
+    if (this.host.hasAttribute?.('plane')) return;
     this.set({ layer: nextLayer(this.state.layer) });
   }
 

@@ -27,7 +27,7 @@ function cardsOf(project) {
 test('a card id is its heading made a slug, else its slot, else its place in the panel; repeated ids are numbered', () => {
   assert.equal(cardSlug('RHYTHM COMPOSER'), 'rhythm-composer');
   assert.equal(cardSlug('  Tape · Echo!  '), 'tape-echo');
-  assert.equal(cardSlug('Ébène'), 'ebene');
+  assert.equal(cardSlug('Ébène'), 'b-ne', 'ASCII only, as the server reads it');
   const parsed = parseContent(
     '<div class="signal-cards"><section class="signal-card"><h2>out</h2></section><section class="signal-card"><h2>Out</h2></section><signal-slot bind="/deck_a"></signal-slot><section class="signal-card"><p>x</p></section><section class="signal-card"><h2>out-2</h2></section></div>',
     whitelist,
