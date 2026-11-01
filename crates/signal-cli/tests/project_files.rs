@@ -278,6 +278,106 @@ fn a_pattern_is_hashed_packed_and_rendered() {
     no_temporary_left(&base);
 }
 
+/// `project-format.md` §1 and §7: a render's manifest hashes the render
+/// files, exactly: `project.toml` and the `.toml` files directly in
+/// `composites/`, `patterns/` and `interfaces/`. The presentation files
+/// (`ui/`), `snapshots.toml`, `devices.local.toml` and anything else in the
+/// folder are not hashed, and changing them changes no hash.
+#[test]
+fn a_manifest_hashes_the_render_files_exactly() {
+    let base = base("hashed");
+    let folder = base.join("all");
+    for dir in ["composites", "patterns", "interfaces", "ui/assets"] {
+        fs::create_dir_all(folder.join(dir)).unwrap();
+    }
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::write(
+        folder.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"all\"\nsample_rate = 8000\n\n[instances]\n\
+         clock = { module = \"std.transport\" }\n\
+         seq = { module = \"std.note_seq\", pattern = \"tune\" }\n\
+         voice = { module = \"voice\" }\n\
+         out = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [\n\
+         { from = \"clock.tick\", to = \"seq.tick\" },\n\
+         { from = \"seq.hz\", to = \"voice.freq\" },\n\
+         { from = \"voice.out\", to = \"out.l\" },\n\
+         { from = \"seq.gate\", to = \"out.r\" },\n]\n",
+    )
+    .unwrap();
+    fs::copy(
+        repository.join("crates/signal-project/tests/fixtures/example/composites/voice.toml"),
+        folder.join("composites/voice.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        repository.join("crates/signal-lib/interfaces/voice.toml"),
+        folder.join("interfaces/voice.toml"),
+    )
+    .unwrap();
+    fs::write(
+        folder.join("patterns/tune.toml"),
+        "schema_version = 1\nkind = \"notes\"\nlength = 2\nnotes = [{ key = 69, start = 0, length = 1, velocity = 1 }]\n",
+    )
+    .unwrap();
+    // Not render files: never hashed.
+    let others = [
+        "ui/main.html",
+        "ui/assets/knob.svg",
+        "ui/schematic.toml",
+        "ui/plane.toml",
+        "ui/windows.toml",
+        "snapshots.toml",
+        "devices.local.toml",
+        "notes.md",
+        "composites/readme.txt",
+    ];
+    for other in others {
+        fs::write(folder.join(other), "# one\n").unwrap();
+    }
+    let render = |out: &str| {
+        let out = signal(
+            &base,
+            &[
+                "render",
+                &text(&folder),
+                "--frames",
+                "800",
+                "--out",
+                &text(&base.join(out)),
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        json(&out)["manifest"].clone()
+    };
+    let first = render("first");
+    let hashed: Vec<&str> = first["provenance"]["project_file_hashes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        hashed,
+        [
+            "composites/voice.toml",
+            "interfaces/voice.toml",
+            "patterns/tune.toml",
+            "project.toml"
+        ],
+        "{first}"
+    );
+    for other in others {
+        fs::write(folder.join(other), "# two\n").unwrap();
+    }
+    assert_eq!(render("second"), first, "the other files change no hash");
+    no_temporary_left(&base);
+}
+
 /// AC11: `play` and `ui check` take a .signal file too, and say where its
 /// edits go (a temporary copy) when watching.
 #[test]
