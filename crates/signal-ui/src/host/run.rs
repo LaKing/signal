@@ -600,7 +600,6 @@ impl Host {
         self.resend.clear();
         self.port_edits.clear();
         self.auditions.clear();
-        self.releases.clear();
         // Mutes a last poll left are the last run's, never this one's.
         self.muted.clear();
         self.run = Some(run);

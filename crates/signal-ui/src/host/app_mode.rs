@@ -369,7 +369,6 @@ impl Host {
         self.resend.clear();
         self.port_edits.clear();
         self.auditions.clear();
-        self.releases.clear();
         self.abandon();
     }
 

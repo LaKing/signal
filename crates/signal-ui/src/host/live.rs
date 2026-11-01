@@ -408,29 +408,12 @@ impl Host {
         if let Some((port, key, true)) = &note
             && !self.clients.contains(client)
         {
-            self.releases.insert((port.clone(), *key));
+            self.auditions.end_now(port.clone(), *key);
             self.send_releases();
         }
         // The notes this client holds, ended for it if it goes.
         if let Some((port, key, on)) = note.filter(|_| self.clients.contains(client)) {
-            // A note of this key taken now supersedes a release still
-            // waiting for it (that note was ended; this one is held).
-            self.releases.remove(&(port.clone(), key));
-            let held = self.auditions.entry(client).or_default();
-            if on {
-                // One held note per port and client: a new one takes over,
-                // as the sequencer's voice does.
-                held.retain(|(p, _)| *p != port);
-                held.insert((port, key));
-            } else {
-                // Only the key held ends: an off of a key slid away from (or
-                // of another roll's key on the port) leaves the held one,
-                // which the sequencer still sounds.
-                held.remove(&(port, key));
-            }
-            if held.is_empty() {
-                self.auditions.remove(&client);
-            }
+            self.auditions.hold(client, port, key, on);
         }
         let key = self.next_ack;
         self.next_ack += 1;

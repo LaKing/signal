@@ -64,6 +64,7 @@ use crate::server::{Inbound, Server, ServerOptions};
 use crate::setup::{DEFAULT_BUFFER, Setup, Window};
 
 use app_mode::{AppMode, app_only, power_json};
+use audition::Auditions;
 use clients::{Client, Clients};
 use failure::fail;
 use live::{Failed, Pending};
@@ -258,14 +259,9 @@ pub struct Host {
     /// Live edits of plan parameter ports that are no control: the value,
     /// and whether the Controller took it.
     port_edits: BTreeMap<PortAddress, (f64, bool)>,
-    /// Live notes each client holds (`note`, ADR 0039): the port and key,
-    /// ended when the client goes so that no note is left sounding.
-    auditions: BTreeMap<u64, BTreeSet<(PortAddress, u8)>>,
-    /// The note-offs of notes whose client went (or was evicted) that the
-    /// Controller has not taken yet (a full command queue): sent again
-    /// each step until it takes them. At most one per port and key, so
-    /// bounded by the plan's audition inputs times 128 keys.
-    releases: BTreeSet<(PortAddress, u8)>,
+    /// Live notes each client holds (`note`, ADR 0039), and the note-offs
+    /// of those whose client went that the Controller has not taken yet.
+    auditions: Auditions,
     next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
@@ -508,8 +504,7 @@ impl Host {
             failed: BTreeMap::new(),
             resend: BTreeSet::new(),
             port_edits: BTreeMap::new(),
-            auditions: BTreeMap::new(),
-            releases: BTreeSet::new(),
+            auditions: Auditions::default(),
             next_failure: 1,
             unsaved_pushed: None,
             graph_pushed: None,
