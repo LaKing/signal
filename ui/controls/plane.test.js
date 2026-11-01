@@ -246,6 +246,76 @@ test('the slot listed in both forms is one instrument listed twice: an error, th
   assert.deepEqual([...p.stacks.get('primary').cards.keys()], ['card:melody', 'synth', 'card:echo']);
 });
 
+// The Setup level follows a Setup change without a new generation (review of 2026-11-01).
+
+const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
+const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
+const SPEAKERS_ID = 'coreaudio:BuiltInSpeakerDevice';
+const INVENTORY = [
+  { index: 0, name: 'MacBook Pro Speakers', id: SPEAKERS_ID, direction: 'output', default: true, rate: 48000, configs: [config(2)] },
+  { index: 1, name: 'SSL 2+ MKII', id: SSL_ID, direction: 'output', default: false, rate: 48000, configs: [config(4)] },
+];
+
+/** A connection answering the plane's reads from `state` (its Setup, its inventory's resolution), recording each request; `emit` pushes a message. */
+function setupConnection(state) {
+  const handlers = new Map();
+  return {
+    status: 'open',
+    description: null,
+    requests: [],
+    on(type, fn) {
+      if (!handlers.has(type)) handlers.set(type, new Set());
+      handlers.get(type).add(fn);
+      return () => handlers.get(type).delete(fn);
+    },
+    emit(type, message) {
+      for (const fn of handlers.get(type) ?? []) fn(message);
+    },
+    request(message) {
+      this.requests.push(message);
+      if (message.type === 'panel.read') return Promise.resolve({ exists: true, html: PANEL, plate: null, text: '' });
+      if (message.type === 'graph') return Promise.resolve(GRAPH);
+      if (message.type === 'setup.get') return Promise.resolve({ type: 'setup', setup: state.setup, local: null, playing: true });
+      if (message.type === 'setup.devices') return Promise.resolve({ type: 'setup.devices', devices: INVENTORY, output: { found: state.found } });
+      return Promise.reject(new Error(`unexpected ${message.type}`));
+    },
+  };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test('after a Setup change on the same generation the Setup level’s cable agrees with the active Setup: output device, then output channels', async () => {
+  const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
+  const connection = setupConnection(state);
+  const p = plane();
+  p.graph = null;
+  p.attach(connection);
+  await settle();
+  const cable = () => p.model.bindings.map((b) => [b.device, b.channels]);
+  assert.deepEqual(cable(), [[`id:${SSL_ID}`, [1, 2]]], 'main on the SSL 2+’s Out 1–2');
+  // The Setup tab applies another output device (`setup.apply`'s reply, on this connection); no `app` generation comes.
+  state.setup = { output: { name: 'MacBook Pro Speakers', id: SPEAKERS_ID }, outputChannels: null };
+  state.found = 0;
+  connection.emit('message', { type: 'applied', saved: true, restarted: false, setup: state.setup, id: 7 });
+  await settle();
+  assert.deepEqual(cable(), [[`id:${SPEAKERS_ID}`, [1, 2]]], 'the cable moved to the speakers');
+  // A cable dragged to Out 3–4 (`device.route`'s reply is `applied` too).
+  state.setup = { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: [3, 4] };
+  state.found = 1;
+  connection.emit('message', { type: 'applied', saved: true, restarted: false, setup: state.setup, routed: { role: 'main', scope: 'machine', notes: [] }, id: 8 });
+  await settle();
+  assert.deepEqual(cable(), [[`id:${SSL_ID}`, [3, 4]]], 'on Out 3–4');
+  // A refused apply changes nothing and reads nothing.
+  const reads = connection.requests.filter((m) => m.type === 'setup.get').length;
+  connection.emit('message', { type: 'applied', saved: false, restarted: false, error: 'disk full', id: 9 });
+  await settle();
+  assert.equal(connection.requests.filter((m) => m.type === 'setup.get').length, reads);
+  // The hardware is never enumerated again for it: no `refresh`.
+  assert.equal(connection.requests.filter((m) => m.type === 'setup.devices').length, 3);
+  assert.ok(connection.requests.every((m) => !m.refresh));
+  p.detach();
+});
+
 // The keys (ADR 0039, ADR 0034): the plane's capture listener, then the page's.
 
 /** A transport to toggle, as ui/controls/keyboard.test.js's. */

@@ -344,8 +344,16 @@ export class SignalPlane extends HTMLElement {
     };
     on('graph', (graph) => this.graphSeen(graph));
     on('welcome', () => this.fetchAll());
+    // A Setup change on this connection (the Setup tab's `setup.apply`, a cable's `device.route`): the Setup level follows it.
+    on('message', (message) => {
+      if (setupChanged(message)) this.readSetup();
+    });
     on('reload', () => this.readPlane());
-    on('describe', (description) => this.described(description));
+    on('describe', (description) => {
+      // The Setup applied while playing: the run played again with it.
+      if (description?.restarted) this.readSetup();
+      this.described(description);
+    });
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html') this.readPanel();
     });
@@ -459,11 +467,18 @@ export class SignalPlane extends HTMLElement {
       });
   }
 
-  /** The Setup and the device inventory as listed (never refreshed here: listing devices pauses the control thread). */
+  /**
+   * The Setup and the device inventory as listed: read when the project
+   * opens, and again after every Setup change (`setupChanged`). Never
+   * refreshed here (`setup.devices` without `refresh`: the list the host
+   * holds, no enumeration of the hardware, which pauses the control thread);
+   * its `output` resolution follows the Setup. Only the latest read is drawn.
+   */
   readSetup() {
     const gen = this.generation;
-    Promise.all([this.request({ type: 'setup.get' }).catch(() => null), this.request({ type: 'setup.devices' }).catch(() => null)]).then(([setup, devices]) => {
-      if (gen !== this.generation) return;
+    const read = (this.setupReads = (this.setupReads ?? 0) + 1);
+    return Promise.all([this.request({ type: 'setup.get' }).catch(() => null), this.request({ type: 'setup.devices' }).catch(() => null)]).then(([setup, devices]) => {
+      if (gen !== this.generation || read !== this.setupReads) return;
       this.setup = setup;
       this.devices = devices;
       this.recompute();
@@ -2212,6 +2227,15 @@ export class SignalPlane extends HTMLElement {
     }
     return [];
   }
+}
+
+/**
+ * Whether `message` (any message of the connection, a reply included) says
+ * the Setup changed: `setup.apply`'s reply, also `device.route`'s and
+ * `device.unroute`'s (`applied`, saved). The generation does not change.
+ */
+export function setupChanged(message) {
+  return message?.type === 'applied' && message.saved === true;
 }
 
 /** The kinds of item a press drags a cable from, and those a click selects. */
