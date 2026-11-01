@@ -42,7 +42,6 @@ mod watch;
 mod writer;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
@@ -59,7 +58,6 @@ use signal_project::transaction::{self};
 
 use crate::PROTOCOL;
 use crate::app::{self};
-use crate::document::Document;
 use crate::keys::{self, Keys};
 use crate::panel::Panel;
 use crate::player::Backend;
@@ -624,7 +622,7 @@ impl Host {
     pub fn hold_writer(&self, client: u64, held: bool) -> bool {
         match self.clients.get(client) {
             Some(c) => {
-                c.gate.store(held, Ordering::Relaxed);
+                c.gate.store(held, std::sync::atomic::Ordering::Relaxed);
                 true
             }
             None => false,
@@ -654,7 +652,7 @@ impl Host {
 
     /// Test hooks: the open `.signal` project, for one.
     #[cfg(feature = "test-hooks")]
-    pub fn document(&self) -> Option<&Document> {
+    pub fn document(&self) -> Option<&crate::document::Document> {
         self.opening.document.as_ref()
     }
 

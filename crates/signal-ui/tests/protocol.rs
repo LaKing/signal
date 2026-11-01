@@ -930,6 +930,106 @@ fn a_presentation_change_is_not_reloaded(transport: Transport) {
     rig.finish();
 }
 
+/// A client's `at` more than a second past the default stamp is refused
+/// (`docs/ui-protocol.md` "Live edits"): it would hold back every live
+/// edit sent after it (the runner applies none before an earlier one of
+/// its kind). After a refused far `at`, a default-stamped edit applies at
+/// about its default frame, and a note off still ends the note; an `at`
+/// within the horizon is taken as given.
+fn a_far_future_at_is_refused_and_holds_back_nothing(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-horizon-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("project.toml"), AUDITION).unwrap();
+    let mut rig = rig(
+        "at-horizon",
+        Options {
+            transport,
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let scope = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "subscribe", "stream": "scope", "port": "/melody.gate", "rate": 4800}),
+        "subscribed",
+    );
+    let sub = scope["sub"].as_u64().unwrap();
+    let gate = |rig: &mut Rig, ws: &mut common::Ws, after: u64, level: f32, what: &str| {
+        rig.wait(ws, what, |got| {
+            got.frame(SCOPE, sub)
+                .filter(|f| f.first > after && f.f32s().iter().all(|&g| g == level))
+        });
+    };
+    let ack = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "on": true}),
+        "ack",
+    );
+    gate(&mut rig, &mut ws, ack["frame"].as_u64().unwrap(), 1.0, "held");
+
+    // Far ahead, or a second and more past the default stamp: refused.
+    let pong = rig.request(&mut ws, 3, json!({"type": "ping"}), "pong");
+    let default = pong["frame"].as_u64().unwrap() + pong["latency"].as_u64().unwrap();
+    for (id, at) in [(4, 1_000_000_000_000u64), (5, default + 2 * 48_000)] {
+        for message in [
+            json!({"type": "set", "address": "/out.gain", "value": 0.1, "at": at}),
+            json!({"type": "note", "address": "/melody.audition", "key": 72, "on": true, "at": at}),
+            json!({"type": "commit", "values": [{"address": "/out.gain", "value": 0.1}], "at": at}),
+        ] {
+            let refused = rig.request(&mut ws, id, message.clone(), "error");
+            assert_eq!(refused["code"], "bad-value", "{message}");
+        }
+    }
+    let refused = rig.request(
+        &mut ws,
+        6,
+        json!({"type": "set", "address": "/out.gain", "value": 0.1, "at": "soon"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "bad-value");
+
+    // A default-stamped edit applies at about its default frame.
+    let ack = rig.request(
+        &mut ws,
+        7,
+        json!({"type": "set", "address": "/out.gain", "value": 0.1}),
+        "ack",
+    );
+    assert_eq!(ack["outcome"], "scheduled");
+    assert_eq!(ack["late"], false, "{ack}");
+    // The note off ends the note at its default frame.
+    let ack = rig.request(
+        &mut ws,
+        8,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "on": false}),
+        "ack",
+    );
+    assert_eq!(ack["late"], false, "{ack}");
+    let off = ack["frame"].as_u64().unwrap();
+    assert!(off < default + 48_000, "the note off at {off}, default {default}");
+    gate(&mut rig, &mut ws, off, 0.0, "released");
+
+    // Within the horizon: taken at the frame given.
+    let pong = rig.request(&mut ws, 9, json!({"type": "ping"}), "pong");
+    let at = pong["frame"].as_u64().unwrap() + pong["latency"].as_u64().unwrap() + 4_800;
+    let ack = rig.request(
+        &mut ws,
+        10,
+        json!({"type": "set", "address": "/out.gain", "value": 0.05, "at": at}),
+        "ack",
+    );
+    assert_eq!(ack["frame"].as_u64(), Some(at), "{ack}");
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 fn with_id(message: &Value, id: u64) -> Value {
     let mut message = message.clone();
     message["id"] = json!(id);
@@ -946,6 +1046,7 @@ both!(
     meters_and_a_scope_stream_arrive,
     set_ramp_and_trigger_are_acknowledged_with_their_frame,
     a_note_sounds_while_held_and_ends_when_its_client_goes,
+    a_far_future_at_is_refused_and_holds_back_nothing,
     commit_writes_the_file_once_and_the_watch_does_not_reload_it,
     an_edit_the_watch_cannot_see_is_applied_by_the_next_commit,
     a_presentation_change_is_not_reloaded,

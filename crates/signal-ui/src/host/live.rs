@@ -15,6 +15,11 @@ use super::controls::{bits, control_of, plan_base};
 use super::failure::{Failure, fail};
 use super::{Host, with, within};
 
+/// How far past the default stamp (the current frame plus the latency) a
+/// client's `at` may lie, in seconds of the project's frames
+/// (`docs/ui-protocol.md` "Live edits"): further is refused.
+pub(super) const AT_HORIZON_SECONDS: u64 = 1;
+
 /// An edit waiting for its reports.
 pub(super) struct Pending {
     client: u64,
@@ -328,6 +333,36 @@ impl Host {
         }
     }
 
+    /// A live edit's or a commit's `at` (`docs/ui-protocol.md` "Live
+    /// edits"): `None` without one (the default stamp), else its frame,
+    /// refused (`bad-value`) when it is no whole number or lies more than
+    /// [`AT_HORIZON_SECONDS`] past the default stamp of the run playing. The
+    /// runner never applies a command before an earlier one of its kind
+    /// (`semantics.md` "Pushed input and effective frames"), so an `at` far
+    /// ahead would hold back every live edit sent after it, a note off
+    /// included; bounded, it holds them back at most that long.
+    pub(super) fn at_of(&self, message: &Value) -> Result<Option<Frame>, Failure> {
+        let at = match message.get("at") {
+            None | Some(Value::Null) => return Ok(None),
+            Some(at) => at
+                .as_u64()
+                .ok_or_else(|| fail("bad-value", "`at` must be a frame (a whole number)"))?,
+        };
+        if let Some(run) = &self.run {
+            let default = run.controller.default_frame().0;
+            let horizon = u64::from(self.rate.max(1)) * AT_HORIZON_SECONDS;
+            if at > default.saturating_add(horizon) {
+                return Err(fail(
+                    "bad-value",
+                    format!(
+                        "`at` {at} is more than {AT_HORIZON_SECONDS} s past the default stamp (frame {default}): a live edit is stamped at most {horizon} frames ahead, so that it cannot hold back the edits sent after it"
+                    ),
+                ));
+            }
+        }
+        Ok(Some(Frame(at)))
+    }
+
     /// `set`, `ramp`, `trigger`: through the Controller, acknowledged once
     /// every port's report is in.
     pub(super) fn edit(
@@ -338,10 +373,7 @@ impl Host {
         message: &Value,
     ) -> Result<(), Failure> {
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
-        let stamp = match message.get("at").and_then(Value::as_u64) {
-            Some(frame) => Stamp::At(Frame(frame)),
-            None => Stamp::Default,
-        };
+        let stamp = self.at_of(message)?.map_or(Stamp::Default, Stamp::At);
         let number = |key: &str| {
             message
                 .get(key)

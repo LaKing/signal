@@ -244,7 +244,7 @@ Live edits through the run's `Controller`, the path the parameter panel takes:
 {"type": "trigger", "id": 5, "address": "/accent.trigger"}
 ```
 
-`address` is a control (to every one of its ports) or a plan parameter port; `trigger` takes an event input of the plan. Values are clamped to the range; a ramp takes `frames`, or `ms`, or the panel's 5 ms. `at` (a frame) stamps the edit; without it the edit gets the default stamp (the current frame plus the latency). Once the runner has reported every command of the edit:
+`address` is a control (to every one of its ports) or a plan parameter port; `trigger` takes an event input of the plan. Values are clamped to the range; a ramp takes `frames`, or `ms`, or the panel's 5 ms. `at` (a frame) stamps the edit; without it the edit gets the default stamp (the current frame plus the latency). **`at` has a horizon** (review 2026-11-01): it must be a whole number no more than **one second** of the project's frames (`sample_rate`) past the default stamp of the run playing, else the edit is refused (`bad-value`) and nothing is sent. The runner never applies a command before an earlier one of its kind (`semantics.md` "Pushed input and effective frames"; canonical order is kept), so a stamp far ahead would hold back every live edit sent after it, a note off included; within the horizon an `at` holds them back at most one second. An `at` in the past applies at the next frame (`late`). The same horizon applies to the batch `commit`'s `at`. Once the runner has reported every command of the edit:
 
 ```json
 {"type": "ack", "id": 3, "frame": 12544, "requested": 12544, "late": false, "outcome": "scheduled"}

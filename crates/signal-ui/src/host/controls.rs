@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use signal_core::{Frame, PortAddress};
+use signal_core::PortAddress;
 use signal_engine::Stamp;
 use signal_graph::ExecutionPlan;
 use signal_project::transaction;
@@ -279,11 +279,9 @@ impl Host {
                 value,
             });
         }
-        let frame = match message.get("at") {
-            None | Some(Value::Null) => self.run.as_ref().map(|r| r.controller.default_frame()),
-            Some(at) => Some(Frame(at.as_u64().ok_or_else(|| {
-                fail("bad-value", "`at` must be a frame (a whole number)")
-            })?)),
+        let frame = match self.at_of(message)? {
+            None => self.run.as_ref().map(|r| r.controller.default_frame()),
+            Some(at) => Some(at),
         };
         let stamp = frame.map_or(Stamp::Default, Stamp::At);
         let written = self.write_controls_at(ctx, &edits, false, stamp)?;
