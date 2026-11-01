@@ -107,6 +107,8 @@ enum UserEvent {
     Page(WindowId, String),
     /// The keymap changed (ADR 0034): each menu action's chord.
     Keys(Vec<(MenuAction, Option<String>)>),
+    /// A file under the UI library changed (`SIGNAL_UI_DEV`): every page reloads.
+    UiChanged,
 }
 
 type Target = EventLoopWindowTarget<UserEvent>;
@@ -359,6 +361,18 @@ struct Settings {
 }
 
 impl Windows {
+    /// Reloads every window's page and the Settings window (`SIGNAL_UI_DEV`).
+    fn reload_pages(&self) {
+        for shown in &self.list {
+            shown.run("location.reload()");
+        }
+        if let Some(settings) = &self.settings
+            && let Err(error) = settings.webview.evaluate_script("location.reload()")
+        {
+            eprintln!("signal-app: {error}");
+        }
+    }
+
     /// Opens a window of `view` holding `cards` at `at`.
     fn open(
         &mut self,
@@ -1060,13 +1074,24 @@ fn main() -> ExitCode {
     // Opened .signal files are unpacked under Application Support/Signal/Open
     // (beside the Setup's folder when HOME is not set).
     let open = open_root(std::env::var_os("HOME")).unwrap_or_else(|| path.with_file_name("Open"));
-    // The bundle's ui/ (Contents/Resources/ui), else the repository's.
+    // The bundle's ui/ (Contents/Resources/ui), else the repository's;
+    // `SIGNAL_UI_DEV=<dir>` serves that folder instead and reloads every page
+    // when a file in it changes (development: `./start.sh --dev`).
     let exe = std::env::current_exe().ok();
     let built = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui"));
+    let ui_dev = std::env::var_os("SIGNAL_UI_DEV")
+        .map(PathBuf::from)
+        .filter(|dir| dir.join("signal-ui.js").is_file());
+    let ui_dir = ui_dev
+        .clone()
+        .unwrap_or_else(|| signal_ui::library_dir(exe.as_deref(), built));
 
     // `./start.sh`'s request to quit without asking, beside the Setup.
     let restart_request = restart::request_path(&path);
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    if let Some(dir) = ui_dev {
+        watch_ui(dir, event_loop.create_proxy());
+    }
     let projects = event_loop.create_proxy();
     let keymaps = event_loop.create_proxy();
     let server = AppServer::start(AppConfig {
@@ -1074,7 +1099,7 @@ fn main() -> ExitCode {
         project,
         open_root: open,
         backend: Backend::CoreAudio,
-        ui_dir: signal_ui::library_dir(exe.as_deref(), built),
+        ui_dir,
         on_project: Some(Box::new(move |status| {
             let _ = projects.send_event(UserEvent::Project(status));
         })),
@@ -1155,6 +1180,10 @@ fn main() -> ExitCode {
             // ADR 0034: the keymap changed; the menu's chords follow it.
             Event::UserEvent(UserEvent::Keys(chords)) => {
                 menu.set_chords(&chords);
+                None
+            }
+            Event::UserEvent(UserEvent::UiChanged) => {
+                windows.reload_pages();
                 None
             }
             Event::MainEventsCleared => {
@@ -1524,6 +1553,49 @@ fn choose_save(name: &str) -> Option<PathBuf> {
     }
     let path = panel.URL()?.path()?;
     Some(PathBuf::from(path.to_string()))
+}
+
+/// Development (`SIGNAL_UI_DEV`): polls the UI library's files every 200 ms
+/// and asks for a reload of every page when one changed, was added or removed.
+fn watch_ui(dir: PathBuf, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+    fn stamp(dir: &Path, into: &mut Vec<(PathBuf, std::time::SystemTime)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stamp(&path, into);
+            } else if let Ok(modified) = meta.modified() {
+                into.push((path, modified));
+            }
+        }
+    }
+    let scan = move || {
+        let mut files = Vec::new();
+        stamp(&dir, &mut files);
+        files.sort();
+        files
+    };
+    let spawned = std::thread::Builder::new()
+        .name("ui-dev-watch".into())
+        .spawn(move || {
+            let mut last = scan();
+            loop {
+                std::thread::sleep(Duration::from_millis(200));
+                let now = scan();
+                if now != last {
+                    last = now;
+                    if proxy.send_event(UserEvent::UiChanged).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("signal-app: the UI watch did not start: {error}");
+    }
 }
 
 #[cfg(test)]

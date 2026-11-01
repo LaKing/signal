@@ -9,6 +9,9 @@
 #                                   (signal play --watch; press Enter to stop)
 #   ./start.sh --debug ...          debug build instead of release
 #   ./start.sh --no-build ...       start the existing dist/Signal.app as it is
+#   ./start.sh --dev ...            serve the repository's ui/ instead of the
+#                                   bundle's and reload every window when a file
+#                                   in it changes (SIGNAL_UI_DEV)
 #
 # A running Signal is asked to quit first, so the fresh build is what starts.
 # It asks nothing: an edited project's changes stay in its working folder,
@@ -27,13 +30,15 @@ die () { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 PROFILE=release
 BUILD=1
 CLI=0
+DEV=0
 PROJECT=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug) PROFILE=debug ;;
     --no-build) BUILD=0 ;;
     --cli) CLI=1 ;;
-    -h|--help) sed -n '3,21p' "$0"; exit 0 ;;
+    --dev) DEV=1 ;;
+    -h|--help) sed -n '3,24p' "$0"; exit 0 ;;
     -*) die "unknown option: $1 (see ./start.sh --help)" ;;
     *) [[ -z $PROJECT ]] || die "give one project folder, not several"; PROJECT=$1 ;;
   esac
@@ -96,10 +101,15 @@ if PIDS=$(pgrep -f "$APP/Contents/MacOS/Signal"); then
   ! pgrep -f "$APP/Contents/MacOS/Signal" >/dev/null || die "Signal is still running: quit it and run ./start.sh again"
 fi
 
+ENV=()
+if [[ $DEV == 1 ]]; then
+  say "development: serving $ROOT/ui, windows reload when it changes"
+  ENV=(--env "SIGNAL_UI_DEV=$ROOT/ui")
+fi
 if [[ -n $PROJECT ]]; then
   say "starting Signal with $PROJECT"
-  open "$APP" --args --project "$PROJECT"
+  open ${ENV[@]+"${ENV[@]}"} "$APP" --args --project "$PROJECT"
 else
   say "starting Signal"
-  open "$APP"
+  open ${ENV[@]+"${ENV[@]}"} "$APP"
 fi
