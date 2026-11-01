@@ -410,6 +410,31 @@ fn a_restart_does_not_raise_a_lowered_gain() {
     assert!(mcp.finish().success());
 }
 
+/// Review 2026-11-01 (security-minor): `session_stop` plays again from the
+/// files, so it is held to the restart rule: with a gain lowered live
+/// below a file value over the ceiling it is refused, the session goes on
+/// recording and the gain stays lowered; once the lowered value is
+/// committed the session is written and the gain stays where it was.
+#[test]
+fn session_stop_does_not_raise_a_lowered_gain() {
+    let mut mcp = Mcp::started(&project(&tone("0.5"), "gain-session-stop"), &[]);
+    mcp.ok("session_start", json!({}));
+    mcp.ok(
+        "set_parameter",
+        json!({"address": "/out.gain", "value": 0.1}),
+    );
+    let message = refused(&mut mcp, "session_stop", json!({}));
+    assert!(message.contains("commit the lowered value"), "{message}");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(live_gain(&mut mcp), 0.1);
+    mcp.ok("commit", json!({"address": "/out.gain"}));
+    let written = mcp.ok("session_stop", json!({}));
+    assert!(written["frames"].as_u64().unwrap() > 0, "{written}");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(live_gain(&mut mcp), 0.1);
+    assert!(mcp.finish().success());
+}
+
 /// review H2 (operator's decision): `--max-gain` is the output's ceiling.
 /// A connection into the sink scaled ×20 raises no gain, so the guard
 /// allows it, but what goes to the device (the null driver's buffer, the

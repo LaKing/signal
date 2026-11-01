@@ -180,7 +180,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 | Tool | Does |
 |---|---|
 | `session_start` (`discard?`) | Plays the project again from frame 0, recording a session (`session-format.md`). It is refused while parameters are unsaved, unless `discard`, and, as `revert` is, when playing from the files would raise a lowered gain above `--max-gain` ("Safety") |
-| `session_stop` | Ends the recorded run and writes `<out>/session-<n>/session/` (the session directory) and `audio.wav` beside it: the samples the null driver played, which the session format does not hold, as the device got them (held within the output ceiling). Returns their FNV-1a 64 as `capturedFnv1a64`, and the `ceiling` (also in `captured.json`). With `--audio` the samples were the device's, so `wav` and `capturedFnv1a64` are null. The project then plays again, not recording |
+| `session_stop` | Ends the recorded run and writes `<out>/session-<n>/session/` (the session directory) and `audio.wav` beside it: the samples the null driver played, which the session format does not hold, as the device got them (held within the output ceiling). Returns their FNV-1a 64 as `capturedFnv1a64`, and the `ceiling` (also in `captured.json`). With `--audio` the samples were the device's, so `wav` and `capturedFnv1a64` are null. The project then plays again, not recording, from its files: refused while that would raise a lowered gain (the gain guard below) |
 | `replay` (`session?`, default: the last one) | `signal replay` of it into `<out>/replay-<n>/`. The replay is the project's audio (`audio_fnv1a64`, unheld); for a session `session_stop` wrote with a ceiling, its samples are held the same way (`heldFnv1a64`). `identical` is true when the replay succeeds and the held hash (without a ceiling, `audio_fnv1a64`) equals `capturedFnv1a64` |
 
 ## Resources
@@ -209,7 +209,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 
   - for `set`, `ramp` (its target), `commit`, `revert`, `snapshot_restore` and `snapshot_undo` (each value of the snapshot, or of the undo snapshot, of a control in snapshots, clamped to its control's range), the value it sends;
   - for an edit of the files (`patch`, `write_file`, `write_pattern`, `vendor`, checked in memory on the text at `base`), the file's new value when it changes or the port is new, otherwise the live base. A reload sends a parameter only when its file value changes (`ui-protocol.md` "Unsaved"). An absent `gain` key is the declared default, 1.0;
-  - for playing again from the files (`transport` start, `session_start` with `discard`), the file's value of every unsaved parameter, as for `revert`: a lowered live gain is not raised that way. Commit the lowered value first.
+  - for playing again from the files (`transport` start, `session_start` with `discard`, and `session_stop`, whose next run plays from the files), the file's value of every unsaved parameter, as for `revert`: a lowered live gain is not raised that way. Commit the lowered value first. A refused `session_stop` leaves the session recording, nothing lost; once the lowered value is committed it stops and writes the session (review 2026-11-01; `crates/signal-cli/tests/mcp_gain.rs` `session_stop_does_not_raise_a_lowered_gain`).
 
   More rules:
 

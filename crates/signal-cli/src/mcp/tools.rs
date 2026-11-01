@@ -2804,6 +2804,18 @@ fn session_start(context: &Context, arguments: &Value) -> Outcome {
 }
 
 fn session_stop(context: &Context, _: &Value) -> Outcome {
+    // The run after the recorded one plays from the files, sending every
+    // unsaved value back to the file's: checked as `session_start` and a
+    // revert are (review 2026-11-01), so a lowered gain is never raised.
+    // Refused, the recording goes on and nothing is lost: commit the
+    // lowered value, then stop.
+    guard_restart(context).map_err(|refusal| Refused {
+        message: format!(
+            "{}; the session goes on recording: commit the lowered value (its file then holds it), then session_stop",
+            refusal.message
+        ),
+        detail: refusal.detail,
+    })?;
     let folder = numbered(&context.out, "session");
     let mut link = lock(context);
     let Some(control) = &link.control else {
