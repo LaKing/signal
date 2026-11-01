@@ -11,9 +11,15 @@
 //   - Stack, from the fit: the Stack fills the stage's width and the wheel
 //     scrolls it vertically;
 //   - the wiring band (WIRING_BAND, 1.5× to 2× the fit, tunable): a
-//     cross-fade in place to the drawing below the front panels (in phase 1
-//     the board of ADR 0047, with its deep zoom into dies; ADR 0051 phase 2
-//     makes it the Wiring level), past which that drawing has the input.
+//     cross-fade in place from the front panels to the Wiring level, the
+//     back of the rack (ui/lib/plane-wiring.js);
+//   - the control band (CONTROL_BAND): the instrument under the zoom point
+//     opens into its Control plane (ui/lib/plane-control.js), the others
+//     fade to SURROUND;
+//   - the engine band (`engineBand`, from the cube's size): the cube's
+//     Engine, ADR 0047's board and its die zoom, fades in laid on the cube
+//     (`frameOnto`), past which the board has the input.
+// The rectangles never move: the levels are nested footprints.
 // One curve in and out, no timer: the opacities are functions of `r` only,
 // monotonic, exactly 0 and 1 at a band's ends. View state only (rule 4).
 // Pure; no DOM.
@@ -26,11 +32,16 @@ export { SURROUND };
 export const FOCUS_BAND = Object.freeze([0.6, 1]);
 /** The wiring band, in `r` (ADR 0051 §8: 1.5× to 2×, tunable). */
 export const WIRING_BAND = Object.freeze([1.5, 2]);
+/** The control band, in `r` (tunable): the instrument under the zoom point opens into its Control plane, the others fade to SURROUND. */
+export const CONTROL_BAND = Object.freeze([2.2, 2.6]);
+/** The engine band starts at this share of the ratio at which the cube fills the stage, and never before CONTROL_BAND's end plus ENGINE_GAP. */
+export const ENGINE_FROM = 0.6;
+export const ENGINE_GAP = 0.5;
 /** The stage's margin around a fitted Stack or the whole plane (px). */
 export const MARGIN_PX = 24;
-/** The view's scale limits relative to the fit: far enough out for any Setup, far enough in for the board's dies (the board zooms on by itself past the band). */
+/** The view's scale limits relative to the fit: far enough out for any Setup, in to the engine band's end (the board zooms on by itself past it). */
 export const MIN_R = 0.01;
-export const MAX_R = WIRING_BAND[1];
+export const MAX_R = CONTROL_BAND[1] + 2 * ENGINE_GAP;
 /** A ratio within this of 1 is the fit (rounding of a fitted view). */
 const FIT_EPSILON = 1e-6;
 
@@ -66,23 +77,87 @@ export function bandShare(r, band) {
 }
 
 /**
- * The opacities at ratio `r`: `focus` and `wiring` (how far into each
- * band), `setup` (Setup cables, peripherals, other Stacks: 1 down to
- * SURROUND over the focus band), `panels` (the focused Stack's front
- * panels: 1 down to 0 over the wiring band) and `deep` (the drawing below
- * them: 0 up to 1 over it).
+ * The engine band (in `r`) of a cube that fills the stage at ratio
+ * `cubeR` (its fit scale over the Stack's): from ENGINE_FROM of it to it,
+ * never starting before CONTROL_BAND's end plus ENGINE_GAP, nor shorter
+ * than ENGINE_GAP. Without a cube: the default band.
  */
-export function planeFades(r) {
-  const focus = bandShare(r, FOCUS_BAND);
-  const wiring = bandShare(r, WIRING_BAND);
-  return { focus, wiring, setup: (1 - focus) + SURROUND * focus, panels: 1 - wiring, deep: wiring };
+export function engineBand(cubeR = 0) {
+  const b = Math.max(CONTROL_BAND[1] + 2 * ENGINE_GAP, Number.isFinite(cubeR) ? cubeR : 0);
+  return Object.freeze([Math.max(CONTROL_BAND[1] + ENGINE_GAP, Math.min(b - ENGINE_GAP, ENGINE_FROM * b)), b]);
 }
 
-/** The level at ratio `r`: `setup` below the fit, `stack` from it, `wiring` from the wiring band's end. */
-export function levelOf(r) {
+/** The engine band without a cube measured. */
+export const ENGINE_BAND = engineBand();
+
+/**
+ * The opacities at ratio `r` (`engine`: the opened instrument's engine
+ * band, `engineBand`'s). How far into each band: `focus`, `wiring`,
+ * `control`, `engine`. Then what each drawing shows:
+ *   - `setup`: Setup cables, peripherals, other Stacks, 1 down to SURROUND
+ *     over the focus band;
+ *   - `panels`: the focused Stack's front panels, 1 down to 0 over the
+ *     wiring band;
+ *   - `board`: the Wiring drawing of the instruments not opened, 0 up to 1
+ *     over the wiring band, then down to SURROUND over the control band;
+ *   - `openWiring`: the opened instrument's Wiring box, up over the wiring
+ *     band and out over the control band, as its Control plane comes in;
+ *   - `sheet`: the opened instrument's Control plane, 0 up to 1 over the
+ *     control band, then down to SURROUND over the engine band;
+ *   - `controls`: its live controls (its front panel's), out over the
+ *     wiring band and back over the control band, never below `panels`;
+ *   - `deep`: the Engine (the board's die zoom), 0 up to 1 over the engine
+ *     band.
+ * Functions of `r` alone, so in and out are one curve (no timer).
+ */
+export function planeFades(r, engine = ENGINE_BAND) {
+  const focus = bandShare(r, FOCUS_BAND);
+  const wiring = bandShare(r, WIRING_BAND);
+  const control = bandShare(r, CONTROL_BAND);
+  const deep = bandShare(r, engine);
+  const sheet = control * (1 - (1 - SURROUND) * deep);
+  return {
+    focus,
+    wiring,
+    control,
+    engine: deep,
+    setup: 1 - focus + SURROUND * focus,
+    panels: 1 - wiring,
+    board: wiring * (1 - (1 - SURROUND) * control),
+    openWiring: wiring * (1 - control),
+    sheet,
+    controls: Math.max(1 - wiring, sheet),
+    deep,
+  };
+}
+
+/** The level at ratio `r`: `setup` below the fit, `stack` from it, `wiring` from the wiring band's end, `control` from the control band's, `engine` from the engine band's. */
+export function levelOf(r, engine = ENGINE_BAND) {
+  if (r >= engine[1]) return 'engine';
+  if (r >= CONTROL_BAND[1]) return 'control';
   if (r >= WIRING_BAND[1]) return 'wiring';
   if (r >= 1 - FIT_EPSILON) return 'stack';
   return 'setup';
+}
+
+/** Whether the instrument that opens still follows the zoom point at ratio `r`: below the control band (inside it, another one would jump the fades). */
+export function opensAt(r) {
+  return r < CONTROL_BAND[0];
+}
+
+/**
+ * The instrument of `rects` (`[{entry, x, y, w, h}]`, plane units) at plane
+ * point `p`, else the nearest one by vertical distance; null without any.
+ */
+export function instrumentAt(rects, p) {
+  let best = null;
+  for (const r of rects) {
+    const dy = Math.max(r.y - p.y, 0, p.y - (r.y + r.h));
+    const dx = Math.max(r.x - p.x, 0, p.x - (r.x + r.w));
+    const d = Math.hypot(dx, dy);
+    if (!best || d < best.d) best = { entry: r.entry, d };
+  }
+  return best?.entry ?? null;
 }
 
 /** The scale at which a Stack `rect` (plane units) fills a `viewport`'s width less the margins. */
@@ -134,10 +209,10 @@ export function fitAll(bounds, viewport, margin = MARGIN_PX) {
   return { k, x: viewport.w / 2 - (bounds.x + bounds.w / 2) * k, y: viewport.h / 2 - (bounds.y + bounds.h / 2) * k };
 }
 
-/** `view` zoomed by `factor` about screen point `at` (which stays where it is), its ratio to `fit` kept within MIN_R and MAX_R. */
-export function zoomAbout(view, factor, at, fit = null) {
+/** `view` zoomed by `factor` about screen point `at` (which stays where it is), its ratio to `fit` kept within MIN_R and `maxR` (MAX_R by default). */
+export function zoomAbout(view, factor, at, fit = null, maxR = MAX_R) {
   let k = view.k * factor;
-  if (fit > 0) k = Math.min(fit * MAX_R, Math.max(fit * MIN_R, k));
+  if (fit > 0) k = Math.min(fit * maxR, Math.max(fit * MIN_R, k));
   if (!Number.isFinite(k) || k <= 0) return view;
   const f = k / view.k;
   return { k, x: at.x - (at.x - view.x) * f, y: at.y - (at.y - view.y) * f };
@@ -158,41 +233,43 @@ export function reachesFit(r0, r1) {
 }
 
 /**
- * The board's root view (ADR 0047's coordinates, `ui/lib/schematic-view.js`:
- * `screen = (world − o) · k + (x, y)`, o = 0) that lays the board's plate
- * origin on the plane point `origin` under `view`, on a stage whose top-left
- * is `offset` (screen px) from the plane's.
+ * The Engine's view (ADR 0051 §8: Control → Engine, the existing die zoom):
+ * a view of the board's coordinates (ui/lib/schematic-view.js, `o` = 0)
+ * that lays rectangle `frame` (the instrument's chips on the board) on
+ * screen rectangle `onto` (its cube as drawn), fitted inside it and
+ * centred, so the cube's centre, the zoom point, stays put across the
+ * cross-fade. `offset`: the board's stage's top-left from the plane's.
  */
-export function boardView(view, origin, offset = { x: 0, y: 0 }) {
-  return { k: view.k, ox: 0, oy: 0, x: origin.x * view.k + view.x - offset.x, y: origin.y * view.k + view.y - offset.y };
+export function frameOnto(frame, onto, offset = { x: 0, y: 0 }) {
+  const k = Math.min(onto.w / Math.max(1e-9, frame.w), onto.h / Math.max(1e-9, frame.h));
+  return { k, ox: 0, oy: 0, x: onto.x + onto.w / 2 - (frame.x + frame.w / 2) * k - offset.x, y: onto.y + onto.h / 2 - (frame.y + frame.h / 2) * k - offset.y };
 }
 
 /**
- * Where the board's plate origin lies on the plane (its y; plane units)
- * when the view's centre is at plane y `y`. The board lays the panel's
- * cards as the plate flows them (a title card, its gutters), the Stack at
- * its own pitch (its header, its rails), so one origin lines up one card
- * only. `anchors` (`[{y, origin}]`, by `y`): for each card in both, the
- * plane y of its middle and the origin that lays the board's card on the
- * Stack's. The origin is the anchor's at its middle and linear between
- * anchors (held past the ends): the card in view lines up, and scrolling
- * moves the board continuously, never by a jump. No anchors: `fallback`.
+ * The plane view `frameOnto` came from: the board's view `board` (any
+ * origin) back to the plane view that draws plane rectangle `cube` where
+ * the board draws `frame`.
  */
-export function boardOriginY(anchors, y, fallback) {
-  if (!anchors?.length) return fallback;
-  if (!(y > anchors[0].y)) return anchors[0].origin;
-  for (let i = 1; i < anchors.length; i++) {
-    const a = anchors[i - 1];
-    const b = anchors[i];
-    if (y <= b.y) return b.y > a.y ? a.origin + ((b.origin - a.origin) * (y - a.y)) / (b.y - a.y) : b.origin;
-  }
-  return anchors[anchors.length - 1].origin;
+export function planeFromFrame(board, frame, cube, offset = { x: 0, y: 0 }) {
+  const kb = board.k;
+  const fx = (frame.x + frame.w / 2 - (board.ox ?? 0)) * kb + board.x + offset.x;
+  const fy = (frame.y + frame.h / 2 - (board.oy ?? 0)) * kb + board.y + offset.y;
+  const ratio = Math.min(cube.w / Math.max(1e-9, frame.w), cube.h / Math.max(1e-9, frame.h));
+  const k = kb / Math.max(1e-12, ratio);
+  return { k, x: fx - (cube.x + cube.w / 2) * k, y: fy - (cube.y + cube.h / 2) * k };
 }
 
-/** The plane view that `boardView` came from: the board's root view `board` mapped back (its scale is the plane's). */
-export function fromBoardView(board, origin, offset = { x: 0, y: 0 }) {
-  const k = board.k;
-  const sx = (0 - (board.ox ?? 0)) * k + board.x + offset.x;
-  const sy = (0 - (board.oy ?? 0)) * k + board.y + offset.y;
-  return { k, x: sx - origin.x * k, y: sy - origin.y * k };
+/**
+ * One zoom step of the plane's navigation (ADR 0051 §8): `state`
+ * (`{view, opened, …}`) zoomed by `factor` about screen point `at`. Below
+ * the control band the instrument that opens follows the zoom point
+ * (`rects`, plane units); inside it and past it, it stays. Only `view` and
+ * `opened` change: zoom never changes the selection, nor anything else the
+ * state holds. `fit`: the focused Stack's fit scale; `maxR`: the zoom's
+ * limit (the engine band's end).
+ */
+export function zoomStep(state, factor, at, { fit = null, rects = [], maxR = MAX_R } = {}) {
+  const r0 = fit ? state.view.k / fit : 0;
+  const opened = opensAt(r0) && rects.length ? (instrumentAt(rects, toPlane(state.view, at)) ?? state.opened) : state.opened;
+  return { ...state, view: zoomAbout(state.view, factor, at, fit, maxR), opened };
 }

@@ -31,7 +31,7 @@ import { instanceOf } from './plane-instruments.js';
 import { portIndex, portKind, simplify } from './plane-wiring.js';
 
 /** The cube: its least width, its title band, a connector pin's pitch, an automation pin's pitch, in pu. */
-export const CUBE_PU = Object.freeze({ w: 18, title: 4, pin: 2.5, auto: 3, pad: 1.5 });
+export const CUBE_PU = Object.freeze({ w: 18, title: 4, pin: 1, auto: 3, pad: 1.5 });
 /** A leg's lane pitch in the band under the controls, the band's pad, in plane units. */
 export const LANE = 4;
 export const BAND_PAD = 6;
@@ -209,10 +209,13 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
   const pinPitch = CUBE_PU.pin * PU;
   const size = {
     w: Math.max(CUBE_PU.w * PU, (params.length + 1) * pinPitch),
-    h: Math.max(10 * PU, (CUBE_PU.title + CUBE_PU.pad * 2) * PU + engineAutos.length * CUBE_PU.auto * PU),
+    h: Math.max(10 * PU, (CUBE_PU.title + CUBE_PU.pad * 2) * PU + new Set(engineAutos.map((a) => a.from)).size * CUBE_PU.auto * PU),
   };
   const controlsBottom = bound.length ? Math.max(...bound.map((c) => c.rect.y + c.rect.h)) : rect.y + rect.h / 2;
-  const readoutRoom = bound.some((c) => c.binds.some((b) => inner.has(b))) ? READOUT_H : 0;
+  // The inner value is shown where the engine's own modulation acts on a bound parameter (elsewhere it equals the effective value, ADR 0050 §11).
+  const automated = new Set(autos.map((a) => a.bind));
+  const readable = (b) => inner.has(b) && automated.has(b);
+  const readoutRoom = bound.some((c) => c.binds.some(readable)) ? READOUT_H : 0;
   const legCount = bound.length;
   const bandH = BAND_PAD * 2 + Math.max(1, legCount) * LANE;
   const bandTop = Math.max(rect.y, Math.min(controlsBottom + readoutRoom, rect.y + rect.h - bandH));
@@ -248,9 +251,8 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
     l.points = simplify(points);
     l.lane = lanes[i];
   });
-  // Automation and external cables land on the control's top, over a lane above the controls.
+  // Automation and external cables land on the control's top, over a lane just above its row.
   const controlOf = (bind) => bound.find((c) => c.binds.includes(bind));
-  const tops = bound.length ? Math.min(...bound.map((c) => c.rect.y)) : rect.y;
   const autoPins = [];
   const externalPins = [];
   const landings = [];
@@ -261,12 +263,16 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
     if (!c) return;
     const land = { x: c.rect.x + c.rect.w / 2 + (landings.filter((l) => l === c.id).length * PU) / 2, y: c.rect.y };
     landings.push(c.id);
-    const lane = Math.max(rect.y + PU / 2, tops - (k + 1) * (LANE + 2));
+    const lane = Math.max(rect.y + PU / 2, c.rect.y - (k + 1) * (LANE + 2));
     let start;
     let pts;
     if (a.source === 'engine') {
-      const pin = { id: `auto-pin ${a.id}`, kind: 'auto', auto: a.id, address: a.from, x: cube.x + cube.w, y: cube.y + (CUBE_PU.title + CUBE_PU.pad + (engineIndex + 0.5) * CUBE_PU.auto) * PU };
-      autoPins.push(pin);
+      // One pin per source on the cube's edge; each of its connections its own wire, on its own track.
+      let pin = autoPins.find((q) => q.address === a.from);
+      if (!pin) {
+        pin = { id: `auto-pin ${a.from}`, kind: 'auto', auto: a.id, address: a.from, x: cube.x + cube.w, y: cube.y + (CUBE_PU.title + CUBE_PU.pad + (autoPins.length + 0.5) * CUBE_PU.auto) * PU };
+        autoPins.push(pin);
+      }
       const x = pin.x + (engineIndex + 1) * PU;
       engineIndex++;
       start = pin;
@@ -284,7 +290,7 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
   });
   const readouts = [];
   for (const c of bound) {
-    const address = c.binds.find((b) => inner.has(b));
+    const address = c.binds.find(readable);
     if (!address) continue;
     readouts.push({ id: `readout ${c.id}`, control: c.id, bind: address, address: inner.get(address), x: c.rect.x, y: c.rect.y + c.rect.h + 2, w: c.rect.w, h: READOUT_H - 4 });
   }

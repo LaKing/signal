@@ -13,12 +13,15 @@ function point(angle, radius = R) {
   return `${(C + radius * Math.sin(a)).toFixed(3)} ${(C - radius * Math.cos(a)).toFixed(3)}`;
 }
 
-/** An SVG arc between two angles (degrees, 0 at 12 o'clock, clockwise). */
-function arc(from, to) {
+/** An SVG arc between two angles (degrees, 0 at 12 o'clock, clockwise), at `radius`. */
+function arc(from, to, radius = R) {
   if (Math.abs(to - from) < 0.01) return '';
   const [a, b] = from < to ? [from, to] : [to, from];
-  return `M ${point(a)} A ${R} ${R} 0 ${b - a > 180 ? 1 : 0} 1 ${point(b)}`;
+  return `M ${point(a, radius)} A ${radius} ${radius} 0 ${b - a > 180 ? 1 : 0} 1 ${point(b, radius)}`;
 }
+
+/** The moving arc's radius (ADR 0051 §6, ADR 0050 §11): outside the knob and its skin's scale. */
+const EFFECTIVE_R = R + 6;
 
 export class SignalKnob extends SignalValueElement {
   static observedAttributes = [...SignalValueElement.observedAttributes, 'sweep', 'bipolar', 'drag', 'wheel'];
@@ -33,6 +36,10 @@ export class SignalKnob extends SignalValueElement {
 .pointer { stroke: var(--signal-thumb, #e8ecf2); stroke-width: 2.5; stroke-linecap: round; }
 .dot { stroke: none; }
 .readout { height: 2.6em; }
+.dial { position: relative; }
+/* A modulated knob (ADR 0051 §6): the effective value as a moving arc from the setting, the pointer staying the setting; over a skin too. */
+.mod { position: absolute; left: 50%; top: 0; width: var(--signal-knob-size, 64px); height: var(--signal-knob-size, 64px); transform: translateX(-50%); overflow: visible; pointer-events: none; }
+.effective-arc { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 3; stroke-linecap: round; }
 `;
 
   /** The sweep in degrees (10..350, default 270). */
@@ -43,11 +50,14 @@ export class SignalKnob extends SignalValueElement {
 
   template() {
     return `<div class="control">
+  <div class="dial">
   <div class="face"><svg class="art" viewBox="0 0 64 64" part="art">
     <path class="ring"/><path class="arc"/><circle class="body" cx="32" cy="32" r="17"/>
-    <line class="pointer" x1="32" y1="32"/><circle class="effective dot" r="2.5"/>
+    <line class="pointer" x1="32" y1="32"/>
   </svg></div>
   <div class="skin" hidden></div>
+  <svg class="mod" viewBox="0 0 64 64" aria-hidden="true"><path class="effective-arc"/><circle class="effective dot" r="2.5"/></svg>
+  </div>
   <div class="label"></div>
   <div class="readout"></div>
 </div>`;
@@ -92,6 +102,18 @@ export class SignalKnob extends SignalValueElement {
     // modulated: the readout never changes size. A value field over it keeps it.
     const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
     if (!this.entry?.isOpen) this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
+    // The moving arc and its dot: from the setting to the effective value, while modulated.
+    const dot = this.$('.dot');
+    const moving = this.$('.effective-arc');
+    dot.style.display = b.modulated ? '' : 'none';
+    moving.style.display = b.modulated ? '' : 'none';
+    if (b.modulated) {
+      const to = knobAngle(b.effectivePosition, sweep);
+      moving.setAttribute('d', arc(angle, to, EFFECTIVE_R));
+      const [x, y] = point(to, EFFECTIVE_R).split(' ');
+      dot.setAttribute('cx', x);
+      dot.setAttribute('cy', y);
+    }
     if (this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit), outOfRange: this.getAttribute('out-of-range') })) return;
     const origin = this.hasAttribute('bipolar') ? knobAngle(bipolarOrigin(b.range), sweep) : -sweep / 2;
     this.$('.ring').setAttribute('d', arc(-sweep / 2, sweep / 2));
@@ -100,13 +122,6 @@ export class SignalKnob extends SignalValueElement {
     const pointer = this.$('.pointer');
     pointer.setAttribute('x2', tip[0]);
     pointer.setAttribute('y2', tip[1]);
-    const dot = this.$('.dot');
-    dot.style.display = b.modulated ? '' : 'none';
-    if (b.modulated) {
-      const [x, y] = point(knobAngle(b.effectivePosition, sweep), R + 5).split(' ');
-      dot.setAttribute('cx', x);
-      dot.setAttribute('cy', y);
-    }
   }
 }
 

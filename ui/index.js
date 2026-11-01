@@ -108,3 +108,6 @@ import './lib/plane-instruments.test.js';
 import './lib/plane-peripherals.test.js';
 import './lib/plane-zoom.test.js';
 import './lib/plane-layout.test.js';
+import './lib/plane-wiring.test.js';
+import './lib/plane-control.test.js';
+import './lib/plane-hit.test.js';

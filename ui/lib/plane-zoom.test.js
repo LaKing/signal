@@ -1,16 +1,18 @@
 // ADR 0051 §8, test 4: the plane's levels and fades. Band opacities are
 // monotonic and exactly 0 and 1 at their ends; the level follows the ratio
 // to the Stack's fit; focus fits the width and the wheel scrolls within the
-// Stack; zooming about a point keeps it; the board's view maps both ways.
+// Stack; zooming about a point keeps it; phase 2: the Wiring, Control and
+// Engine bands nest, each monotonic across its band, and the Engine's view
+// lays the board's frame on the cube both ways.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FOCUS_BAND, MARGIN_PX, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, boardOriginY, boardView, clampScroll, fitAll, fitScale, fitWidth, fromBoardView, levelOf, planeFades, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout } from './plane-zoom.js';
+import { CONTROL_BAND, ENGINE_BAND, ENGINE_GAP, FOCUS_BAND, MARGIN_PX, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, clampScroll, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, opensAt, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout, zoomStep } from './plane-zoom.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≈ ${b}`);
 
 test('a band’s share is exactly 0 and 1 at its ends, monotonic between', () => {
-  for (const band of [FOCUS_BAND, WIRING_BAND]) {
+  for (const band of [FOCUS_BAND, WIRING_BAND, CONTROL_BAND, ENGINE_BAND, engineBand(9)]) {
     assert.equal(bandShare(band[0], band), 0);
     assert.equal(bandShare(band[1], band), 1);
     assert.equal(bandShare(band[0] - 0.1, band), 0);
@@ -27,25 +29,70 @@ test('a band’s share is exactly 0 and 1 at its ends, monotonic between', () =>
   assert.equal(bandShare(Number.NaN, FOCUS_BAND), 0);
 });
 
-test('the fades: Setup things to SURROUND over the focus band, the panels out and the board in over the wiring band, one curve both ways', () => {
-  assert.deepEqual(planeFades(0.1), { focus: 0, wiring: 0, setup: 1, panels: 1, deep: 0 });
+test('the fades: Setup things to SURROUND over the focus band, the panels out and the Wiring in over the wiring band, one curve both ways', () => {
+  const low = planeFades(0.1);
+  assert.equal(low.setup, 1);
+  assert.equal(low.panels, 1);
+  assert.equal(low.board, 0);
+  assert.equal(low.sheet, 0);
+  assert.equal(low.deep, 0);
   const fit = planeFades(1);
   assert.equal(fit.setup, SURROUND);
   assert.equal(fit.panels, 1);
-  assert.equal(fit.deep, 0);
+  assert.equal(fit.board, 0);
   const past = planeFades(WIRING_BAND[1]);
   assert.equal(past.panels, 0);
-  assert.equal(past.deep, 1);
-  // Monotonic over the whole range: setup and panels never rise, deep never falls.
+  assert.equal(past.board, 1);
+  assert.equal(past.openWiring, 1);
+  assert.equal(past.sheet, 0);
+  // Monotonic up to the control band: setup and panels never rise, the Wiring never falls.
   let prev = planeFades(0.01);
-  for (let r = 0.01; r <= 3; r += 0.005) {
+  for (let r = 0.01; r <= CONTROL_BAND[0]; r += 0.005) {
     const f = planeFades(r);
-    assert.ok(f.setup <= prev.setup + 1e-12 && f.panels <= prev.panels + 1e-12 && f.deep >= prev.deep - 1e-12, `at ${r}`);
-    close(f.panels + f.deep, 1);
+    assert.ok(f.setup <= prev.setup + 1e-12 && f.panels <= prev.panels + 1e-12 && f.board >= prev.board - 1e-12, `at ${r}`);
+    close(f.panels + f.board, 1);
     prev = f;
   }
   // No timer: the same ratio is the same picture, zooming in or out.
   assert.deepEqual(planeFades(1.7), planeFades(1.7));
+});
+
+test('phase 2: each new band is monotonic across it, exactly 0 and 1 at its ends; the opened instrument cross-fades, the others go to SURROUND', () => {
+  const engine = engineBand(8);
+  const at = (r) => planeFades(r, engine);
+  // The control band: the Control plane and the live controls in, the opened Wiring box out, the other boxes to SURROUND.
+  assert.equal(at(CONTROL_BAND[0]).sheet, 0);
+  assert.equal(at(CONTROL_BAND[1]).sheet, 1);
+  assert.equal(at(CONTROL_BAND[0]).openWiring, 1);
+  assert.equal(at(CONTROL_BAND[1]).openWiring, 0);
+  close(at(CONTROL_BAND[1]).board, SURROUND);
+  assert.equal(at(CONTROL_BAND[0]).controls, 0);
+  assert.equal(at(CONTROL_BAND[1]).controls, 1);
+  // The engine band: the board's Engine in, the Control plane around it to SURROUND.
+  assert.equal(at(engine[0]).deep, 0);
+  assert.equal(at(engine[1]).deep, 1);
+  assert.equal(at(engine[0]).sheet, 1);
+  close(at(engine[1]).sheet, SURROUND);
+  const bands = [
+    [WIRING_BAND, { board: +1, openWiring: +1, panels: -1, controls: -1 }],
+    [CONTROL_BAND, { sheet: +1, controls: +1, openWiring: -1, board: -1 }],
+    [engine, { deep: +1, sheet: -1, controls: -1 }],
+  ];
+  for (const [band, keys] of bands) {
+    let prev = at(band[0]);
+    for (let i = 1; i <= 400; i++) {
+      const f = at(band[0] + ((band[1] - band[0]) * i) / 400);
+      for (const [key, sign] of Object.entries(keys)) assert.ok(sign * (f[key] - prev[key]) >= -1e-12, `${key} monotonic in [${band}] at step ${i}`);
+      prev = f;
+    }
+  }
+  // The bands nest: none overlaps the next.
+  assert.ok(WIRING_BAND[1] <= CONTROL_BAND[0] && CONTROL_BAND[1] <= engine[0] && engine[0] < engine[1]);
+  for (const cubeR of [0, 1, 3, 4, 6, 40, Number.NaN]) {
+    const b = engineBand(cubeR);
+    assert.ok(b[0] >= CONTROL_BAND[1] + ENGINE_GAP - 1e-12 && b[1] - b[0] >= ENGINE_GAP - 1e-12, `engine band of ${cubeR}`);
+  }
+  assert.equal(engineBand(40)[1], 40);
 });
 
 test('the level follows the ratio to the fit', () => {
@@ -55,9 +102,27 @@ test('the level follows the ratio to the fit', () => {
   assert.equal(levelOf(1 - 1e-9), 'stack');
   assert.equal(levelOf(1.6), 'stack');
   assert.equal(levelOf(WIRING_BAND[1]), 'wiring');
+  assert.equal(levelOf(CONTROL_BAND[0] + 0.1), 'wiring');
+  assert.equal(levelOf(CONTROL_BAND[1]), 'control');
+  assert.equal(levelOf(ENGINE_BAND[1]), 'engine');
+  assert.equal(levelOf(5, engineBand(8)), 'control');
+  assert.equal(levelOf(8, engineBand(8)), 'engine');
+  assert.ok(opensAt(WIRING_BAND[1]) && !opensAt(CONTROL_BAND[0]) && !opensAt(CONTROL_BAND[1]));
   assert.ok(reachesFit(0.9, 1.1));
   assert.ok(!reachesFit(1, 1.2));
   assert.ok(!reachesFit(0.5, 0.8));
+});
+
+test('the instrument that opens is the one under the zoom point, else the nearest', () => {
+  const rects = [
+    { entry: 'card:a', x: 0, y: 0, w: 100, h: 50 },
+    { entry: 'card:b', x: 0, y: 66, w: 100, h: 80 },
+  ];
+  assert.equal(instrumentAt(rects, { x: 50, y: 20 }), 'card:a');
+  assert.equal(instrumentAt(rects, { x: 50, y: 100 }), 'card:b');
+  assert.equal(instrumentAt(rects, { x: 50, y: 400 }), 'card:b');
+  assert.equal(instrumentAt(rects, { x: 50, y: 57 }), 'card:a');
+  assert.equal(instrumentAt([], { x: 0, y: 0 }), null);
 });
 
 test('focus fits the Stack’s width; the wheel then scrolls it, its top and bottom kept on the stage', () => {
@@ -111,60 +176,81 @@ test('fit all shows the bounds whole, centred', () => {
   close(r.x + r.w / 2, viewport.w / 2);
 });
 
-test('the board’s view lays its plate origin on the Stack’s panels, and maps back', () => {
-  const view = { k: 1.8, x: -40, y: -900 };
-  const origin = { x: 0, y: 56 };
-  const offset = { x: 300, y: 36 };
-  const board = boardView(view, origin, offset);
-  // The board's (0, 0) is drawn where the plane's origin point is.
-  close(board.x + offset.x, toScreen(view, origin).x);
-  close(board.y + offset.y, toScreen(view, origin).y);
-  const back = fromBoardView(board, origin, offset);
-  close(back.k, view.k);
-  close(back.x, view.x);
-  close(back.y, view.y);
-  // A board view kept about another origin (re-rooted) maps back the same.
-  const moved = { k: board.k, ox: 100, oy: 50, x: board.x + 100 * board.k, y: board.y + 50 * board.k };
-  const again = fromBoardView(moved, origin, offset);
-  close(again.x, view.x, 1e-9);
-  close(again.y, view.y, 1e-9);
+test('the Engine’s view lays the board’s frame on the cube, centred, and maps back', () => {
+  const frame = { x: 200, y: -40, w: 600, h: 300 };
+  const view = { k: 6, x: -900, y: -2000 };
+  const cube = { x: 400, y: 500, w: 144, h: 96 };
+  const offset = { x: 0, y: 0 };
+  const onto = screenRect(view, cube);
+  const board = frameOnto(frame, onto, offset);
+  // The frame fits the cube's rectangle on screen, centred on its centre (the zoom point stays put).
+  const fx = (frame.x + frame.w / 2) * board.k + board.x;
+  const fy = (frame.y + frame.h / 2) * board.k + board.y;
+  close(fx, onto.x + onto.w / 2);
+  close(fy, onto.y + onto.h / 2);
+  assert.ok(frame.w * board.k <= onto.w + 1e-9 && frame.h * board.k <= onto.h + 1e-9);
+  const back = planeFromFrame(board, frame, cube, offset);
+  close(back.k, view.k, 1e-9);
+  close(back.x, view.x, 1e-6);
+  close(back.y, view.y, 1e-6);
+  // Zooming the plane zooms the board in proportion: one curve through the hand-off.
+  const twice = frameOnto(frame, screenRect({ k: 12, x: view.x * 2, y: view.y * 2 }, cube), offset);
+  close(twice.k, board.k * 2, 1e-9);
 });
 
-test('the fades are continuous across both bands: no step anywhere, the steepest change the smoothstep’s', () => {
+test('the fades are continuous across every band: no step anywhere, the steepest change the smoothstep’s', () => {
   // A smoothstep over [a, b] changes by at most 1.5 / (b − a) per unit of r; sampled finely, no step exceeds that slope.
-  const slope = Math.max(1.5 / (FOCUS_BAND[1] - FOCUS_BAND[0]), 1.5 / (WIRING_BAND[1] - WIRING_BAND[0]));
+  const engine = engineBand(5);
+  const slope = Math.max(...[FOCUS_BAND, WIRING_BAND, CONTROL_BAND, engine].map((b) => 1.5 / (b[1] - b[0])));
   const dr = 1e-4;
-  let prev = planeFades(MIN_R);
-  for (let r = MIN_R + dr; r <= MAX_R + 0.5; r += dr) {
-    const f = planeFades(r);
-    for (const key of ['setup', 'panels', 'deep']) assert.ok(Math.abs(f[key] - prev[key]) <= slope * dr * 1.0001 + 1e-12, `${key} steps at r ${r}`);
+  let prev = planeFades(MIN_R, engine);
+  for (let r = MIN_R + dr; r <= engine[1] + 0.5; r += dr) {
+    const f = planeFades(r, engine);
+    for (const key of ['setup', 'panels', 'board', 'openWiring', 'sheet', 'controls', 'deep']) assert.ok(Math.abs(f[key] - prev[key]) <= 2 * slope * dr * 1.0001 + 1e-12, `${key} steps at r ${r}`);
     prev = f;
   }
   // The band ends meet their neighbours exactly: the level's change at the fit and at the band's end shows nothing new.
   assert.equal(planeFades(FOCUS_BAND[0]).setup, 1);
   assert.equal(planeFades(1 - 1e-12).setup, planeFades(1).setup);
-  assert.equal(planeFades(WIRING_BAND[0]).deep, 0);
+  assert.equal(planeFades(WIRING_BAND[0]).board, 0);
   assert.equal(planeFades(WIRING_BAND[1] - 1e-12).panels, planeFades(WIRING_BAND[1]).panels);
   assert.equal(planeFades(WIRING_BAND[1]).panels, 0);
+  assert.ok(MAX_R >= ENGINE_BAND[1]);
 });
 
-test('the board’s origin follows the card at the view’s centre, continuously between cards', () => {
-  const anchors = [
-    { y: 200, origin: -4 },
-    { y: 900, origin: -2 },
-    { y: 2600, origin: 4 },
+test('zoom never changes the selection: through every band and back, only the view and the instrument that opens change', () => {
+  const viewport = { w: 1400, h: 900 };
+  const stack = { x: 0, y: 0, w: 1280, h: 1500 };
+  const fit = fitScale(stack, viewport);
+  const rects = [
+    { entry: 'card:transport', x: 0, y: 80, w: 1280, h: 120 },
+    { entry: 'card:mono-synth', x: 0, y: 216, w: 1280, h: 420 },
+    { entry: 'card:rhythm-composer', x: 0, y: 652, w: 1280, h: 400 },
   ];
-  assert.equal(boardOriginY([], 500, 76), 76);
-  assert.equal(boardOriginY(anchors, 0, 76), -4);
-  assert.equal(boardOriginY(anchors, 200, 76), -4);
-  assert.equal(boardOriginY(anchors, 900, 76), -2);
-  close(boardOriginY(anchors, 550, 76), -3);
-  assert.equal(boardOriginY(anchors, 9000, 76), 4);
-  // Continuous and monotonic between anchors that rise: a scroll never moves the board by a jump.
-  let prev = boardOriginY(anchors, -100, 76);
-  for (let y = -100; y <= 3000; y += 0.5) {
-    const o = boardOriginY(anchors, y, 76);
-    assert.ok(o >= prev - 1e-12 && o - prev <= (6 / 1700) * 0.5 + 1e-9, `at ${y}`);
-    prev = o;
+  const selection = Object.freeze({ kind: 'cable', from: '/synth.out', to: '/echo.in' });
+  const extra = Object.freeze({ note: 'kept' });
+  let state = { view: fitWidth(stack, viewport), opened: 'card:transport', selection, extra };
+  const engine = engineBand(6);
+  // In, about a point over MONO SYNTH: it opens below the control band, then stays put.
+  const at = toScreen(state.view, { x: 600, y: 400 });
+  const seen = [];
+  for (let i = 0; i < 80; i++) {
+    const before = state;
+    state = zoomStep(state, 1.05, at, { fit, rects, maxR: engine[1] });
+    assert.equal(state.selection, selection, 'the selection is the very same object');
+    assert.equal(state.extra, extra);
+    if (!opensAt(before.view.k / fit)) assert.equal(state.opened, before.opened, 'inside the control band the opened instrument stays');
+    seen.push(state.view.k / fit);
   }
+  assert.equal(state.opened, 'card:mono-synth');
+  assert.ok(Math.abs(state.view.k / fit - engine[1]) < 1e-9, 'the zoom stops at the engine band’s end');
+  // And out again: the selection never moves, whatever the zoom.
+  for (let i = 0; i < 80; i++) {
+    state = zoomStep(state, 1 / 1.05, at, { fit, rects, maxR: engine[1] });
+    assert.equal(state.selection, selection);
+  }
+  // The zoom point stays put through the bands (the nested footprints: nothing slides).
+  const p = toPlane(state.view, at);
+  assert.ok(Math.abs(p.x - 600) < 1e-6 && Math.abs(p.y - 400) < 1e-6);
+  assert.ok(seen.some((r) => r > CONTROL_BAND[1]) && seen.some((r) => r > WIRING_BAND[0] && r < WIRING_BAND[1]));
 });
