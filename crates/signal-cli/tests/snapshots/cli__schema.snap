@@ -101,6 +101,45 @@ expression: text
       ],
       "type": "object"
     },
+    "DeviceSpec": {
+      "additionalProperties": false,
+      "description": "ADR 0038 §3: a device slot, `device = { play = \"stereo\", role = \"cue\" }`:\nthe layout of what the project plays to the machine, and the role it\nplays as. The project names no device and no channel.",
+      "properties": {
+        "capture": {
+          "default": null,
+          "description": "The capture side's layout (not built yet).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "default": null,
+          "description": "Which machine family supplies it: `audio`, the default and the only\nkind built.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "play": {
+          "default": null,
+          "description": "The play side's layout: `mono`, `stereo`, `quad`, `5.1` or `7.1`\n(this version plans `stereo`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "description": "What it is for, `[a-z][a-z0-9_]*`; `main` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ExportsSection": {
       "additionalProperties": false,
       "description": "`[exports]`.",
@@ -133,7 +172,7 @@ expression: text
       "additionalProperties": {
         "type": "number"
       },
-      "description": "An instance: its module (`module`), or an included project (`project`, a folder path, ADR 0035), or a slot (`slot`, its interface, with optional `load` and `map`, ADR 0037); exactly one of the three. A module instance may take a GPU device pin (`gpu`) and a pattern (`pattern`); a project or a slot a `seed` and `set` overrides. Every other key is a parameter value.",
+      "description": "An instance: its module (`module`), or an included project (`project`, a folder path, ADR 0035), or a slot (`slot`, its interface, with optional `load` and `map`, ADR 0037), or a device slot (`device`, its layout and role, ADR 0038; only at the top of project.toml); exactly one of the four. A module instance may take a GPU device pin (`gpu`) and a pattern (`pattern`); a project or a slot a `seed` and `set` overrides. Every other key is a parameter value.",
       "oneOf": [
         {
           "required": [
@@ -149,9 +188,17 @@ expression: text
           "required": [
             "slot"
           ]
+        },
+        {
+          "required": [
+            "device"
+          ]
         }
       ],
       "properties": {
+        "device": {
+          "$ref": "#/$defs/DeviceSpec"
+        },
         "gpu": {
           "minLength": 1,
           "type": "string"

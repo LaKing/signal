@@ -139,6 +139,66 @@ fn the_fixture_plans() {
     plans(HOST).unwrap();
 }
 
+/// ADR 0038 §3 (M4.1): `device.add` writes a device slot (a layout and a
+/// role, never hardware) and its connections in one patch; the undo puts
+/// the file back byte for byte; what is not built, a bad role and a
+/// composite level are refused.
+#[test]
+fn a_device_slot_is_added_with_its_connections_and_undone() {
+    let (text, _) = round_trip(
+        HOST,
+        &[
+            op(
+                serde_json::json!({"op": "device.add", "name": "cue", "play": "stereo", "role": "cue"}),
+            ),
+            op(serde_json::json!({"op": "connection.add", "from": "fx.y", "to": "cue.l"})),
+            op(serde_json::json!({"op": "connection.add", "from": "fx.y", "to": "cue.r"})),
+        ],
+    );
+    assert!(
+        text.contains(
+            "out = { module = \"std.audio_out\" }\ncue = { device = { play = \"stereo\", role = \"cue\" } }\n"
+        ),
+        "{text}"
+    );
+    plans(&text).unwrap();
+    let refused = |json: serde_json::Value, ctx: &Context<'_>| {
+        apply(HOST, None, &[op(json)], ctx).unwrap_err().to_string()
+    };
+    assert!(
+        refused(
+            serde_json::json!({"op": "device.add", "name": "s", "play": "5.1", "role": "surround"}),
+            &ctx()
+        )
+        .contains("not built yet")
+    );
+    assert!(
+        refused(
+            serde_json::json!({"op": "device.add", "name": "c", "play": "stereo", "role": "Cue"}),
+            &ctx()
+        )
+        .contains("a role is")
+    );
+    assert!(
+        refused(
+            serde_json::json!({"op": "device.add", "name": "out", "play": "stereo", "role": "x"}),
+            &ctx()
+        )
+        .contains("already has an instance `out`")
+    );
+    let composite = Context {
+        level: "voice",
+        ..ctx()
+    };
+    assert!(
+        refused(
+            serde_json::json!({"op": "device.add", "name": "c", "play": "stereo", "role": "cue"}),
+            &composite
+        )
+        .contains("top-level instance")
+    );
+}
+
 #[test]
 fn a_slot_is_added_inline_and_undone() {
     let (text, _) = round_trip(

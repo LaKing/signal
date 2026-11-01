@@ -139,6 +139,25 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         y: Option<f64>,
     },
+    /// ADR 0038 §3 (M4.1): a device slot, appended to `[instances]` as
+    /// `instance.add` appends an instance: `name = { device = { play =
+    /// "<play>", role = "<role>" } }`. The project names a layout and a
+    /// role, never hardware; the machine binds the role (`device.route`).
+    #[serde(rename = "device.add")]
+    DeviceAdd {
+        /// Its name at the level (the top level only).
+        name: String,
+        /// Its play side's layout (`stereo`).
+        play: String,
+        /// Its role.
+        role: String,
+        /// Its schematic position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        /// Its schematic position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+    },
     /// ADR 0037 §6–7: `load` written (a Load, or a Replace of the content
     /// loaded): `map` and `set` replace the slot's when given, else the
     /// entries the new content accepts are kept and the rest removed.
@@ -2247,6 +2266,51 @@ impl Patching<'_> {
                 }
                 let (x, y) = (coordinate(*x, "x")?, coordinate(*y, "y")?);
                 let entry = slot::slot_entry(name, slot, load.as_deref())?;
+                let mut inv = Vec::new();
+                add_instance(&mut self.text, &Scheme::LEVEL, &entry, &mut inv).map_err(written)?;
+                inv.reverse();
+                let layout = match (x, y) {
+                    (Some(x), Some(y)) => {
+                        Some(self.layout(|t, inv| add_position(t, level, name, x, y, inv))?)
+                    }
+                    (None, None) => None,
+                    _ => return Err(bad("a position needs both `x` and `y`")),
+                };
+                Ok(Op::InstanceRemove {
+                    name: name.clone(),
+                    edits: Some(inv),
+                    layout,
+                })
+            }
+            Op::DeviceAdd {
+                name,
+                play,
+                role,
+                x,
+                y,
+            } => {
+                if !level.is_empty() {
+                    return Err(bad(
+                        "a device slot is a top-level instance of project.toml (ADR 0038 §3)",
+                    ));
+                }
+                if !valid_name(name) {
+                    return Err(bad(format!("`{name}`: a name is [a-z][a-z0-9_]*")));
+                }
+                if !crate::device::valid_role(role) {
+                    return Err(bad(format!("`{role}`: a role is [a-z][a-z0-9_]*")));
+                }
+                crate::device::planned_module(play).map_err(bad)?;
+                if self.level_map()?.entries.iter().any(|e| &e.name == name) {
+                    return Err(bad(format!("the level already has an instance `{name}`")));
+                }
+                let (x, y) = (coordinate(*x, "x")?, coordinate(*y, "y")?);
+                let mut device = InlineTable::new();
+                device.insert("play", Value::from(play.as_str()));
+                device.insert("role", Value::from(role.as_str()));
+                let mut table = InlineTable::new();
+                table.insert("device", Value::InlineTable(device));
+                let entry = rendered(name, Value::InlineTable(table));
                 let mut inv = Vec::new();
                 add_instance(&mut self.text, &Scheme::LEVEL, &entry, &mut inv).map_err(written)?;
                 inv.reverse();
