@@ -77,3 +77,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Off by default: a module denies it where its clippy.toml's list applies
+# (signal-ui's host takes the project's writer lock only in host/writer.rs).
+disallowed_methods = "allow"

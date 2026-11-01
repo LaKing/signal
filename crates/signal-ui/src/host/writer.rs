@@ -1,6 +1,9 @@
 //! The project's single writer (ADR 0040, 0048): what a request that
 //! writes the project's files is given to write them with. A writer takes
-//! the project's writer lock only through its [`WriteCtx`].
+//! the project's writer lock only through its [`WriteCtx`]: this is the
+//! one module of the host that calls `ProjectLock::acquire` and
+//! `ProjectLock::try_hold` (`crates/signal-ui/clippy.toml`).
+#![allow(clippy::disallowed_methods)]
 
 use std::io;
 use std::path::PathBuf;

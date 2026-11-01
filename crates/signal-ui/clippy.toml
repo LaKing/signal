@@ -1,0 +1,7 @@
+# The host's single writer (ADR 0040, 0048): the host takes the project's
+# writer lock only in host/writer.rs. The lint is off by default (the root
+# Cargo.toml) and denied in the host (host/mod.rs); writer.rs allows it.
+disallowed-methods = [
+    { path = "signal_project::transaction::ProjectLock::acquire", reason = "the host takes the writer lock only through host/writer.rs (WriteCtx::lock)" },
+    { path = "signal_project::transaction::ProjectLock::try_hold", reason = "the host holds the writer lock only through host/writer.rs (try_hold)" },
+]

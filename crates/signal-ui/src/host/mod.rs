@@ -18,6 +18,9 @@
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
+// The project's writer lock is taken only in writer.rs (crates/signal-ui/clippy.toml).
+#![deny(clippy::disallowed_methods)]
+
 mod app_mode;
 mod audition;
 mod clients;
