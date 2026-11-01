@@ -497,7 +497,7 @@ test('ADR 0047 phase 4: the studio on its plate, a new graph with the same struc
   const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
   const studio = JSON.parse(read('ui/lib/fixtures/studio-graph.json'));
   const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));
-  const approx = approximatePlate(read('projects/studio/ui/main.html'));
+  const approx = approximatePlate(read('ui/lib/fixtures/board/studio-main.txt'));
   const s = Object.create(SignalSchematic.prototype);
   const board = { plate: { key: 'measured' }, option: () => ({ vias: new Map(fx.vias), obstacles: fx.obstacles, plate: fx.size, cards: fx.cards }) };
   Object.assign(s, { graph: { project: 'studio', projectId: 's', ...studio, layout: { positions: {} } }, layouts: new Map(), moved: new Map(), panelControls: approx.controls, board, faces: null });

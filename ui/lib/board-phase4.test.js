@@ -31,7 +31,7 @@ const STUDIO = JSON.parse(read('ui/lib/fixtures/studio-graph.json'));
 
 /** The studio as the page lays it out: the board on its measured plate, each inside a die (once, in its package's order). */
 function studio(graph = STUDIO) {
-  const panel = new URL('projects/studio/ui/main.html', root);
+  const panel = new URL('ui/lib/fixtures/board/studio-main.txt', root);
   const approx = existsSync(panel) ? approximatePlate(readFileSync(panel, 'utf8')) : { controls: [] };
   const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));
   const factsOf = (m) => exportFacts(graph.composites?.[m] ?? null);

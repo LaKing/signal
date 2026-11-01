@@ -1,0 +1,13 @@
+schema_version = 1
+
+[[stack]]
+name = "primary"
+at = [0, 0]
+width = 160
+instruments = [
+  "card:transport",
+  "card:mono-synth",
+  "card:rhythm-composer",
+  "card:tape-echo",
+  "card:master",
+]

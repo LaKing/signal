@@ -37,7 +37,8 @@ export const FIXTURES = {
 export function exampleProjects() {
   return Object.entries(FIXTURES).map(([name, path]) => {
     const graph = JSON.parse(read(path));
-    const panel = new URL(`projects/${name}/ui/main.html`, root);
+    // The studio's panel as its plate was measured (frozen when ADR 0051 phase 1 moved its tempo knob).
+    const panel = new URL(name === 'studio' ? 'ui/lib/fixtures/board/studio-main.txt' : `projects/${name}/ui/main.html`, root);
     let plate = existsSync(panel) ? approximatePlate(readFileSync(panel, 'utf8')) : undefined;
     if (name === 'studio') {
       const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));

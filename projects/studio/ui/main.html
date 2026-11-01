@@ -1,5 +1,7 @@
 <!doctype html>
-<!-- The studio's panel (docs/ui-controls.md "Panels"): three sections styled
+<!-- The studio's panel (docs/ui-controls.md "Panels"): the transport's
+     tempo (ADR 0051 §12: a card of its own, the first instrument of the
+     primary Stack in ui/plane.toml), then three sections styled
      after the instruments they recall, with generic titles and no marks. The
      mono synth (black panel, wood cheeks, the controllers, oscillator bank,
      mixer, modifiers and output groups, rocker levers for the waveforms) with
@@ -24,6 +26,12 @@
     <section class="signal-card wide title">
       <h1>studio</h1>
       <p>A piano-roll melody on a three-oscillator ladder-filter voice through a tape echo, over a synthesised drum machine, at 120 bpm.</p>
+    </section>
+    <section class="signal-card wide transport">
+      <h2>TRANSPORT</h2>
+      <div class="row">
+        <signal-knob bind="/transport.bpm" min="60" max="180" label="tempo" skin="svg:assets/synth-knob.svg"></signal-knob>
+      </div>
     </section>
     <section class="signal-card wide mono-synth">
       <h2>MONO SYNTH</h2>
@@ -76,7 +84,6 @@
       <h2>RHYTHM COMPOSER</h2>
       <div class="row">
         <div class="signal-group voice master">
-          <signal-knob bind="/transport.bpm" min="60" max="180" label="tempo" skin="svg:assets/rhythm-knob.svg"></signal-knob>
           <signal-knob bind="/drums.swing" min="0" max="75" label="shuffle" skin="svg:assets/rhythm-knob.svg"></signal-knob>
           <signal-knob bind="/drums.accent_level" min="1" max="2" label="accent" skin="svg:assets/rhythm-knob.svg"></signal-knob>
         </div>

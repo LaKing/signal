@@ -47,6 +47,10 @@ body { margin: 0; padding: 0.75rem; background: #1b1a18; color: var(--signal-fg)
 .mono-synth .loudness-contour::before { content: "Loudness contour"; }
 .mono-synth .output::before { content: "Output"; }
 
+/* TRANSPORT (ADR 0051 §12): the tempo alone, the first instrument of the primary Stack. */
+.transport { --signal-knob-size: 46px; }
+.transport > .row { justify-content: flex-start; }
+
 /* RHYTHM COMPOSER: the warm grey panel, an orange strip of per-voice knob
    columns, dark legends. */
 .rhythm {
@@ -66,7 +70,7 @@ body { margin: 0; padding: 0.75rem; background: #1b1a18; color: var(--signal-fg)
 .rhythm > .row { align-items: stretch; flex-wrap: wrap; }
 .rhythm .voice { flex: 1 1 6.5rem; flex-direction: column; flex-wrap: nowrap; align-items: center; justify-content: flex-start; background: #e9e5dc; border: 1px solid #a49f95; }
 .rhythm .voice::before { color: #f26b1d; text-align: center; }
-.rhythm .master::before { content: "Tempo"; }
+.rhythm .master::before { content: "Shuffle \00B7  accent"; }
 .rhythm .kick::before { content: "Bass drum"; }
 .rhythm .snare::before { content: "Snare"; }
 .rhythm .clap::before { content: "Hand clap"; }

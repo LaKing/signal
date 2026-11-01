@@ -60,9 +60,15 @@ const LIMITS = {
   'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
 
+/**
+ * The studio's panel as its plate was measured (ui/lib/fixtures/board/studio-plate.json, 2026-10-30): frozen
+ * when ADR 0051 phase 1 moved the tempo knob to a TRANSPORT card, so the board's measured vias keep their controls.
+ */
+const STUDIO_PANEL = 'ui/lib/fixtures/board/studio-main.txt';
+
 function project(name) {
   const graph = JSON.parse(read(PROJECTS[name]));
-  const panel = new URL(`projects/${name}/ui/main.html`, root);
+  const panel = new URL(name === 'studio' ? STUDIO_PANEL : `projects/${name}/ui/main.html`, root);
   let plate = existsSync(panel) ? approximatePlate(readFileSync(panel, 'utf8')) : { vias: new Map(), obstacles: [], cards: [], plate: null, controls: [] };
   // The studio's plate as the page measured it (2026-10-30, ui/lib/fixtures/board/studio-plate.json).
   if (name === 'studio') {
