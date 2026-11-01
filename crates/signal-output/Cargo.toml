@@ -25,6 +25,8 @@ signal-engine = { workspace = true, features = ["test-hooks"] }
 signal-std = { workspace = true }
 # The counting allocator, for the scope adapter's allocation test.
 signal-contract = { workspace = true }
+# The clock adapter's converter measurements (ADR 0052 phase 1).
+realfft = { workspace = true }
 
 [lints]
 workspace = true

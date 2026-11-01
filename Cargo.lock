@@ -3191,6 +3191,7 @@ name = "signal-output"
 version = "0.3.0"
 dependencies = [
  "hound",
+ "realfft",
  "rtrb",
  "serde_json",
  "signal-contract",

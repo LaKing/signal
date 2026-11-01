@@ -237,3 +237,43 @@ fn core_graph_and_engine_name_no_project_or_slot() {
     assert!(has_word("let project = load();", "project"));
     assert!(!has_word("include_str!(\"x\")", "include"));
 }
+
+/// Clock-adapter words (ADR 0052 §4, AGENTS.md rule 1): the asynchronous
+/// rate converter, its drift loop and its splices are output policy in
+/// `signal-output`; the core, the graph and the engine know none of them.
+/// `ppm` is not flagged: the engine's real-time workers already use it for
+/// a fraction of the period (`wake.rs`, `Computation::ppm`).
+const CLOCK_ADAPTER_WORDS: [&str; 2] = ["drift", "Drift"];
+const CLOCK_ADAPTER_PARTS: [&str; 4] = ["resampl", "Resampl", "clock_adapter", "ClockAdapter"];
+
+/// Core, graph and engine name no clock-adapter concept in a code line.
+#[test]
+fn core_graph_and_engine_name_no_clock_adapter() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut found = Vec::new();
+    for name in ["signal-core", "signal-graph", "signal-engine"] {
+        let mut files = Vec::new();
+        rust_files(&crates.join(name).join("src"), &mut files);
+        assert!(!files.is_empty(), "{name}: no sources found");
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                let words = CLOCK_ADAPTER_WORDS.iter().filter(|w| has_word(code, w));
+                let parts = CLOCK_ADAPTER_PARTS.iter().filter(|p| code.contains(*p));
+                for word in words.chain(parts) {
+                    found.push(format!("{}:{}: `{word}` in {code}", file.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "clock-adapter concepts in a domain-free crate:\n{}",
+        found.join("\n")
+    );
+    assert!(has_word("let drift = 0.0;", "drift"));
+}
