@@ -73,7 +73,7 @@ use project_io::SaveWait;
 use queue::LockQueue;
 use run::{Muted, Run};
 use subs::Subscriptions;
-use writer::WriteCtx;
+use writer::{Outcome, WriteCtx};
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
@@ -869,70 +869,8 @@ impl Host {
                 format!("unknown message type '{kind}'"),
             )),
         };
-        match result {
-            Ok(Some(reply)) => {
-                let restarted =
-                    kind == "setup.apply" && reply.get("restarted") == Some(&json!(true));
-                // The plan or what plays changed: every client is told.
-                let changed = matches!(
-                    kind,
-                    "transport.play"
-                        | "transport.stop"
-                        | "project.open"
-                        | "project.revert"
-                        | "app.power"
-                );
-                let reply = with(reply, "id", id);
-                self.send_text(client, &reply);
-                if restarted || changed {
-                    let describe = self.describe(restarted);
-                    self.broadcast(&describe);
-                    self.push_graph(false);
-                }
-                // Every client sees the positions written.
-                if kind.starts_with("schematic.") {
-                    self.push_graph(true);
-                }
-                // Every client gets the written panel (ADR 0026 §5).
-                if kind == "panel.write" {
-                    let pushed = json!({
-                        "type": "panel.written",
-                        "file": reply.get("file").cloned().unwrap_or(Value::Null),
-                        "base": reply.get("base").cloned().unwrap_or(Value::Null),
-                        "plate": reply.get("plate").cloned().unwrap_or(Value::Null),
-                        "html": message.get("html").cloned().unwrap_or(Value::Null),
-                    });
-                    self.broadcast(&pushed);
-                }
-                // Every client learns of the written pattern (ADR 0028 §7).
-                if kind == "pattern.write" {
-                    let pushed = json!({
-                        "type": "pattern.written",
-                        "name": reply.get("name").cloned().unwrap_or(Value::Null),
-                        "base": reply.get("base").cloned().unwrap_or(Value::Null),
-                        "text": message.get("text").cloned().unwrap_or(Value::Null),
-                    });
-                    self.broadcast(&pushed);
-                }
-            }
-            Ok(None) => {}
-            Err(failure) => {
-                let mut error = json!({
-                    "type": "error",
-                    "id": id,
-                    "code": failure.code,
-                    "message": failure.message,
-                });
-                if let (Some(Value::Object(detail)), Some(error)) =
-                    (failure.detail, error.as_object_mut())
-                {
-                    for (key, value) in detail {
-                        error.entry(key).or_insert(value);
-                    }
-                }
-                self.send_text(client, &error);
-            }
-        }
+        let outcome = Outcome::of(kind, message, id, result);
+        self.apply_outcome(client, outcome);
     }
 
     fn stats(&self) -> Value {
