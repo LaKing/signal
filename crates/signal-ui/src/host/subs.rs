@@ -289,7 +289,7 @@ impl Host {
                         ports.len() * 16,
                     );
                     for port in ports.iter() {
-                        let value = port.as_ref().and_then(|p| self.values.get(p));
+                        let value = port.as_ref().and_then(|p| self.live.values.get(p));
                         let (base, effective) =
                             value.map_or((f64::NAN, f64::NAN), |v| (v.base, v.effective));
                         bytes.extend_from_slice(&base.to_le_bytes());

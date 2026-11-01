@@ -292,7 +292,11 @@ impl Host {
     /// the file's value.
     fn live_base(&self, instance: &str, parameter: &str) -> f64 {
         let key = (instance.to_owned(), parameter.to_owned());
-        let reset = self.failed.get(&key).is_some_and(|f| f.reset.is_some());
+        let reset = self
+            .live
+            .failed
+            .get(&key)
+            .is_some_and(|f| f.reset.is_some());
         let default = self
             .panel
             .target(instance, parameter)
@@ -467,8 +471,8 @@ impl Host {
         let settled = |host: &Host, c: &ControlWrite| {
             let key = (c.instance.clone(), c.parameter.clone());
             host.panel.dragged(&c.instance, &c.parameter).is_none()
-                && !host.resend.contains(&key)
-                && !host.failed.contains_key(&key)
+                && !host.live.resend.contains(&key)
+                && !host.live.failed.contains_key(&key)
         };
         let (writes, sends, written) = match chosen {
             Ok((before, after, kept)) => {
@@ -540,8 +544,8 @@ impl Host {
                 // Live and file agree again: nothing is unsaved.
                 self.panel.release(&control.instance, &control.parameter);
                 let key = (control.instance.clone(), control.parameter.clone());
-                self.failed.remove(&key);
-                self.resend.remove(&key);
+                self.live.failed.remove(&key);
+                self.live.resend.remove(&key);
             } else {
                 self.panel
                     .drag(&control.instance, &control.parameter, value, false);

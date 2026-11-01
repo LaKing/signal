@@ -482,9 +482,9 @@ impl Host {
                     self.panel.release(&edit.instance, &edit.parameter);
                 }
             }
-            let seq = self.next_failure;
-            self.next_failure += 1;
-            self.failed.insert(
+            let seq = self.live.next_failure;
+            self.live.next_failure += 1;
+            self.live.failed.insert(
                 (edit.instance.clone(), edit.parameter.clone()),
                 Failed {
                     error: error.to_owned(),
@@ -594,11 +594,11 @@ impl Host {
         }
         for (edit, &sent) in edits.iter().zip(sent) {
             let key = (edit.instance.clone(), edit.parameter.clone());
-            self.failed.remove(&key);
+            self.live.failed.remove(&key);
             if sent {
-                self.resend.remove(&key);
+                self.live.resend.remove(&key);
             } else {
-                self.resend.insert(key);
+                self.live.resend.insert(key);
             }
         }
         note
@@ -610,6 +610,7 @@ impl Host {
     /// else the file's value (its default without a key).
     pub(super) fn control_base(&self, instance: &str, p: &ParameterView) -> f64 {
         let reset = self
+            .live
             .failed
             .get(&(instance.to_owned(), p.name.clone()))
             .is_some_and(|f| f.reset.is_some());
@@ -642,6 +643,7 @@ impl Host {
             ));
         };
         let reset = self
+            .live
             .failed
             .get(&(instance.clone(), parameter.clone()))
             .is_some_and(|f| f.reset.is_some());

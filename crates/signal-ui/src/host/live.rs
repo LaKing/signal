@@ -2,11 +2,11 @@
 //! addresses and reports, the values the files do not hold (`unsaved`),
 //! and the live values carried across a new panel.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use signal_core::{Curve, Direction as PortDirection, EventPayload, Frame, PortAddress, PortShape};
-use signal_engine::{Outcome, Stamp};
+use signal_engine::{CommandId, Outcome, ParameterValue, Stamp};
 
 use crate::panel::{Panel, ramp_frames};
 
@@ -89,14 +89,61 @@ impl Aim {
     }
 }
 
+/// The live state of the open project's parameters: the values the
+/// Controller reports, the edits waiting for their reports, the controls
+/// whose write failed or whose live send waits for a reload, and the live
+/// edits of plan parameter ports that are no control.
+pub(super) struct LiveState {
+    pub(super) values: BTreeMap<PortAddress, ParameterValue>,
+    pub(super) commands: BTreeMap<CommandId, u64>,
+    pub(super) acks: BTreeMap<u64, Pending>,
+    pub(super) next_ack: u64,
+    /// Controls whose last write failed.
+    pub(super) failed: BTreeMap<(String, String), Failed>,
+    /// Controls written while their live send was refused: the reload of
+    /// the written file sends them the file's value.
+    pub(super) resend: BTreeSet<(String, String)>,
+    /// Live edits of plan parameter ports that are no control: the value,
+    /// and whether the Controller took it.
+    pub(super) port_edits: BTreeMap<PortAddress, (f64, bool)>,
+    pub(super) next_failure: u64,
+}
+
+impl Default for LiveState {
+    fn default() -> LiveState {
+        LiveState {
+            values: BTreeMap::new(),
+            commands: BTreeMap::new(),
+            acks: BTreeMap::new(),
+            next_ack: 1,
+            failed: BTreeMap::new(),
+            resend: BTreeSet::new(),
+            port_edits: BTreeMap::new(),
+            next_failure: 1,
+        }
+    }
+}
+
+impl LiveState {
+    /// The run ended (or another took its place): its values, the resends
+    /// and the port edits go; the failed writes stay.
+    pub(super) fn run_ended(&mut self) {
+        self.values.clear();
+        self.resend.clear();
+        self.port_edits.clear();
+    }
+}
+
 impl Host {
     /// `unsaved` to every client whenever it changed; a failure whose
     /// control is no longer unsaved (live and file agree again) is dropped.
     pub(super) fn push_unsaved(&mut self) {
         let listed: BTreeSet<String> = self.unsaved().into_iter().map(|u| u.address).collect();
-        self.failed
+        self.live
+            .failed
             .retain(|(i, p), _| listed.contains(&format!("/{i}.{p}")));
-        self.port_edits
+        self.live
+            .port_edits
             .retain(|port, _| listed.contains(port.as_str()));
         let current = self.unsaved_json();
         if self.unsaved_pushed.as_ref() != Some(&current) {
@@ -110,15 +157,15 @@ impl Host {
     /// then the plan parameter ports edited live.
     pub(super) fn unsaved(&self) -> Vec<Unsaved> {
         let mut list = Vec::new();
-        for instance in self.panel.view(&self.values) {
+        for instance in self.panel.view(&self.live.values) {
             for p in &instance.parameters {
                 let key = (instance.name.clone(), p.name.clone());
                 let Some((file, in_file)) = self.panel.file_base(&key.0, &key.1) else {
                     continue;
                 };
                 let drag = self.panel.dragged(&key.0, &key.1);
-                let failed = self.failed.get(&key);
-                let resend = self.resend.contains(&key);
+                let failed = self.live.failed.get(&key);
+                let resend = self.live.resend.contains(&key);
                 let unsent = drag.is_some_and(|d| !d.sent)
                     || failed.is_some_and(|f| f.reset == Some(false))
                     || resend;
@@ -136,7 +183,7 @@ impl Host {
                 }
             }
         }
-        for (port, &(value, sent)) in &self.port_edits {
+        for (port, &(value, sent)) in &self.live.port_edits {
             let Some(file) = plan_base(self.plan.as_ref(), port) else {
                 continue;
             };
@@ -191,10 +238,10 @@ impl Host {
 
     pub(super) fn take_reports(&mut self) {
         for report in std::mem::take(&mut self.reports) {
-            let Some(key) = self.commands.remove(&report.id) else {
+            let Some(key) = self.live.commands.remove(&report.id) else {
                 continue;
             };
-            let Some(pending) = self.acks.get_mut(&key) else {
+            let Some(pending) = self.live.acks.get_mut(&key) else {
                 continue;
             };
             pending.remaining = pending.remaining.saturating_sub(1);
@@ -202,7 +249,7 @@ impl Host {
             pending.requested = pending.requested.max(report.requested.0);
             pending.refused |= report.outcome == Outcome::Refused;
             if pending.remaining == 0
-                && let Some(done) = self.acks.remove(&key)
+                && let Some(done) = self.live.acks.remove(&key)
             {
                 // A runner refused it: the value did not reach the ports.
                 match (&done.edited, done.refused) {
@@ -210,7 +257,7 @@ impl Host {
                         self.panel.unsend(instance, parameter, *value);
                     }
                     (Some(Edited::Port(port, value)), true) => {
-                        if let Some(edit) = self.port_edits.get_mut(port)
+                        if let Some(edit) = self.live.port_edits.get_mut(port)
                             && edit.0.to_bits() == value.to_bits()
                         {
                             edit.1 = false;
@@ -389,12 +436,17 @@ impl Host {
             Some(Edited::Control((instance, parameter), value)) => {
                 self.panel
                     .drag(instance, parameter, *value, refused.is_none());
-                if let Some(failed) = self.failed.get_mut(&(instance.clone(), parameter.clone())) {
+                if let Some(failed) = self
+                    .live
+                    .failed
+                    .get_mut(&(instance.clone(), parameter.clone()))
+                {
                     failed.reset = None;
                 }
             }
             Some(Edited::Port(port, value)) => {
-                self.port_edits
+                self.live
+                    .port_edits
                     .insert(port.clone(), (*value, refused.is_none()));
             }
             None => {}
@@ -415,12 +467,12 @@ impl Host {
         if let Some((port, key, on)) = note.filter(|_| self.clients.contains(client)) {
             self.auditions.hold(client, port, key, on);
         }
-        let key = self.next_ack;
-        self.next_ack += 1;
+        let key = self.live.next_ack;
+        self.live.next_ack += 1;
         for command in &sent {
-            self.commands.insert(*command, key);
+            self.live.commands.insert(*command, key);
         }
-        self.acks.insert(
+        self.live.acks.insert(
             key,
             Pending {
                 client,
@@ -504,7 +556,7 @@ impl Host {
                     }
                 }
                 None => {
-                    if let Some(edit) = self.port_edits.get_mut(&port) {
+                    if let Some(edit) = self.live.port_edits.get_mut(&port) {
                         edit.1 = false;
                     }
                 }
@@ -518,11 +570,11 @@ impl Host {
             Some((instance, parameter, _)) => {
                 self.panel.release(&instance, &parameter);
                 let key = (instance, parameter);
-                self.failed.remove(&key);
-                self.resend.remove(&key);
+                self.live.failed.remove(&key);
+                self.live.resend.remove(&key);
             }
             None => {
-                self.port_edits.remove(&port);
+                self.live.port_edits.remove(&port);
             }
         }
         let describe = self.describe(false);
@@ -551,8 +603,8 @@ impl Host {
             }
         }
         let panel = &self.panel;
-        self.failed.retain(|key, _| kept(panel, key));
-        self.resend.retain(|key| kept(panel, key));
+        self.live.failed.retain(|key, _| kept(panel, key));
+        self.live.resend.retain(|key| kept(panel, key));
         // ADR 0042, 0043: the corrections of the files as they are now.
         self.refresh_warnings();
     }
@@ -573,7 +625,12 @@ impl Host {
             };
             match self.panel.dragged(&key.0, &key.1) {
                 Some(drag) => carried.push((key, Some(drag.value))),
-                None if self.failed.get(&key).is_some_and(|f| f.reset.is_some()) => {
+                None if self
+                    .live
+                    .failed
+                    .get(&key)
+                    .is_some_and(|f| f.reset.is_some()) =>
+                {
                     carried.push((key, None));
                 }
                 None => {}
@@ -587,7 +644,7 @@ impl Host {
     pub(super) fn play_carried(&mut self, carried: Vec<((String, String), Option<f64>)>) {
         for ((instance, parameter), value) in carried {
             let Some(target) = self.panel.target(&instance, &parameter) else {
-                self.failed.remove(&(instance, parameter));
+                self.live.failed.remove(&(instance, parameter));
                 continue;
             };
             match value {
@@ -605,7 +662,7 @@ impl Host {
                             .zip(target.defaults.iter().copied())
                             .collect(),
                     );
-                    if let Some(failed) = self.failed.get_mut(&(instance, parameter)) {
+                    if let Some(failed) = self.live.failed.get_mut(&(instance, parameter)) {
                         failed.reset = Some(sent);
                     }
                 }
@@ -615,8 +672,8 @@ impl Host {
 
     /// Edits waiting for reports of a stopped run.
     pub(super) fn abandon(&mut self) {
-        self.commands.clear();
-        for (_, pending) in std::mem::take(&mut self.acks) {
+        self.live.commands.clear();
+        for (_, pending) in std::mem::take(&mut self.live.acks) {
             let ack = json!({"type": "ack", "id": pending.id, "outcome": "abandoned"});
             self.send_text(pending.client, &ack);
         }

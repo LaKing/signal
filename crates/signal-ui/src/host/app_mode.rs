@@ -365,9 +365,7 @@ impl Host {
         // The streams, the Runner and the input are dropped here, on the
         // control thread.
         drop(run);
-        self.values.clear();
-        self.resend.clear();
-        self.port_edits.clear();
+        self.live.run_ended();
         self.auditions.clear();
         self.abandon();
     }
@@ -420,7 +418,7 @@ impl Host {
         }
         self.stop_app();
         if play {
-            self.failed.clear();
+            self.live.failed.clear();
             let (run, notes) = self.build(true).map_err(|e| fail("does-not-load", e))?;
             self.install(run);
             self.rearm();

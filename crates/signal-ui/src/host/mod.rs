@@ -37,15 +37,15 @@ mod snapshotting;
 mod subs;
 mod watch;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use signal_audio::DeviceInfo;
-use signal_core::{PortAddress, Registry};
-use signal_engine::{CommandId, ParameterValue, Provenance, Report, RtOptions, RunnerStatus};
+use signal_core::Registry;
+use signal_engine::{Provenance, Report, RtOptions, RunnerStatus};
 use signal_graph::ExecutionPlan;
 use signal_output::{Controller, Meter, ScopeBlock, VectorSnapshot};
 use signal_project::Diagnostic;
@@ -67,7 +67,7 @@ use app_mode::{AppMode, app_only, power_json};
 use audition::Auditions;
 use clients::{Client, Clients};
 use failure::fail;
-use live::{Failed, Pending};
+use live::LiveState;
 use project_io::SaveWait;
 use queue::Waiting;
 use run::{Muted, Run};
@@ -226,7 +226,10 @@ pub struct Host {
     rate: u32,
     clients: Clients,
     subs: Subscriptions,
-    values: BTreeMap<PortAddress, ParameterValue>,
+    /// The live values, the edits waiting for their reports, the
+    /// controls whose write failed or whose live send waits for a
+    /// reload, and the live edits of plan ports that are no control.
+    live: LiveState,
     reports: Vec<Report>,
     /// Instances muted since the last poll ([`Observed`]).
     muted: Vec<Muted>,
@@ -234,9 +237,6 @@ pub struct Host {
     inputs: Vec<Meter>,
     blocks: Vec<ScopeBlock>,
     snapshots: Vec<VectorSnapshot>,
-    commands: BTreeMap<CommandId, u64>,
-    acks: BTreeMap<u64, Pending>,
-    next_ack: u64,
     writes: u64,
     messages: Vec<String>,
     /// Signal.app's state, in app mode.
@@ -251,18 +251,9 @@ pub struct Host {
     document: Option<Document>,
     /// App mode: the document's saves not yet answered, in the order asked.
     saves: Vec<SaveWait>,
-    /// Controls whose last write failed.
-    failed: BTreeMap<(String, String), Failed>,
-    /// Controls written while their live send was refused: the reload of
-    /// the written file sends them the file's value.
-    resend: BTreeSet<(String, String)>,
-    /// Live edits of plan parameter ports that are no control: the value,
-    /// and whether the Controller took it.
-    port_edits: BTreeMap<PortAddress, (f64, bool)>,
     /// Live notes each client holds (`note`, ADR 0039), and the note-offs
     /// of those whose client went that the Controller has not taken yet.
     auditions: Auditions,
-    next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
     /// The hash of the `graph` (or `graph.error`) message last pushed
@@ -483,16 +474,13 @@ impl Host {
             rate: 0,
             clients: Clients::default(),
             subs: Subscriptions::default(),
-            values: BTreeMap::new(),
+            live: LiveState::default(),
             reports: Vec::new(),
             muted: Vec::new(),
             meters: Vec::new(),
             inputs: Vec::new(),
             blocks: Vec::new(),
             snapshots: Vec::new(),
-            commands: BTreeMap::new(),
-            acks: BTreeMap::new(),
-            next_ack: 1,
             writes: 0,
             messages: Vec::new(),
             app,
@@ -501,11 +489,7 @@ impl Host {
             open_root: PathBuf::new(),
             document: None,
             saves: Vec::new(),
-            failed: BTreeMap::new(),
-            resend: BTreeSet::new(),
-            port_edits: BTreeMap::new(),
             auditions: Auditions::default(),
-            next_failure: 1,
             unsaved_pushed: None,
             graph_pushed: None,
             graph_stopped: None,

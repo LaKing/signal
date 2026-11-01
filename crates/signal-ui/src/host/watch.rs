@@ -74,7 +74,7 @@ impl Host {
         let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
         run.file = None;
         let mut observed = Observed {
-            values: &mut self.values,
+            values: &mut self.live.values,
             reports: &mut self.reports,
             muted: &mut self.muted,
         };
@@ -132,7 +132,7 @@ impl Host {
             self.graph_playing = None;
             // The reload sent every port what differs from the file: a
             // control written while its live send was refused now holds it.
-            for (instance, parameter) in std::mem::take(&mut self.resend) {
+            for (instance, parameter) in std::mem::take(&mut self.live.resend) {
                 self.panel.release(&instance, &parameter);
             }
             self.reconcile(panel);

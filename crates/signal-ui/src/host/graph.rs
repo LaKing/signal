@@ -105,7 +105,7 @@ impl Host {
                 .map(|p| json!(p.combine))
         };
         let mut controls = Vec::new();
-        for instance in self.panel.view(&self.values) {
+        for instance in self.panel.view(&self.live.values) {
             for p in &instance.parameters {
                 let Some(target) = self.panel.target(&instance.name, &p.name) else {
                     continue;

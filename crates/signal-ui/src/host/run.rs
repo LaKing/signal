@@ -596,9 +596,7 @@ impl Host {
         self.plan = run.current.plan(&self.registry).ok().map(|p| p.plan);
         self.rate = run.rate;
         run.version = run.controller.status().version;
-        self.values.clear();
-        self.resend.clear();
-        self.port_edits.clear();
+        self.live.run_ended();
         self.auditions.clear();
         // Mutes a last poll left are the last run's, never this one's.
         self.muted.clear();
@@ -612,7 +610,7 @@ impl Host {
             return;
         };
         let mut observed = Observed {
-            values: &mut self.values,
+            values: &mut self.live.values,
             reports: &mut self.reports,
             muted: &mut self.muted,
         };
@@ -736,7 +734,7 @@ impl Host {
     pub(super) fn replace_plan(&mut self, plan: Option<ExecutionPlan>) {
         let old = std::mem::replace(&mut self.plan, plan);
         let new = self.plan.as_ref();
-        self.port_edits.retain(|port, _| {
+        self.live.port_edits.retain(|port, _| {
             let after = plan_base(new, port);
             after.is_some()
                 && after.map(f64::to_bits) == plan_base(old.as_ref(), port).map(f64::to_bits)

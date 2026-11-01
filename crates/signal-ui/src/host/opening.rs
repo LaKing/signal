@@ -197,7 +197,7 @@ impl Host {
         };
         self.document = prepared;
         self.open(&dir);
-        self.failed.clear();
+        self.live.failed.clear();
         app::opened(&mut self.setup, path.to_owned());
         let saved = app::save(&self.setup, &self.setup_path);
         let mode = self.app.as_mut();
@@ -391,7 +391,7 @@ impl Host {
             stop(old);
         }
         self.abandon();
-        self.failed.clear();
+        self.live.failed.clear();
         if let Some(temporary) = temporary {
             self.dir = temporary.dir().to_owned();
             self.generation += 1;
