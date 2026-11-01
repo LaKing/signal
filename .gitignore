@@ -6,3 +6,5 @@
 .DS_Store
 # insta writes a pending snapshot beside a failing one; never commit it.
 *.snap.new
+# ADR 0038 §6: a project folder's routing on this machine, never part of a project.
+devices.local.toml
