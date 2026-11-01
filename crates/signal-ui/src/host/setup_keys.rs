@@ -1,5 +1,5 @@
-//! The Setup and the keyboard shortcuts: devices, checks and Apply (ADR
-//! 0034, 0036).
+//! The Setup and the keyboard shortcuts (ADR 0034, 0036): devices, checks
+//! and Apply.
 
 use std::fs;
 use std::time::{Duration, Instant};

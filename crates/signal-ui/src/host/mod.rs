@@ -19,6 +19,7 @@
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
 mod app_mode;
+mod audition;
 mod clients;
 mod controls;
 mod failure;
@@ -43,10 +44,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use signal_audio::DeviceInfo;
-use signal_core::{Direction as PortDirection, EventPayload, PortAddress, PortShape, Registry};
-use signal_engine::{
-    CommandId, ParameterValue, Provenance, Report, RtOptions, RunnerStatus, Stamp,
-};
+use signal_core::{PortAddress, Registry};
+use signal_engine::{CommandId, ParameterValue, Provenance, Report, RtOptions, RunnerStatus};
 use signal_graph::ExecutionPlan;
 use signal_output::{Controller, Meter, SCOPE_SLOTS, ScopeBlock, VECTOR_SLOTS, VectorSnapshot};
 use signal_project::Diagnostic;
@@ -66,20 +65,15 @@ use crate::setup::{DEFAULT_BUFFER, Setup, Window};
 
 use app_mode::{AppMode, app_only, power_json};
 use clients::Client;
-use failure::{Failure, fail};
+use failure::fail;
 use live::{Failed, Pending};
 use project_io::SaveWait;
-use queue::{Job, LIVE_EDITS, Waiting};
+use queue::Waiting;
 use run::{Muted, Run};
 use subs::Sub;
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
-
-/// The event input a `note` goes to (ADR 0039): `std.note_seq`'s.
-pub const AUDITION_INPUT: &str = "audition";
-/// A `note` without a `velocity` (ADR 0039): the piano roll's default note's.
-const NOTE_VELOCITY: f64 = 0.8;
 
 /// How the first run plays: `signal play`'s driver options.
 #[derive(Clone, Debug)]
@@ -998,109 +992,6 @@ impl Host {
             "ceilinged": controller.map(Controller::ceilinged),
             "writes": self.writes,
         })
-    }
-
-    /// A client gone or evicted with a key held (a closed page, a lost
-    /// connection, a stalled socket): its notes end, unacknowledged, so
-    /// none is left sounding. A note-off the Controller refuses (its
-    /// command queue full) waits in `releases` and is sent again by every
-    /// step until it is taken ([`Host::send_releases`]).
-    fn end_notes(&mut self, client: u64) {
-        // Its live edits still waiting behind the writer lock are dropped:
-        // a note it can no longer end, or a value it can no longer see,
-        // is never played for it (its file writes still run, as asked).
-        self.waiting.retain(|w| match &w.job {
-            Job::Message {
-                client: c,
-                lock: false,
-                kind,
-                ..
-            } => *c != client || !LIVE_EDITS.contains(&kind.as_str()),
-            _ => true,
-        });
-        if let Some(held) = self.auditions.remove(&client) {
-            self.releases.extend(held);
-        }
-        self.send_releases();
-    }
-
-    /// Sends the waiting note-offs; keeps those the Controller refuses.
-    fn send_releases(&mut self) {
-        if self.releases.is_empty() {
-            return;
-        }
-        let Some(run) = self.run.as_mut() else {
-            // No run: nothing sounds.
-            self.releases.clear();
-            return;
-        };
-        self.releases.retain(|(port, key)| {
-            let off = EventPayload::Set(signal_std::audition_value(*key, 0.0, false));
-            run.controller
-                .send_event(port.clone(), off, Stamp::Default)
-                .is_err()
-        });
-    }
-
-    /// Test hooks: the note-offs still waiting for the Controller.
-    #[cfg(feature = "test-hooks")]
-    pub fn releases_waiting(&self) -> usize {
-        self.releases.len()
-    }
-
-    /// `address` as an event input of the running plan (`trigger`, `note`).
-    /// ADR 0037 §7: `address` translated through a top-level slot's match
-    /// (`/fx.y` → the plan port behind the content's `out`); another
-    /// address as it is. A slot port that reaches nothing now (the slot
-    /// empty, the port unmatched) is `inactive`.
-    fn through_slot(&self, address: &str) -> Result<String, Failure> {
-        match self.panel.slot_port(address) {
-            Some(crate::panel::SlotPort::Port(port)) => Ok(port.to_string()),
-            Some(crate::panel::SlotPort::Inactive(why)) => Err(fail(
-                "inactive",
-                format!("{address} reaches nothing now: {why}"),
-            )),
-            None => Ok(address.to_owned()),
-        }
-    }
-
-    fn event_input(&self, address: &str) -> Result<PortAddress, Failure> {
-        let address = &self.through_slot(address)?;
-        let port: PortAddress = address
-            .parse()
-            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
-        let found = self.plan.as_ref().is_some_and(|plan| {
-            plan.instances
-                .iter()
-                .find(|i| i.address == port.instance())
-                .is_some_and(|i| {
-                    i.descriptor.ports.iter().any(|p| {
-                        p.name == port.port()
-                            && p.direction == PortDirection::In
-                            && p.shape == PortShape::Events
-                    })
-                })
-        });
-        if found {
-            Ok(port)
-        } else {
-            Err(fail(
-                "unknown-address",
-                format!("{address} is not an event input of the running plan"),
-            ))
-        }
-    }
-
-    fn release(&mut self, client: u64) {
-        let subs: Vec<u32> = self
-            .subs
-            .iter()
-            .filter(|(_, s)| s.client == client)
-            .map(|(&id, _)| id)
-            .collect();
-        for sub in subs {
-            self.drop_sub(sub);
-        }
     }
 }
 

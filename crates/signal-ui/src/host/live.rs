@@ -1,18 +1,19 @@
-//! Live edits: `set`, `ramp`, `trigger` and `revert`, their reports, the
-//! values the files do not hold (`unsaved`), and the live values carried
-//! across a new panel.
+//! Live edits: `set`, `ramp`, `trigger`, `note` and `revert`, their
+//! addresses and reports, the values the files do not hold (`unsaved`),
+//! and the live values carried across a new panel.
 
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use signal_core::{Curve, EventPayload, Frame, PortAddress};
+use signal_core::{Curve, Direction as PortDirection, EventPayload, Frame, PortAddress, PortShape};
 use signal_engine::{Outcome, Stamp};
 
 use crate::panel::{Panel, ramp_frames};
 
+use super::audition::{AUDITION_INPUT, NOTE_VELOCITY};
 use super::controls::{bits, control_of, plan_base};
 use super::failure::{Failure, fail};
-use super::{AUDITION_INPUT, Host, NOTE_VELOCITY, with, within};
+use super::{Host, with, within};
 
 /// An edit waiting for its reports.
 pub(super) struct Pending {
@@ -635,6 +636,49 @@ impl Host {
         for (_, pending) in std::mem::take(&mut self.acks) {
             let ack = json!({"type": "ack", "id": pending.id, "outcome": "abandoned"});
             self.send_text(pending.client, &ack);
+        }
+    }
+
+    /// ADR 0037 §7: `address` translated through a top-level slot's match
+    /// (`/fx.y` → the plan port behind the content's `out`); another
+    /// address as it is. A slot port that reaches nothing now (the slot
+    /// empty, the port unmatched) is `inactive`.
+    pub(super) fn through_slot(&self, address: &str) -> Result<String, Failure> {
+        match self.panel.slot_port(address) {
+            Some(crate::panel::SlotPort::Port(port)) => Ok(port.to_string()),
+            Some(crate::panel::SlotPort::Inactive(why)) => Err(fail(
+                "inactive",
+                format!("{address} reaches nothing now: {why}"),
+            )),
+            None => Ok(address.to_owned()),
+        }
+    }
+
+    /// `address` as an event input of the running plan (`trigger`, `note`).
+    fn event_input(&self, address: &str) -> Result<PortAddress, Failure> {
+        let address = &self.through_slot(address)?;
+        let port: PortAddress = address
+            .parse()
+            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+        let found = self.plan.as_ref().is_some_and(|plan| {
+            plan.instances
+                .iter()
+                .find(|i| i.address == port.instance())
+                .is_some_and(|i| {
+                    i.descriptor.ports.iter().any(|p| {
+                        p.name == port.port()
+                            && p.direction == PortDirection::In
+                            && p.shape == PortShape::Events
+                    })
+                })
+        });
+        if found {
+            Ok(port)
+        } else {
+            Err(fail(
+                "unknown-address",
+                format!("{address} is not an event input of the running plan"),
+            ))
         }
     }
 }
