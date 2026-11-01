@@ -542,8 +542,12 @@ impl Host {
     /// folder is removed, unless it is edited and `discard` is false: then it
     /// is kept, and the message says where. A save still running is
     /// finished first (and answered), so that what it saves is not lost and
-    /// the folder is not removed under it. Returns what to tell the operator.
+    /// the folder is not removed under it. Requests still waiting for
+    /// another writer to release the project's lock are written if it comes
+    /// free within a bounded wait, else answered `shutting-down`
+    /// ([`Host::drain_for_exit`]). Returns what to tell the operator.
     pub fn close(&mut self, window: Option<Window>, discard: bool) -> Vec<String> {
+        self.drain_for_exit();
         self.stop_app();
         self.finish_saves();
         if let Some(document) = self.opening.document.take() {
@@ -664,8 +668,11 @@ impl Host {
         self.opening.document.as_ref()
     }
 
-    /// Stops the run; the Runner is dropped here.
+    /// Stops the run; the Runner is dropped here. Requests still waiting
+    /// for the writer lock are drained or answered first, as by
+    /// [`Host::close`].
     pub fn finish(mut self) -> Option<Finished> {
+        self.drain_for_exit();
         let mut run = self.run.take()?;
         let runner = run.output.stop().ok().flatten();
         run.controller.poll(&mut run.live);

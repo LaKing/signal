@@ -103,6 +103,11 @@ pub(super) fn class_of(kind: &str, message: &Value) -> Class {
 /// refused (`busy`).
 const WAITING_MAX: usize = 64;
 
+/// How long an exit waits at most for another writer to release the
+/// project's lock, so the requests queued behind it are written
+/// ([`Host::drain_for_exit`]).
+pub(super) const EXIT_WAIT: Duration = Duration::from_secs(2);
+
 /// A file request waiting for the project's writer lock: the opening it is
 /// of, when it was queued, and what it does. `generation` is the opening
 /// open when it was queued, or `None` for a request that names no project
@@ -588,6 +593,41 @@ impl Host {
             }
             drop(holding);
         }
+    }
+
+    /// At exit (review 2026-11-01, the operator's policy): the requests
+    /// waiting for the writer lock run as it comes free, within a bounded
+    /// wait ([`EXIT_WAIT`], or the host's lock wait when shorter); every one
+    /// still waiting then is answered, unrun, `shutting-down` (a client's
+    /// error, the window's layout write and Save their `Err`), and how many
+    /// is reported. Nothing waits silently past the exit.
+    pub(super) fn drain_for_exit(&mut self) {
+        let until = Instant::now() + EXIT_WAIT.min(self.queue.lock_wait);
+        loop {
+            {
+                let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+                self.run_waiting();
+            }
+            if self.queue.waiting.is_empty() || Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let left: Vec<Waiting> = self.queue.waiting.drain(..).collect();
+        if left.is_empty() {
+            return;
+        }
+        let count = left.len();
+        for waiting in left {
+            let failure = fail(
+                "shutting-down",
+                "not written: Signal is shutting down and another writer still holds the project's lock",
+            );
+            self.answer_job(waiting.job, failure);
+        }
+        self.messages.push(format!(
+            "{count} request(s) waiting for another writer to release the project's lock were not done: shutting down"
+        ));
     }
 
     /// Whether requests wait for the project's writer lock (the control

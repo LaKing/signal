@@ -2553,6 +2553,7 @@ both!(
     a_request_after_a_queued_open_means_the_project_then_open,
     a_queued_live_edit_is_no_edit_at_an_open,
     delayed_writes_of_another_opening_are_refused_with_identical_files,
+    queued_writes_get_an_outcome_at_exit,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2879,6 +2880,96 @@ fn delayed_writes_of_another_opening_are_refused_with_identical_files(transport:
     rig.finish();
     let _ = fs::remove_dir_all(&a);
     let _ = fs::remove_dir_all(&b);
+}
+
+/// Review 2026-11-01 (queued-writes-lost-at-exit), the operator's policy:
+/// at exit the requests queued behind another writer's lock are written if
+/// it comes free within a bounded wait; each one still waiting then gets an
+/// explicit outcome (a client's `shutting-down`, the window's layout write
+/// and Save an `Err`) and the exit reports how many. Native writes,
+/// protocol commits and queued Saves, under lock contention.
+fn queued_writes_get_an_outcome_at_exit(transport: Transport) {
+    // Held through the exit: nothing written, everyone told.
+    let mut rig = app_rig("exit-held", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.05, "id": 2}),
+    );
+    no_reply(&mut rig, &mut ws, 100, &[2]);
+    let (told, outcomes) = std::sync::mpsc::channel();
+    let windows = told.clone();
+    rig.host().write_windows_then(
+        &working,
+        Box::new(|text: &str| Ok(format!("{text}# exit\n"))),
+        Box::new(move |result| {
+            let _ = windows.send(("windows", result));
+        }),
+    );
+    rig.host().save_document_then(Box::new(move |result| {
+        let _ = told.send(("save", result));
+    }));
+    assert!(outcomes.try_recv().is_err(), "both wait for the lock");
+    let started = Instant::now();
+    let said = rig.host().close(None, true);
+    assert!(started.elapsed() < Duration::from_secs(5), "a bounded wait");
+    drop(lock);
+    let mut got: Vec<(&str, Result<(), String>)> = outcomes.try_iter().collect();
+    got.sort_by_key(|(what, _)| *what);
+    assert_eq!(got.len(), 2, "{got:?}");
+    for (what, result) in &got {
+        let error = result.as_ref().unwrap_err();
+        assert!(error.contains("shutting down"), "{what}: {error}");
+    }
+    let refused = rig.reply(&mut ws, 2, "error");
+    assert_eq!(refused["code"], "shutting-down", "{refused}");
+    assert!(
+        said.iter()
+            .any(|m| m.contains("3 request(s)") && m.contains("shutting down")),
+        "{said:?}"
+    );
+    assert!(gain_of(&file).contains("gain = 0.5"), "{}", gain_of(&file));
+    rig.finish();
+
+    // Released during the wait: the queued commit and layout are written.
+    let mut rig = app_rig("exit-released", transport, None);
+    let dir = rig.dir.clone();
+    let (mut ws, _) = rig.client();
+    let (held, release) = std::sync::mpsc::channel::<()>();
+    let (taken, is_taken) = std::sync::mpsc::channel::<()>();
+    let locked = dir.clone();
+    let holder = std::thread::spawn(move || {
+        let lock = signal_project::transaction::ProjectLock::acquire(&locked).unwrap();
+        let _ = taken.send(());
+        let _ = release.recv();
+        std::thread::sleep(Duration::from_millis(300));
+        drop(lock);
+    });
+    is_taken.recv().unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.05, "id": 2}),
+    );
+    no_reply(&mut rig, &mut ws, 100, &[2]);
+    let _ = held.send(());
+    let said = rig.host().close(None, true);
+    holder.join().unwrap();
+    rig.reply(&mut ws, 2, "committed");
+    assert!(gain_in(&dir).contains("gain = 0.05"), "{}", gain_in(&dir));
+    assert!(
+        !said.iter().any(|m| m.contains("shutting down")),
+        "{said:?}"
+    );
+    rig.finish();
 }
 
 fn with_id(message: &Value, id: u64) -> Value {
