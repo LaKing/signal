@@ -113,7 +113,10 @@ fn the_display_shows_a_hidden_edit_at_the_periodic_comparison() {
     // Measurement: the product's aim is COMPARE_EVERY and one look (250 ms).
     eprintln!("the hidden edit was shown after {shown:?}");
     assert!(edited.refresh(), "a shown edit stays shown");
-    assert!(!clean.check(), "compared now, the clean folder is not edited");
+    assert!(
+        !clean.check(),
+        "compared now, the clean folder is not edited"
+    );
     assert!(!clean.refresh());
     clean.close(true);
     edited.close(true);
