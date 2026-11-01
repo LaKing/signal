@@ -43,6 +43,23 @@ pub(super) fn device_name(output: &Output) -> String {
 const KEYS_POLL: Duration = Duration::from_millis(250);
 
 impl Host {
+    /// Saves the Setup ([`SetupFile::save`](crate::setup::SetupFile::save)):
+    /// a file that did not read wholly is kept beside it first, and where
+    /// it went is told (a message, and one more of the Setup's problems,
+    /// which `setup.get` and `app` show).
+    pub(super) fn save_setup(&mut self) -> Result<(), String> {
+        if let Some(kept) = self.setup_file.save(&self.setup)? {
+            let note = format!(
+                "{} did not read wholly; it was kept as {} before the Setup was saved",
+                self.setup_file.path().display(),
+                kept.display()
+            );
+            self.messages.push(format!("setup: {note}"));
+            self.setup_problems.push(note);
+        }
+        Ok(())
+    }
+
     pub(super) fn list_devices(&mut self) {
         let listed = match &self.backend {
             Backend::CoreAudio => signal_audio::devices(),
@@ -444,7 +461,7 @@ impl Host {
             None => {}
         }
         self.setup.rt_policy = rt_policy;
-        if let Err(error) = app::save(&self.setup, &self.setup_path) {
+        if let Err(error) = self.save_setup() {
             if let Some(mode) = self.app.as_mut() {
                 mode.message = Some(error.clone());
             }

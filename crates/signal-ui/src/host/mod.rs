@@ -62,7 +62,7 @@ use crate::keys::{self, Keys};
 use crate::panel::Panel;
 use crate::player::Backend;
 use crate::server::{Inbound, Server, ServerOptions};
-use crate::setup::{DEFAULT_BUFFER, Setup, Window};
+use crate::setup::{DEFAULT_BUFFER, Setup, SetupFile, Window};
 
 use app_mode::{AppMode, app_only, power_json};
 use audition::Auditions;
@@ -210,6 +210,8 @@ pub struct Host {
     setup_path: PathBuf,
     setup: Setup,
     setup_problems: Vec<String>,
+    /// What the Setup file held that a save must keep (review 2026-11-01).
+    setup_file: SetupFile,
     backend: Backend,
     devices: Vec<DeviceInfo>,
     devices_error: Option<String>,
@@ -437,7 +439,7 @@ impl Host {
     }
 
     fn blank(config: HostConfig, server: Server, app: Option<AppMode>) -> Host {
-        let (setup, setup_problems) = Setup::load(&config.setup_path);
+        let (setup, setup_problems, setup_file) = SetupFile::load(&config.setup_path);
         let keys_file = keys::keys_path(&config.setup_path);
         let keys_stamp = keys::stamp(&keys_file);
         let keys = Keys::load(&keys_file);
@@ -446,6 +448,7 @@ impl Host {
             setup_path: config.setup_path,
             setup,
             setup_problems,
+            setup_file,
             backend: config.backend,
             devices: Vec::new(),
             devices_error: None,
@@ -553,7 +556,7 @@ impl Host {
             }
         }
         app::exit(&mut self.setup, window);
-        if let Err(message) = app::save(&self.setup, &self.setup_path) {
+        if let Err(message) = self.save_setup() {
             self.messages.push(message);
         }
         std::mem::take(&mut self.messages)

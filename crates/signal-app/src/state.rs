@@ -40,7 +40,7 @@ use signal_ui::app::{self, load};
 
 use crate::meter::{ChannelMeter, Reading};
 use crate::panel::{InstanceView, Panel, Written, after_write, ramp_frames, write_project};
-use crate::setup::{DeviceEntry, GpuDevices, Setup, Window};
+use crate::setup::{DeviceEntry, GpuDevices, Setup, SetupFile, Window};
 pub use signal_ui::app::Status;
 pub use signal_ui::player::{Backend, Interface, Selection};
 use signal_ui::player::{Input, Output};
@@ -262,6 +262,8 @@ pub struct AppState {
     setup_path: PathBuf,
     setup: Setup,
     setup_problems: Vec<String>,
+    /// What the Setup file held that a save must keep (review 2026-11-01).
+    setup_file: SetupFile,
     project_dir: String,
     sample_rate: Option<u32>,
     diagnostics: Vec<String>,
@@ -279,7 +281,7 @@ impl AppState {
     /// The state for the Setup at `setup_path` (read now; its problems are
     /// shown), opening `project` or else the Setup's last project.
     pub fn new(setup_path: PathBuf, project: Option<PathBuf>, backend: Backend) -> AppState {
-        let (setup, setup_problems) = Setup::load(&setup_path);
+        let (setup, setup_problems, setup_file) = SetupFile::load(&setup_path);
         let mut registry = Registry::new();
         if let Err(error) = signal_std::register(&mut registry) {
             eprintln!("signal-app: the standard modules did not register: {error}");
@@ -290,6 +292,7 @@ impl AppState {
             setup_path,
             setup,
             setup_problems,
+            setup_file,
             project_dir: String::new(),
             sample_rate: None,
             diagnostics: Vec::new(),
@@ -555,8 +558,16 @@ impl AppState {
     }
 
     fn save(&mut self) {
-        if let Err(message) = app::save(&self.setup, &self.setup_path) {
-            self.message = Some(message);
+        match self.setup_file.save(&self.setup) {
+            Ok(None) => {}
+            Ok(Some(kept)) => {
+                self.message = Some(format!(
+                    "{} did not read wholly; it was kept as {} before the Setup was saved",
+                    self.setup_path.display(),
+                    kept.display()
+                ));
+            }
+            Err(message) => self.message = Some(message),
         }
     }
 

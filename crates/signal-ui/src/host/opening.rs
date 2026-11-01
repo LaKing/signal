@@ -274,7 +274,7 @@ impl Host {
         self.open(&dir);
         self.live.failed.clear();
         app::opened(&mut self.setup, path.to_owned());
-        let saved = app::save(&self.setup, &self.setup_path);
+        let saved = self.save_setup();
         let mode = self.app.as_mut();
         if let Some(mode) = mode {
             mode.message = match (&saved, unsaved, opening) {

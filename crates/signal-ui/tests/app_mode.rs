@@ -86,6 +86,74 @@ fn app_rig_listing(
     }
 }
 
+/// Review 2026-11-01 (setup-overwritten-after-bad-load): a Setup that did
+/// not read (not TOML, a newer version) is kept beside it before Signal.app
+/// saves over it, open to close, and the host says where; a key it does not
+/// know survives the save. Scratch Setup paths only.
+#[test]
+fn a_setup_that_did_not_read_is_kept_before_it_is_saved() {
+    for (name, text) in [
+        ("newer", "version = 999\nbuffer = 64\n"),
+        ("malformed", "version = 1\nbuffer = [\n"),
+        (
+            "unknown",
+            "version = 1\nbuffer = 64\nfuture_key = \"kept\"\n",
+        ),
+    ] {
+        let base = std::env::temp_dir().join(format!(
+            "signal-ui-app-bad-setup-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("project.toml"), common::TONE).unwrap();
+        let setup = base.join("setup.toml");
+        fs::write(&setup, text).unwrap();
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let mut host = Host::new_app_local(AppHostConfig {
+            setup_path: setup.clone(),
+            project: Some(dir.clone()),
+            open_root: base.join("Open"),
+            registry,
+            backend: Backend::Null(devices()),
+            compute: Vec::new(),
+            server: ServerOptions {
+                port: 0,
+                remote: false,
+                ui_dir: root().join("ui"),
+                project_ui: PathBuf::new(),
+                client_queue: 16,
+            },
+            plays: false,
+        })
+        .unwrap();
+        // Another project opened saves the Setup; so does the close.
+        host.open_project(&dir, Edits::Ask).unwrap();
+        let said = host.close(None, true);
+        let kept = base.join("setup.toml.bad-1");
+        let saved = fs::read_to_string(&setup).unwrap();
+        assert!(saved.contains("version = 1"), "{name}: {saved}");
+        if name == "unknown" {
+            assert!(!kept.exists(), "{name}: nothing dropped, nothing kept");
+            assert!(saved.contains("future_key = \"kept\""), "{saved}");
+            assert!(saved.contains("buffer = 64"), "{saved}");
+        } else {
+            assert_eq!(fs::read_to_string(&kept).unwrap(), text, "{name}");
+            assert!(
+                !base.join("setup.toml.bad-2").exists(),
+                "{name}: kept once, before the first save"
+            );
+            assert!(
+                said.iter().any(|m| m.contains("setup.toml.bad-1")),
+                "{name}: {said:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
 fn status(rig: &mut Rig, ws: &mut common::Ws, playing: bool) -> Value {
     rig.wait(ws, "status", |got| {
         got.of("status")

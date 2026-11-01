@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use signal_engine::{Computation, RtPolicy};
-use signal_ui::setup::{DeviceEntry, GpuDevices, PlayEntry, Setup, Window, setup_path};
+use signal_ui::setup::{DeviceEntry, GpuDevices, PlayEntry, Setup, SetupFile, Window, setup_path};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("signal-setup-{name}-{}", std::process::id()));
@@ -207,7 +207,7 @@ fn what_does_not_read_falls_back_with_a_reason() {
             "buffer",
             "output",
             "output_channels",
-            "unknown key 'colour'; ignored",
+            "unknown key 'colour'; kept in the file, not used",
             "window"
         ],
         "{problems:#?}"
@@ -227,6 +227,65 @@ fn what_does_not_read_falls_back_with_a_reason() {
             ]
         );
     }
+}
+
+/// Review 2026-11-01: a Setup file that did not read wholly is kept as
+/// `setup.toml.bad-<n>` before the first save replaces it (the next free
+/// n; once per reading), unknown keys and tables are written back, and a
+/// file that could not be read is never replaced.
+#[test]
+fn a_save_keeps_what_did_not_read() {
+    let dir = scratch("keeps");
+    let path = dir.join("setup.toml");
+    let bad = "version = 1\nbuffer = \"lots\"\n";
+    fs::write(&path, bad).unwrap();
+    fs::write(dir.join("setup.toml.bad-1"), "older").unwrap();
+    let (setup, problems, mut file) = SetupFile::load(&path);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(
+        file.save(&setup).unwrap(),
+        Some(dir.join("setup.toml.bad-2"))
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("setup.toml.bad-2")).unwrap(),
+        bad
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("setup.toml.bad-1")).unwrap(),
+        "older"
+    );
+    assert_eq!(file.save(&setup).unwrap(), None, "kept once");
+    assert_eq!(Setup::load(&path), (Setup::default(), Vec::new()));
+
+    // Unknown keys and tables survive, beside the known ones; nothing kept.
+    fs::write(
+        &path,
+        "version = 1\nbuffer = 64\nfuture = 3\n[later]\nx = \"y\"\n",
+    )
+    .unwrap();
+    let (mut setup, problems, mut file) = SetupFile::load(&path);
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    setup.buffer = 256;
+    assert_eq!(file.save(&setup).unwrap(), None);
+    let text = fs::read_to_string(&path).unwrap();
+    let table: toml::Table = text.parse().unwrap();
+    assert_eq!(table["future"].as_integer(), Some(3), "{text}");
+    assert_eq!(table["later"]["x"].as_str(), Some("y"), "{text}");
+    assert_eq!(Setup::load(&path).0.buffer, 256);
+
+    // Unreadable: refused, the file unchanged.
+    fs::write(&path, "version = 1\nbuffer = 512\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let (setup, problems, mut file) = SetupFile::load(&path);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    let refused = file.save(&setup).unwrap_err();
+    assert!(refused.contains("not replaced"), "{refused}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "version = 1\nbuffer = 512\n"
+    );
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

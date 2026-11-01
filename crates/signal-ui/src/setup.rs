@@ -314,9 +314,17 @@ impl Setup {
 
     /// [`load`](Setup::load) of the text of `path`.
     pub fn parse(text: &str, path: &Path) -> (Setup, Vec<String>) {
+        let (setup, problems, _) = Setup::read_text(text, path);
+        (setup, problems)
+    }
+
+    /// [`parse`](Setup::parse), with the top-level keys this build does not
+    /// know (each also one of the problems), as written.
+    fn read_text(text: &str, path: &Path) -> (Setup, Vec<String>, toml::Table) {
         let file = path.display();
         let mut setup = Setup::default();
         let mut problems = Vec::new();
+        let mut unknown = toml::Table::new();
         let table = match text.parse::<toml::Table>() {
             Ok(table) => table,
             Err(error) => {
@@ -325,7 +333,7 @@ impl Setup {
                     "{file}: not valid TOML ({}); using the default Setup",
                     reason.trim()
                 ));
-                return (setup, problems);
+                return (setup, problems, unknown);
             }
         };
         if let Some(version) = table.get("version")
@@ -334,7 +342,7 @@ impl Setup {
             problems.push(format!(
                 "{file}: version {version} is not {VERSION}; using the default Setup"
             ));
-            return (setup, problems);
+            return (setup, problems, unknown);
         }
         for (key, value) in table {
             let mut bad = |reason: String| {
@@ -433,10 +441,17 @@ impl Setup {
                             .to_owned(),
                     ),
                 },
-                _ => problems.push(format!("{file}: unknown key '{key}'; ignored")),
+                // Kept as written, and written back by every save
+                // ([`SetupFile`]): a newer build's key survives this one.
+                _ => {
+                    problems.push(format!(
+                        "{file}: unknown key '{key}'; kept in the file, not used"
+                    ));
+                    unknown.insert(key.clone(), value);
+                }
             }
         }
-        (setup, problems)
+        (setup, problems, unknown)
     }
 
     /// The Setup as TOML.
@@ -479,6 +494,132 @@ impl Setup {
         }
         signal_project::transaction::write_atomic(path, self.to_toml().as_bytes())
     }
+}
+
+/// The Setup file as it was read, so that a save loses nothing it held
+/// (review 2026-11-01): a file that did not read wholly (not TOML, another
+/// version, a value replaced by its default) is kept beside it, as
+/// `setup.toml.bad-<n>`, before the first save replaces it, and the save
+/// says where; top-level keys this build does not know are written back
+/// by every save; a file that exists but could not be read is never
+/// replaced. Signal.app's host and window state save the Setup through it.
+#[derive(Debug, Default)]
+pub struct SetupFile {
+    path: PathBuf,
+    /// The file's bytes, to keep before the first save, when it did not
+    /// read wholly.
+    original: Option<Vec<u8>>,
+    /// The file exists and could not be read (why): never replaced.
+    unread: Option<String>,
+    /// The top-level keys this build does not know, as written.
+    unknown: toml::Table,
+}
+
+impl SetupFile {
+    /// Reads the Setup at `path` as [`Setup::load`] does, with what its
+    /// saves must keep.
+    pub fn load(path: &Path) -> (Setup, Vec<String>, SetupFile) {
+        let mut file = SetupFile {
+            path: path.to_owned(),
+            ..SetupFile::default()
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return (Setup::default(), Vec::new(), file);
+            }
+            Err(error) => {
+                let problem = format!("{}: {error}; using the default Setup", path.display());
+                file.unread = Some(error.to_string());
+                return (Setup::default(), vec![problem], file);
+            }
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let (setup, problems, unknown) = Setup::read_text(&text, path);
+        // Each unknown key is one problem, and is kept: any other problem
+        // dropped something the file held.
+        if problems.len() > unknown.len() || matches!(text, std::borrow::Cow::Owned(_)) {
+            file.original = Some(bytes);
+        }
+        file.unknown = unknown;
+        (setup, problems, file)
+    }
+
+    /// The Setup file's path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Writes `setup` atomically, with the unknown keys read. Before the
+    /// first save of a file that did not read wholly, its bytes are kept as
+    /// `<file>.bad-<n>` beside it: `Ok(Some(copy))` says where (nothing is
+    /// written when the copy fails). A file that could not be read is
+    /// refused, never replaced.
+    pub fn save(&mut self, setup: &Setup) -> Result<Option<PathBuf>, String> {
+        let not_saved =
+            |why: String| format!("the Setup was not saved to {}: {why}", self.path.display());
+        if let Some(why) = &self.unread {
+            return Err(not_saved(format!(
+                "it could not be read ({why}), so it is not replaced"
+            )));
+        }
+        let kept = match &self.original {
+            Some(bytes) => Some(keep_copy(&self.path, bytes).map_err(|error| {
+                not_saved(format!(
+                    "its unread original could not be kept beside it ({error})"
+                ))
+            })?),
+            None => None,
+        };
+        self.original = None;
+        let text = with_unknown(setup.to_toml(), &self.unknown);
+        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            fs::create_dir_all(dir).map_err(|error| not_saved(error.to_string()))?;
+        }
+        signal_project::transaction::write_atomic(&self.path, text.as_bytes())
+            .map_err(|error| not_saved(error.to_string()))?;
+        Ok(kept)
+    }
+}
+
+/// `text` (a Setup's TOML) with the keys of `unknown` it does not hold.
+fn with_unknown(text: String, unknown: &toml::Table) -> String {
+    if unknown.is_empty() {
+        return text;
+    }
+    let Ok(mut table) = text.parse::<toml::Table>() else {
+        return text;
+    };
+    for (key, value) in unknown {
+        table.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    toml::to_string(&table).unwrap_or(text)
+}
+
+/// Writes `bytes` to the first free `<path>.bad-<n>` (from 1); its path.
+fn keep_copy(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bad-");
+    for n in 1..=999u32 {
+        let mut candidate = name.clone();
+        candidate.push(n.to_string());
+        let candidate = PathBuf::from(candidate);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut out) => {
+                use std::io::Write;
+                out.write_all(bytes)?;
+                out.sync_all()?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other("999 kept copies exist already"))
 }
 
 /// The dialog's choice of an output or input device.

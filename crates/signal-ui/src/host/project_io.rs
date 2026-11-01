@@ -272,7 +272,7 @@ impl Host {
                 let result = match (&result, &wait.save_as) {
                     (Ok(_), Some(file)) => {
                         app::opened(&mut self.setup, file.clone());
-                        app::save(&self.setup, &self.setup_path)
+                        self.save_setup()
                     }
                     (Ok(_), None) => Ok(()),
                     (Err(message), _) => Err(message.clone()),
