@@ -1,7 +1,6 @@
 //! Control writes: a control's value written into the project's files, and
 //! its corrections.
 
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
@@ -584,7 +583,8 @@ impl Host {
         // between the write and the stamp; a later one differs from it).
         if held
             && let Some(stamp) = stamp
-            && fs::read_to_string(self.opening.dir.join(file)).is_ok_and(|text| text == after)
+            && signal_project::read_regular_to_string(self.opening.dir.join(file))
+                .is_ok_and(|text| text == after)
             && let Some(run) = self.run.as_mut()
         {
             run.file = Some(after);
