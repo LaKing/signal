@@ -73,7 +73,10 @@ function partMenu(hit, state) {
     const composite = Boolean(hit.node?.composite);
     const slot = hit.node?.slot ?? null;
     const notComposite = composite ? null : slot ? (insideReason(slot) ?? (slot.load ? 'Its content is not a project composite' : 'An empty slot has no inside')) : 'A primitive has no inside';
-    const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
+    const items = [];
+    // A chip whole on the screen (the owner's, 2026-11-02), as Show Instrument on the Deck.
+    if (composite) items.push(unless({ id: 'show', label: 'Show Chip' }, null), SEPARATOR);
+    items.push(unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null));
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Zoom out' }, null));
     else items.push(unless({ id: 'open', label: 'Zoom into' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);

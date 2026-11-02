@@ -420,6 +420,13 @@ export class SignalPlane extends HTMLElement {
     // ADR 0051 §8: no Plate / X-ray / Board switch; the board is the Engine, laid on an instrument's cube.
     this.schematic.board?.restore?.({ layer: 'board' });
     this.deep.append(this.schematic);
+    // The board's levels drawn (its zoom into the dies): the bar's Layer 1, 2 … after the Engine.
+    this.boardLevels = [];
+    this.schematic.addEventListener('signal-board-levels', (event) => {
+      this.boardLevels = event.detail ?? [];
+      this.barKey = null;
+      if (this.level() === 'engine') this.render();
+    });
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
     this.stage.append(this.world, this.deep, this.bar, this.notes);
@@ -1789,18 +1796,30 @@ export class SignalPlane extends HTMLElement {
 
   renderBar(level, r, fades = planeFades(r)) {
     const instruments = this.instrumentRects().length > 0;
-    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}`;
+    const deeper = level === 'engine' ? this.boardLevels.slice(1) : [];
+    const boardEditing = Boolean(this.schematic?.editor?.editing);
+    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}|${deeper.map((l) => l.path).join(',')}|${boardEditing}`;
     if (key !== this.barKey) {
       this.barKey = key;
       // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
       const layers = html('div', { className: 'layers', role: 'group', ariaLabel: 'Layers' });
       for (const [id, label] of LAYERS) {
         const b = html('button', { type: 'button', className: 'layer', textContent: label, title: this.layerTitle(id) });
-        b.setAttribute('aria-current', String(id === level));
+        const here = id === level && !deeper.length;
+        b.setAttribute('aria-current', String(here));
         b.disabled = id !== 'setup' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
-        if (id !== level) b.addEventListener('click', () => this.goTo(id));
+        if (id === 'engine' && level === 'engine' && deeper.length) b.addEventListener('click', () => this.schematic.goTo?.(''));
+        else if (!here) b.addEventListener('click', () => this.goTo(id));
         layers.append(b);
       }
+      // The Engine's deeper layers, as its zoom draws them (Layer 1 inside a chip, Layer 2 inside one of its chips …): named by number, the chip in the title.
+      deeper.forEach((l, i) => {
+        const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${l.name} (${l.path})` });
+        const here = i === deeper.length - 1;
+        b.setAttribute('aria-current', String(here));
+        if (!here) b.addEventListener('click', () => this.schematic.goTo?.(l.path));
+        layers.append(b);
+      });
       this.levelText = html('span', { className: 'level' });
       const zoom = html('span', { className: 'zoom' });
       const step = (text, factor, title) => {
@@ -1811,11 +1830,19 @@ export class SignalPlane extends HTMLElement {
       zoom.append(step('−', 1 / KEY_ZOOM, 'Zoom out'), this.levelText, step('+', KEY_ZOOM, 'Zoom in'));
       // One Edit switch: it edits the shown layer's arrangement (built for the Stack: its front panels' layout).
       const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit' });
-      const editable = level === 'stack';
+      const engine = level === 'engine';
+      const editable = level === 'stack' || engine;
       edit.disabled = !editable;
-      edit.title = editable ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
-      edit.setAttribute('aria-pressed', String(Boolean(this.editing)));
-      edit.addEventListener('click', () => (this.editing ? this.closeEditLayout() : this.editLayout()));
+      edit.title = level === 'stack' ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : engine ? 'Edit: edit the patch here (add, remove and connect; written to the project’s files)' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
+      edit.setAttribute('aria-pressed', String(engine ? boardEditing : Boolean(this.editing)));
+      edit.addEventListener('click', () => {
+        if (engine) {
+          this.schematic.editor?.setEditing(!this.schematic.editor.editing);
+          this.barKey = null;
+          this.render();
+        } else if (this.editing) this.closeEditLayout();
+        else this.editLayout();
+      });
       this.editButton = edit;
       // The zoom lock: the wheel scrolls up and down; the − and + buttons still zoom.
       const lock = html('button', { type: 'button', className: 'zoom-lock', title: 'Zoom lock: the wheel scrolls up and down, the mouse zooms nothing (− and + still do); a double right click toggles it' });

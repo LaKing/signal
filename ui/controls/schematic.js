@@ -148,9 +148,9 @@ const CSS = `
 svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .box { fill: var(--signal-panel, #1f232b); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
-.composite > .frame { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.composite > .frame { fill: none; stroke: color-mix(in srgb, var(--signal-muted, #8a93a3) 55%, transparent); vector-effect: non-scaling-stroke; }
 .open > .box { fill: var(--signal-bg, #16181d); }
-.pins > .box { fill: none; stroke: var(--signal-track, #2a2f38); stroke-dasharray: 2 4; }
+.pins > .box { fill: none; stroke: var(--signal-track, #2a2f38); }
 /* A panel control (2026-10-29, ui/lib/schematic-controls.js): a compact box in the panel's tint, apart from the modules' boxes; one that writes amber, one that reads green. */
 .control > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 9%, var(--signal-panel, #1f232b)); stroke: var(--signal-effective, #ffb74d); stroke-width: 1.5; }
 .control > .band { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 26%, transparent); stroke: none; }
@@ -165,8 +165,8 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .glyph-mark.unknown { opacity: 0.45; }
 .glyph-thin { stroke: var(--signal-track, #2a2f38); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .glyph-line { fill: none; stroke: var(--signal-meter-rms, #3ecf8e); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
-/* A control's binding to what it sets or reads: a dotted line, not a connection of the project (never hit). */
-path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
+/* A control's binding to what it sets or reads: a thin, faint line, as the Deck's Control legs (2026-11-02: no dotted lines), not a connection of the project (never hit). */
+path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d); stroke-width: 1; stroke-linecap: round; opacity: 0.45; pointer-events: none; }
 /* The target of an open context menu. */
 .hover > .box { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; }
 /* The selection (2026-10-17): strokes and a glow only, nothing moves. A box: a thick focus-coloured border with a halo. */
@@ -185,7 +185,7 @@ path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d)
 /* ADR 0047 phase 4: a pin a plate control's leg reaches, and a die's interface pin it carries on to, in the leg's colour. */
 .pin.tone-leg { stroke: var(--signal-effective, #ffb74d); }
 /* ADR 0047 phase 5: a connector, a die's parameters' pins in one group on its package's top edge: an outline only (not a pin). */
-.connector { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; pointer-events: none; }
+.connector { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 12%, transparent); stroke: color-mix(in srgb, var(--signal-effective, #ffb74d) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
 .connector-label { fill: var(--signal-effective, #ffb74d); font-weight: 600; pointer-events: none; }
 .pin.tone-leg.connected { fill: var(--signal-effective, #ffb74d); }
 /* ADR 0037 §7: a slot's box (its interface's pins, loaded or not); an empty one hollow, its outline dashed; an unmatched port's pin hollow. */
@@ -208,7 +208,8 @@ path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d)
 .wire.signal { stroke: var(--signal-accent, #4fc3f7); }
 .wire.vector { stroke: var(--signal-effective, #ffb74d); }
 .wire.events { stroke: var(--signal-meter-rms, #3ecf8e); }
-.wire.dashed { stroke-dasharray: 6 4; }
+/* A converter (a rate change): fainter, not dashed (2026-11-02). */
+.wire.dashed { opacity: 0.55; }
 /* Under the pointer (the hit test's, not :hover, which a thin path hardly takes), or a menu's target. */
 .wire.hover { stroke-width: 2.5; }
 /* A selected wire, drawn again in its level's overlay above the other wires: thick, over a soft focus-coloured halo. */
@@ -253,6 +254,13 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .tip { position: absolute; left: 0; top: 0; pointer-events: none; visibility: hidden; white-space: pre; padding: 2px 6px;
   background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; }
 /* The sidebar (2026-10-17): a fixed column at the left, never over the drawing; its content scrolls inside it. */
+/* In the Deck (ADR 0051 §8, the owner's 2026-11-02): no board toolbar and no sidebar of its own; the bar's layers,
+   Edit and the context menu stand for them, and Inspect opens the sidebar as a floating panel. */
+:host([plane]) { --side-width: 0px; }
+:host([plane]) .bar { display: none; }
+:host([plane]) .side { display: none; }
+:host([plane][inspecting]) .side { display: flex; left: auto; right: 12px; top: 12px; bottom: auto; width: 300px; max-height: calc(100% - 24px); z-index: 20;
+  border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
 .side { position: absolute; left: 0; top: 0; bottom: 0; width: var(--side-width); box-sizing: border-box; display: flex; flex-direction: column;
   background: var(--signal-panel, #1f232b); border-right: 1px solid var(--signal-knob-edge, #3a414d); }
 .side-head { flex: none; display: flex; align-items: center; gap: 6px; height: 32px; box-sizing: border-box; padding: 0 4px; border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
@@ -1642,6 +1650,8 @@ export class SignalSchematic extends HTMLElement {
     this.crumbKey = key;
     // Nothing selected, the sidebar names the level shown.
     if (!this.selected.length) this.showSide();
+    // The levels drawn, for the Deck's bar (its Layer buttons follow the zoom).
+    this.dispatchEvent(new CustomEvent('signal-board-levels', { detail: crumbs.map((c) => ({ name: c.name, path: c.path })) }));
     this.crumbs.replaceChildren(
       ...crumbs.map((crumb, i) => {
         const button = html('button', { type: 'button', textContent: i === 0 ? this.graph.project ?? 'project' : crumb.name });
@@ -1790,6 +1800,14 @@ export class SignalSchematic extends HTMLElement {
    * fading. Nothing moves. Whether it zooms: a library composite (its
    * inside unknown) does not.
    */
+  /** Show Chip (the owner's, 2026-11-02): the view travels until the chip at `address` fills the stage; its inside shows as the zoom brings it. */
+  showChip(address) {
+    const hit = this.hitOfInstance?.(address);
+    if (hit && this.openInPlace(hit)) return;
+    const framed = this.frameView(address);
+    if (framed) this.travel(framed.from, framed.to);
+  }
+
   openInPlace(hit) {
     if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite) return false;
     // A package zoomed into already (a click on its die's empty space): selected only, the view where the person put it;
@@ -2599,6 +2617,9 @@ export class SignalSchematic extends HTMLElement {
       this.revealSide();
     } else if (id === 'trace') this.startTrace(hit);
     else if (id === 'delete-selected') this.deleteSelection();
+    else if (id === 'show') {
+      if (!this.openInPlace(hit)) this.showChip(hit.address);
+    }
     else if (id === 'open') this.openInPlace(hit);
     else if (id === 'close') this.closeInPlace(hit.address);
     else if (id === 'enter') this.enter(hit);
@@ -2763,6 +2784,11 @@ export class SignalSchematic extends HTMLElement {
 
   /** The sidebar collapsed to a thin strip, or open; kept for this viewer when `keep`. */
   setCollapsed(collapsed, keep = true) {
+    // In the Deck the floating inspector's ‹ closes it.
+    if (this.hasAttribute('plane') && collapsed && this.hasAttribute('inspecting')) {
+      this.removeAttribute('inspecting');
+      return;
+    }
     this.toggleAttribute('side-collapsed', collapsed);
     this.collapseButton.textContent = collapsed ? '›' : '‹';
     this.collapseButton.title = collapsed ? 'Show the sidebar' : 'Hide the sidebar';
@@ -2777,6 +2803,7 @@ export class SignalSchematic extends HTMLElement {
 
   /** The sidebar shown (opened if collapsed) and scrolled to its top: the menu's Inspect. */
   revealSide() {
+    if (this.hasAttribute('plane')) this.setAttribute('inspecting', '');
     if (this.hasAttribute('side-collapsed')) this.setCollapsed(false);
     this.sideBody.scrollTop = 0;
   }
