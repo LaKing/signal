@@ -34,7 +34,7 @@ export function keepsSystemMenu(target) {
  * places in the views: ./show-in.js), else Show Panel and so on.
  * Each item is `{ id, label, disabled?, title? }`; `separator` items divide groups.
  */
-export function contextItems({ part = null, control = null, power = true, tab = null, places = null } = {}) {
+export function contextItems({ part = null, extra = null, control = null, power = true, tab = null, places = null } = {}) {
   const items = [];
   if (part?.length) {
     for (const item of part) items.push(item.id === 'separator' ? item : { ...item, id: `part:${item.id}` });
@@ -48,8 +48,13 @@ export function contextItems({ part = null, control = null, power = true, tab = 
     items.push({ id: 'copy-address', label: 'Copy address' });
     items.push({ id: 'separator' });
   }
-  items.push({ id: 'restart', label: 'Restart from Files', disabled: !power });
-  items.push({ id: 'separator' });
-  items.push(...tabItems(tab, places));
+  // No Restart from Files and no plain tab switching here (the owner's, 2026-11-02): only a subject's Show in … items.
+  items.push(...tabItems(tab, places).filter((item) => !item.id.startsWith('tab:')));
+  // An element's own items after the control's (the plane's Show Instrument, Show Stack over a knob).
+  if (extra?.length) {
+    if (items.length && items.at(-1)?.id !== 'separator') items.push({ id: 'separator' });
+    for (const item of extra) items.push(item.id === 'separator' ? item : { ...item, id: `part:${item.id}` });
+  }
+  while (items.at(-1)?.id === 'separator') items.pop();
   return items;
 }

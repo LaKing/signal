@@ -82,18 +82,18 @@ test('without a subject: plain tab switching, Show Panel and so on', () => {
   ]);
 });
 
-test('the context menu: a control’s Show in items; the background’s plain tabs', () => {
+test('the context menu: a control’s Show in items; no plain tabs', () => {
   const control = { address: '/drums.kick_decay', label: 'decay', editable: true };
   const places = placesOf(subjectOf({ control }), { plane: PANEL, parameters: PARAMETERS });
   const items = contextItems({ control, tab: 'plane', places });
-  assert.deepEqual(items.map((i) => i.label ?? i.id), ['Reset decay to default', 'Copy address', 'separator', 'Restart from Files', 'separator', 'Show in Parameters', 'Show Config']);
+  assert.deepEqual(items.map((i) => i.label ?? i.id), ['Reset decay to default', 'Copy address', 'separator', 'Show in Parameters']);
   const wire = { kind: 'wire', path: '', level: '', from: '/lfo.out', to: '/synth.level' };
   const wired = contextItems({ part: [{ id: 'inspect', label: 'Inspect' }], tab: 'setup', places: placesOf(subjectOf({ hit: wire }), { plane: PANEL, parameters: PARAMETERS }) });
   assert.deepEqual(wired.slice(-2), [
     { id: 'show:plane', label: 'Show in Deck', disabled: true, title: 'Neither end of /lfo.out → /synth.level is in the Deck' },
     { id: 'show:parameters', label: 'Show in Parameters' },
   ]);
-  assert.deepEqual(contextItems({ tab: 'parameters' }).slice(-2).map((i) => i.label), ['Show Deck', 'Show Config']);
+  assert.deepEqual(contextItems({ tab: 'parameters' }), [], 'the background: no tab switching');
 });
 
 test('the flash: a class of its own, a pulse, and a still outline that fades with reduced motion', () => {

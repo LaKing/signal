@@ -66,7 +66,7 @@ import { graphGeneration, named } from '../lib/opening.js';
 import { defaultPanel } from '../lib/panel.js';
 import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
-import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries } from '../lib/plane-file.js';
+import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
 import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
@@ -105,6 +105,26 @@ function zoomPicksLayer() {
   }
 }
 
+/** The automation wires' arrowhead colours, by kind (the k-* classes' colours). */
+const ARROW_COLOURS = { audio: '#4fc3f7', control: '#b39ddb', events: '#3ecf8e', vector: '#ffb74d' };
+
+/** The zoom lock (the bar's switch; per viewer, localStorage): the wheel scrolls up and down, the pointer zooms nothing. */
+const ZOOM_LOCK_KEY = 'signal.plane.zoomLock';
+function readZoomLock() {
+  try {
+    return globalThis.localStorage?.getItem(ZOOM_LOCK_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeZoomLock(on) {
+  try {
+    globalThis.localStorage?.setItem(ZOOM_LOCK_KEY, on ? '1' : '0');
+  } catch {
+    // Storage blocked: the switch holds for this page only.
+  }
+}
+
 /** The layers in the bar, top to bottom (ADR 0051; the owner's names, 2026-11-01). */
 const LAYERS = [['setup', 'Project'], ['stack', 'Stack'], ['wiring', 'Wiring'], ['control', 'Control'], ['engine', 'Engine']];
 const LAYER_NAME = Object.fromEntries(LAYERS);
@@ -139,6 +159,10 @@ const BAR_CSS = `
 .bar .zoom button { background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); width: 22px; padding: 0; font: inherit; line-height: 18px; cursor: pointer; }
 .bar .zoom button:hover, .bar .zoom button:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
 .bar .level { color: var(--signal-muted, #8a93a3); min-width: 5ch; text-align: center; font-variant-numeric: tabular-nums; }
+.bar .zoom-lock { margin-left: 6px; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 22px; padding: 0; background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); cursor: pointer; }
+.bar .zoom-lock svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.bar .zoom-lock:hover, .bar .zoom-lock:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
+.bar .zoom-lock[aria-pressed="true"] { background: var(--signal-accent, #4fc3f7); border-color: var(--signal-accent, #4fc3f7); color: #10141a; }
 .bar .edit-layout { margin-left: 6px; background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); padding: 1px 9px; font: inherit; cursor: pointer; }
 .bar .edit-layout:hover:not(:disabled), .bar .edit-layout:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
 .bar .edit-layout[aria-pressed="true"] { background: var(--signal-accent, #4fc3f7); border-color: var(--signal-accent, #4fc3f7); color: #10141a; }
@@ -153,9 +177,12 @@ ${BAR_CSS}
 .stage { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 :host([data-panning]) .stage { cursor: move; }
-.world.moving { will-change: transform; }
 .stack { position: absolute; box-sizing: border-box; background: #20242c; border: 2px solid #3a414d; border-radius: 6px; }
 .stack.other { transition: none; }
+.fit-icon { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; margin: 0; flex: none;
+  background: none; border: none; color: var(--signal-muted, #8a93a3); opacity: 0.7; cursor: pointer; }
+.fit-icon:hover, .fit-icon:focus-visible { color: var(--signal-accent, #4fc3f7); opacity: 1; outline: none; }
+.fit-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .stack-head { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 0.6em; padding: 0 16px; box-sizing: border-box; white-space: nowrap; overflow: hidden;
   font-size: var(--t-head, 18px); line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); cursor: zoom-in; user-select: none; border-bottom: 1px solid #3a414d; }
 .stack-head b { color: var(--signal-fg, #d6dbe4); font-weight: 600; }
@@ -226,6 +253,7 @@ svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFo
 .k-vector { stroke: var(--signal-effective, #ffb74d); color: var(--signal-effective, #ffb74d); }
 .w-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .w-junction.k-control { fill: #b39ddb; } .w-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .w-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .c-sheet { fill: #0f1d17; stroke: #24412f; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.c-footprint { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 7%, #13241c); stroke: none; }
 .c-ribbon { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 12%, transparent); stroke: color-mix(in srgb, var(--signal-effective, #ffb74d) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .c-ribbon-label { fill: var(--signal-effective, #ffb74d); font-size: 9px; font-weight: 600; }
 .c-leg { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.45; color: var(--signal-effective, #ffb74d); }
@@ -234,7 +262,6 @@ svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFo
 .c-via.selected, .c-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .c-auto { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .c-auto.inner { stroke-width: 1.75; opacity: 0.85; }
-.c-arrow { fill: context-stroke; }
 .c-cube-body { fill: #232832; stroke: #7a8496; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .c-cube-top { fill: #2d3440; }
 .c-cube-title { fill: var(--signal-fg, #d6dbe4); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; }
@@ -288,6 +315,18 @@ function svg(name, attributes = {}, text = null) {
   return node;
 }
 
+/** A small screen: the button that puts its Stack or instrument on the screen (`fitOnScreen`). */
+function fitIcon(title, act) {
+  const b = html('button', { type: 'button', className: 'fit-icon', title });
+  b.innerHTML = '<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9"/></svg>';
+  b.addEventListener('pointerdown', (event) => event.stopPropagation());
+  b.addEventListener('click', (event) => {
+    event.stopPropagation();
+    act();
+  });
+  return b;
+}
+
 function html(name, properties = {}) {
   return Object.assign(document.createElement(name), properties);
 }
@@ -337,6 +376,7 @@ export class SignalPlane extends HTMLElement {
     this.opened = null;
     /** The layer chosen in the bar when the zoom does not pick it (`zoomPicksLayer`). */
     this.layer = zoomPicksLayer() ? null : 'setup';
+    this.zoomLock = readZoomLock();
     /** The depth past the Stack's fit at its scale (`depthOf`: the wiring band, view state). */
     this.lift = 0;
     /** What is selected at Wiring and Control (view state, by connection or address; zoom never changes it). */
@@ -684,7 +724,7 @@ export class SignalPlane extends HTMLElement {
     const head = html('div', { className: 'stack-head', title: 'Focus this Stack (Enter)' });
     const title = html('b');
     const count = html('span', { className: 'count' });
-    head.append(html('span', { textContent: 'Stack' }), title, count);
+    head.append(html('span', { textContent: 'Stack' }), title, count, fitIcon(`Put Stack ${name} on the screen`, () => this.fitOnScreen(name, null)));
     head.addEventListener('click', () => this.focusStack(name));
     const rack = html('div', { className: 'rack' });
     const host = html('div', { className: 'panels' });
@@ -1242,16 +1282,14 @@ export class SignalPlane extends HTMLElement {
     this.renderMs = (this.renderMs ?? 0) + performance.now() - t0;
   }
 
-  /**
-   * The world is a compositor layer only while the view moves: a layer is
-   * rastered once and its bitmap scaled, which blurs a zoomed-in Stack. Once
-   * the view has rested for a moment the hint is dropped, so the browser
-   * draws the vectors and text again at the scale they are seen.
-   */
+  /** The zoom came to rest: canvases draw again at the scale now seen. */
   settleLater() {
-    this.world.classList.add('moving');
+    // No compositor layer, not even while zooming (the owner's, 2026-11-02): every frame is drawn at the scale it is
+    // seen at, vectors and text sharp. Canvases (the piano roll) draw again once the zoom rests (`signal-rescale`).
     clearTimeout(this.settleTimer);
-    this.settleTimer = setTimeout(() => this.world?.classList.remove('moving'), 150);
+    this.settleTimer = setTimeout(() => {
+      if (typeof Event === 'function') document.dispatchEvent?.(new Event('signal-rescale'));
+    }, 150);
   }
 
   drawView() {
@@ -1260,7 +1298,9 @@ export class SignalPlane extends HTMLElement {
     const transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
     if (this.world.style.transform !== transform) {
       this.world.style.transform = transform;
-      this.settleLater();
+      // A layer only while the scale changes: a pan alone moves the drawing as drawn, sharp.
+      if (v.k !== this.drawnK) this.settleLater();
+      this.drawnK = v.k;
     }
     this.renderText(v.k);
     const r = this.fadeDepth();
@@ -1476,6 +1516,12 @@ export class SignalPlane extends HTMLElement {
     const elements = new Map();
     const items = [];
     root.append(svg('rect', { class: 'c-sheet', x: r.x, y: r.y, width: r.w, height: r.h, rx: 4 }));
+    // Each bound control's footprint on the sheet (the owner's, 2026-11-02): what its leg leaves from, as the grabbed outline.
+    const legged = new Set(layout.legs.map((l) => l.control));
+    for (const c of control.controls) {
+      if (!legged.has(c.id) || !c.rect) continue;
+      root.append(svg('rect', { class: 'c-footprint', x: c.rect.x - 3, y: c.rect.y - 3, width: c.rect.w + 6, height: c.rect.h + 6, rx: 7 }));
+    }
     // The legs' band: a ribbon under the lanes, labelled once.
     if (layout.legs.length >= 3) {
       const band = layout.band;
@@ -1498,7 +1544,7 @@ export class SignalPlane extends HTMLElement {
       items.push({ kind: 'via', id: viaId, control: l.control, x: l.via.x, y: l.via.y });
     }
     for (const w of layout.wires) {
-      const path = svg('path', { class: `c-auto k-${w.auto.kind}${w.auto.inner ? ' inner' : ''}${w.auto.source === 'external' ? ' external' : ''}`, d: polylinePath(w.points, 4), 'marker-end': 'url(#plane-arrow)' });
+      const path = svg('path', { class: `c-auto k-${w.auto.kind}${w.auto.inner ? ' inner' : ''}${w.auto.source === 'external' ? ' external' : ''}`, d: polylinePath(w.points, 4), 'marker-end': `url(#plane-arrow-${w.auto.kind})` });
       path.append(svg('title', {}, `${w.auto.source === 'external' ? 'External control cable' : 'Automation'}: ${w.auto.from} → ${w.auto.to}${w.auto.inner ? ` (inside ${w.auto.level}: edited in its Engine)` : ''}`));
       root.append(path);
       elements.set(w.id, path);
@@ -1546,10 +1592,13 @@ export class SignalPlane extends HTMLElement {
       const element = control.controls.find((x) => x.id === ro.control)?.element ?? null;
       s.readouts.set(ro.id, { ...ro, text, fill, element, shown: '' });
     }
+    // An arrowhead per kind, its colour written out: WebKit draws a marker's \`context-stroke\` black.
     const defs = svg('defs');
-    const marker = svg('marker', { id: 'plane-arrow', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
-    marker.append(svg('path', { d: 'M0 0 L8 4 L0 8 z', class: 'c-arrow' }));
-    defs.append(marker);
+    for (const [kind, colour] of Object.entries(ARROW_COLOURS)) {
+      const marker = svg('marker', { id: `plane-arrow-${kind}`, viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
+      marker.append(svg('path', { d: 'M0 0 L8 4 L0 8 z', fill: colour }));
+      defs.append(marker);
+    }
     s.controlSvg.replaceChildren(defs, root);
     s.controlItems = items;
     s.controlElements = elements;
@@ -1768,7 +1817,13 @@ export class SignalPlane extends HTMLElement {
       edit.setAttribute('aria-pressed', String(Boolean(this.editing)));
       edit.addEventListener('click', () => (this.editing ? this.closeEditLayout() : this.editLayout()));
       this.editButton = edit;
-      this.bar.replaceChildren(layers, zoom, edit);
+      // The zoom lock: the wheel scrolls up and down; the − and + buttons still zoom.
+      const lock = html('button', { type: 'button', className: 'zoom-lock', title: 'Zoom lock: the wheel scrolls up and down, the mouse zooms nothing (− and + still do); a double right click toggles it' });
+      lock.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/><path d="M4.5 6.5h4"/></svg>';
+      lock.setAttribute('aria-pressed', String(this.zoomLock));
+      lock.addEventListener('click', () => this.toggleZoomLock());
+      this.zoomLockButton = lock;
+      this.bar.replaceChildren(layers, zoom, lock, edit);
     }
     // In the plane the bar fades out in the Engine, whose board has its own; docked (the toolbar), it stays.
     const docked = this.bar.classList.contains('docked');
@@ -1898,6 +1953,58 @@ export class SignalPlane extends HTMLElement {
     const keep = this.level() !== 'setup' ? this.view : null;
     if (this.layer === 'setup') this.layer = 'stack';
     this.travel(fitWidth(rect, this.viewport, keep), 0);
+  }
+
+  /**
+   * A new, empty Stack standing at `at` (plane px), written to ui/plane.toml
+   * in one patch (\`panel.restore\` of the file, so the plane's Undo takes it
+   * back). Without a file the derived Stack is written first, as it stands.
+   */
+  addStack(at) {
+    const plane = this.model?.plane;
+    if (!plane) return;
+    const names = new Set(plane.stacks.map((s) => s.name));
+    let n = plane.stacks.length + 1;
+    while (names.has(`stack_${n}`)) n++;
+    const name = `stack_${n}`;
+    const width = plane.stacks[0]?.width ?? 160;
+    const stacks = plane.stacks.map((s) => ({ name: s.name, at: s.at ?? null, width: s.width, instruments: [...s.instruments] }));
+    stacks.push({ name, at: [Math.round(at.x / PU), Math.round(at.y / PU)], width, instruments: [] });
+    const op = { op: 'panel.restore', file: PLANE_FILE, text: writePlane({ schema_version: plane.schema_version ?? 1, stacks }) };
+    if (this.planeText !== null && this.planeText !== undefined) op.was = this.planeText;
+    this.writePatch([op], `Stack ${name}`).then((written) => written && this.say(`Stack ${name} created (ui/plane.toml)`));
+  }
+
+  /** The zoom lock on or off (its button, a double right click). */
+  toggleZoomLock() {
+    this.zoomLock = !this.zoomLock;
+    writeZoomLock(this.zoomLock);
+    this.zoomLockButton?.setAttribute('aria-pressed', String(this.zoomLock));
+    this.say(this.zoomLock ? 'Zoom lock on: the wheel scrolls' : 'Zoom lock off: the wheel zooms');
+  }
+
+  /**
+   * A screen icon's click (the owner's, 2026-11-02): the Stack, or one of its
+   * instruments, glides onto the screen whole (the view's travel; the layer
+   * is kept). The Stack becomes the focused one; an instrument the opened one.
+   */
+  fitOnScreen(name, entry) {
+    const rect = this.layout?.stacks.get(name);
+    if (!rect) return;
+    if (this.focused !== name) {
+      this.focused = name;
+      this.barKey = null;
+    }
+    let target = rect;
+    if (entry) {
+      const r = this.stacks.get(name)?.layout?.rects.find((x) => x.entry === entry);
+      if (!r) return;
+      target = { x: rect.x + r.x, y: rect.y + r.y, w: r.w, h: r.h };
+      this.opened = entry;
+      this.barKey = null;
+    }
+    this.touched = true;
+    this.travel(fitAll(target, this.viewport), 0);
   }
 
   /** The whole plane in view: the Setup level. */
@@ -2113,19 +2220,37 @@ export class SignalPlane extends HTMLElement {
   contextMenu(event) {
     const path = event.composedPath?.() ?? [];
     if (path.includes(this.deep) || (this.editing && path.includes(this.editing.overlay))) return null;
-    // A control bound to a parameter, or anything with an address (a slot card's port), keeps the app's items (Reset to default, Copy address, Show in).
-    if (path.some((node) => node?.binding?.address || node?.dataset?.address)) return null;
     const level = this.level();
-    if (level !== 'stack' && level !== 'setup') return null;
-    const card = this.cardAt(event);
-    if (!card && !(level === 'stack' && this.stackAt(event))) return null;
-    const items = [];
-    if (card && this.cardChannel) items.push(...cardMenu(this.windowTold, null, card.id));
-    if (level === 'stack') items.push({ id: 'edit-layout', label: 'Edit layout…' });
-    if (!items.length) return null;
+    if (level === 'engine') return null;
+    const name = this.stackAt(event);
+    // The Deck's empty background: a new Stack there (the owner's, 2026-11-02).
+    if (!name) {
+      if (level !== 'setup' && level !== 'stack') return null;
+      if (!this.model || path.some((node) => node?.classList?.contains?.('box') || node?.classList?.contains?.('tray'))) return null;
+      const at = toPlane(this.view, this.point(event));
+      return { items: [{ id: 'create-stack', label: 'Create new Stack' }], act: (id) => id === 'create-stack' && this.addStack(at) };
+    }
+    // The instrument whose front panel holds the click (on a control of it too).
+    const s = this.stacks.get(name);
+    const entry = [...(s?.cards ?? [])].find(([, element]) => path.includes(element))?.[0] ?? null;
+    const shows = [];
+    if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
+    shows.push({ id: 'show-stack', label: 'Show Stack' });
+    const show = (id) => {
+      if (id === 'show-instrument') return this.fitOnScreen(name, entry), true;
+      if (id === 'show-stack') return this.fitOnScreen(name, null), true;
+      return false;
+    };
+    // A control bound to a parameter, or anything with an address (a slot card's port): the app's items first (Reset to default, Copy address, Show in), then these.
+    if (path.some((node) => node?.binding?.address || node?.dataset?.address)) return { withControl: true, items: shows, act: show };
+    const items = [...shows];
+    const card = level === 'stack' || level === 'setup' ? this.cardAt(event) : null;
+    if (card && this.cardChannel) items.push({ id: 'separator' }, ...cardMenu(this.windowTold, null, card.id));
+    if (level === 'stack') items.push({ id: 'separator' }, { id: 'edit-layout', label: 'Edit layout…' });
     return {
       items,
       act: (id) => {
+        if (show(id)) return;
         if (id === 'edit-layout') return this.editLayout();
         const element = card?.element ?? card?.raw;
         // The window a card needs: its own size (plate px, unscaled) with the panel page's bar and margins.
@@ -2533,6 +2658,16 @@ export class SignalPlane extends HTMLElement {
     // A release on other platforms brings its contextmenu after pointerup: still held back for a moment.
     setTimeout(() => document.removeEventListener('contextmenu', pan.swallow, true), 0);
     if (pan.moved || pan.button !== 2) return;
+    // A second right click soon after, near the first: the zoom lock toggles, and no menu (the first one's is closed).
+    const now = event.timeStamp ?? performance.now();
+    const last = this.lastRightClick;
+    if (last && now - last.at < 400 && Math.hypot(pan.start.x - last.x, pan.start.y - last.y) < 8) {
+      this.lastRightClick = null;
+      document.querySelector('signal-app-context-menu')?.close?.();
+      this.toggleZoomLock();
+      return;
+    }
+    this.lastRightClick = { at: now, x: pan.start.x, y: pan.start.y };
     // A right click without a move: its menu, where it was pressed.
     const replay = new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: pan.start.x, clientY: pan.start.y, button: 2 });
     replay.signalReplayed = true;
@@ -2629,7 +2764,9 @@ export class SignalPlane extends HTMLElement {
       // The layer chosen alone: the wheel does the same on every layer (the owner's, 2026-11-02). A mouse's wheel and a
       // pinch zoom about the pointer; a trackpad's two fingers pan; Shift with a mouse's wheel pans up and down.
       if (kind === 'trackpad') return this.setView(panBy(this.view, -wheelPixels(event.deltaX || 0, mode), -wheelPixels(event.deltaY || 0, mode)));
-      if (kind === 'mouse' && event.shiftKey) return this.setView(panBy(this.view, 0, -wheelPixels(event.deltaY || event.deltaX || 0, mode)));
+      if (kind === 'mouse' && (event.shiftKey || this.zoomLock)) return this.setView(panBy(this.view, 0, -wheelPixels(event.deltaY || event.deltaX || 0, mode)));
+      // Locked, a pinch (or Ctrl with the wheel) zooms nothing either.
+      if (this.zoomLock) return;
     } else if (level !== 'setup' && rect && kind !== 'pinch' && !forced) {
       // The Stack and below: the wheel scrolls (a trackpad's sideways travel pans, when zoomed past the width).
       const dy = wheelPixels(event.deltaY || 0, mode);

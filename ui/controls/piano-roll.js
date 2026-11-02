@@ -284,13 +284,29 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     super.connectedCallback();
     this.readColors();
     this.resized();
+    // A zoomed plane came to rest (\`signal-rescale\`): drawn again at the scale it is seen at.
+    this.rescaled ??= () => {
+      this.measureSeen();
+      this.requestDraw();
+    };
+    this.measureSeen();
+    document.addEventListener('signal-rescale', this.rescaled);
   }
 
   disconnectedCallback() {
+    document.removeEventListener('signal-rescale', this.rescaled);
     this.release();
     super.disconnectedCallback();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
+  }
+
+  /** The scale the roll is seen at (a zoomed plane's transform), read once now. */
+  measureSeen() {
+    const grid = this.canvases?.grid;
+    const w = grid?.clientWidth ?? 0;
+    const seen = w > 0 ? grid.getBoundingClientRect().width / w : 1;
+    this.seenScale = Number.isFinite(seen) && seen > 0 ? seen : 1;
   }
 
   readColors() {
@@ -838,11 +854,20 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     $('.roll').toggleAttribute('aria-busy', this.locked);
   }
 
-  /** A canvas's 2D context sized to its box at the device's pixel ratio. */
+  /**
+   * A canvas's 2D context sized to its box at the device's pixel ratio, times
+   * the scale it is seen at (a zoomed plane's transform), so a zoomed roll
+   * stays sharp; at most 4 device pixels per CSS pixel each way.
+   */
   context(canvas) {
-    const dpr = globalThis.devicePixelRatio || 1;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
+    // The scale it is seen at is measured only when a zoom rests or the roll resizes (\`measureSeen\`), never per frame:
+    // a layout read in every playhead frame stalls the whole page.
+    let dpr = Math.min(3, Math.max(1, (globalThis.devicePixelRatio || 1) * (this.seenScale ?? 1)));
+    // At most about 8 million pixels per canvas, however far it is zoomed.
+    const most = 8e6;
+    if (w * h * dpr * dpr > most) dpr = Math.max(1, Math.sqrt(most / Math.max(1, w * h)));
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);

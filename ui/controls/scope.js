@@ -269,7 +269,8 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
   draw() {
     const canvas = this.$('canvas');
     if (!canvas) return;
-    const box = canvas.getBoundingClientRect();
+    // Its layout size, not its screen box: a zoomed plane's transform would resize the canvas every frame.
+    const box = { width: canvas.clientWidth, height: canvas.clientHeight };
     const ratio = globalThis.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(box.width * ratio));
     const height = Math.max(1, Math.round(box.height * ratio));

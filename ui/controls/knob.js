@@ -67,6 +67,8 @@ export class SignalKnob extends SignalValueElement {
 
   /** The moving arc laid over what shows, the skin's drawing or the built-in knob (their sizes and places differ). */
   alignMod() {
+    // Laid once per skin (layout pixels: a zoom changes nothing): never a layout read per value frame.
+    if (this.modFor === this.skin && this.modBox) return;
     const skin = this.$('.face').hidden ? this.$('.skin') : null;
     const shown = (skin && (skin.querySelector('svg, img') ?? skin)) || this.$('.art');
     const dial = this.$('.dial');
@@ -78,6 +80,7 @@ export class SignalKnob extends SignalValueElement {
     if (!r.width || !k) return;
     const box = [(r.left - d.left) / k, (r.top - d.top) / k, r.width / k, r.height / k].map((n) => Math.round(n * 10) / 10);
     const key = box.join('|');
+    this.modFor = this.skin;
     if (key === this.modBox) return;
     this.modBox = key;
     const [left, top, width, height] = box;

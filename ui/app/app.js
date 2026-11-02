@@ -1129,10 +1129,12 @@ export class SignalAppContextMenu extends AppElement {
     const toolbar = document.querySelector('signal-app-toolbar');
     this.close();
     const part = SignalAppContextMenu.part(event, () => this.close());
-    const control = part ? null : SignalAppContextMenu.control(event);
+    // An element's items after a control's own (`withControl`: the plane's Show Instrument over a knob), or in their place.
+    const control = part && !part.withControl ? null : SignalAppContextMenu.control(event);
     const subject = subjectOf({ hit: part?.hit ?? null, control });
     const items = contextItems({
-      part: part?.items,
+      part: part?.withControl ? null : part?.items,
+      extra: part?.withControl ? part.items : null,
       control,
       power: (toolbar?.power?.power ?? 'on') === 'on',
       tab: toolbar?.tab ?? null,
@@ -1140,6 +1142,8 @@ export class SignalAppContextMenu extends AppElement {
     });
     // The focus goes back where the click was (duck-typed: the panel frame's nodes are of another realm).
     const back = event.composedPath?.().find(focusable) ?? null;
+    // Nothing to offer (the background, with no subject): no menu at all.
+    if (!items.length) return this.close();
     this.menu.show(items, {
       x: event.clientX + offset.left,
       y: event.clientY + offset.top,

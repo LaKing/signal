@@ -573,16 +573,18 @@ domTest('a front panel’s context menu moves its card to a new panel window; a 
   const melody = s.cards.get('card:melody');
   const echo = s.cards.get('card:echo');
   const at = (...path) => ({ composedPath: () => [...path, s.element, p] });
-  // In a browser: Edit layout only.
-  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.id), ['edit-layout']);
+  // In a browser: Show Instrument, Show Stack and Edit layout.
+  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.id), ['show-instrument', 'show-stack', 'separator', 'edit-layout']);
   // In Signal.app's main window (`connectPlaneCards` gave the channel).
   p.cardChannel = (message) => posted.push(message);
   const menu = p.contextMenu(at(melody));
-  assert.deepEqual(menu.items.map((i) => i.id), ['new', 'edit-layout']);
+  assert.deepEqual(menu.items.map((i) => i.id), ['show-instrument', 'show-stack', 'separator', 'new', 'separator', 'edit-layout']);
   menu.act('new');
   assert.deepEqual(posted, [{ type: 'card.move', card: 'melody', to: 'new', size: { width: 184, height: 192 } }], 'the card by the app’s id, the window its size');
-  // A control bound to a parameter keeps its own menu.
-  assert.equal(p.contextMenu(at(melody.querySelector('signal-knob'), melody)), null);
+  // A control bound to a parameter keeps its own menu, these after it.
+  const onKnob = p.contextMenu(at(melody.querySelector('signal-knob'), melody));
+  assert.equal(onKnob.withControl, true);
+  assert.deepEqual(onKnob.items.map((i) => i.id), ['show-instrument', 'show-stack']);
   // The app says the echo card is held by a panel window, which is a target now.
   p.windowState({ view: 'main', held: [{ card: 'echo', where: 'Panel window 1' }], targets: [{ index: 1, label: 'Panel window 1' }] });
   assert.equal(echo.hasAttribute('data-held'), true);
@@ -593,7 +595,7 @@ domTest('a front panel’s context menu moves its card to a new panel window; a 
   show.listeners.find(([type]) => type === 'click')[1]();
   back.listeners.find(([type]) => type === 'click')[1]();
   assert.deepEqual(posted.slice(1), [{ type: 'window.show', card: 'echo' }, { type: 'card.move', card: 'echo', to: 'here' }]);
-  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.label), ['Move to Panel window 1', 'Move to new panel window', 'Edit layout…']);
+  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.label), ['Show Instrument', 'Show Stack', undefined, 'Move to Panel window 1', 'Move to new panel window', undefined, 'Edit layout…']);
   // The open slot card is a card of its own (`slot.<name>`, as the app names it).
   p.contextMenu(at(s.cards.get('synth'))).act('new');
   assert.equal(posted.at(-1).card, 'slot.synth');
