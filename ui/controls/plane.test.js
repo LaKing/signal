@@ -531,13 +531,14 @@ domTest('the plane’s keys are commands of the shared keymap, rebindable throug
 
 // Edit layout and card moves from the main window (review of 2026-11-01; ADR 0051 §6, ADR 0032).
 
-domTest('the bar has every layer and one Edit: at the Stack it toggles the panel editor over the plane', async () => {
+domTest('the bar has every layer (the Project is the Stack’s) and one Edit: at the Stack it toggles the panel editor over the plane', async () => {
   const p = await shown(plane());
   p.bar = new Node('nav');
   p.stage = new Node('div');
   p.renderBar('setup', 0.5);
   assert.equal(p.bar.querySelector('.edit-layout').disabled, true, 'not built at the Project layer');
-  assert.deepEqual(p.bar.querySelectorAll('.layer').map((b) => b.textContent), ['Project', 'Stack', 'Wiring', 'Control', 'Engine'], 'every layer has its button');
+  assert.deepEqual(p.bar.querySelectorAll('.layer').map((b) => b.textContent), ['Stack', 'Wiring', 'Control', 'Engine'], 'every layer has its button; the Project is the Stack layer’s');
+  assert.equal(p.bar.querySelector('.layer').getAttribute('aria-current'), 'true', 'the whole project shows Stack as the current layer');
   p.renderBar('stack', 1);
   const edit = p.bar.querySelector('.edit-layout');
   assert.equal(edit.textContent, 'Edit');

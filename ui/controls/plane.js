@@ -129,6 +129,8 @@ function writeZoomLock(on) {
 /** The layers in the bar, top to bottom (ADR 0051; the owner's names, 2026-11-01). */
 const LAYERS = [['setup', 'Project'], ['stack', 'Stack'], ['wiring', 'Wiring'], ['control', 'Control'], ['engine', 'Engine']];
 const LAYER_NAME = Object.fromEntries(LAYERS);
+/** The bar's layers: the Project is the Stack layer's, not a button of its own (the owner's, 2026-11-02). */
+const BAR_LAYERS = LAYERS.filter(([id]) => id !== 'setup');
 /** The chosen layer's zoom limit out, relative to the focused Stack's fit. */
 const MIN_SCALE = 0.02;
 
@@ -1338,7 +1340,8 @@ export class SignalPlane extends HTMLElement {
       opacity(s.element, focused ? 1 : fades.setup);
       // The focused Stack's front panels, card by card: the opened instrument's live controls come back at Control (x-ray).
       for (const [entry, card] of s.cards) {
-        const opened = focused && entry === this.opened;
+        // At Control every instrument's live controls show over its sheet; deeper, the opened one's.
+        const opened = focused && (entry === this.opened || fades.sheet > 0);
         const o = !focused ? 1 : opened ? fades.controls : fades.panels;
         opacity(card, o);
         const hidden = o < 0.002 ? 'hidden' : '';
@@ -1478,17 +1481,36 @@ export class SignalPlane extends HTMLElement {
 
   // The Control level: the opened instrument's control plane (ui/lib/plane-control.js), laid out when it first opens.
 
-  /** The opened instrument's Control plane, or null (laid out once per graph, panel, Stack layout and instrument). */
+  /** The opened instrument's Control plane, or null. */
   controlNow() {
-    const entry = this.opened;
+    return this.controlFor(this.opened);
+  }
+
+  /** Every instrument's Control plane in the focused Stack (the owner's, 2026-11-02: Control shows them all), drawn again when one changed. */
+  controlsNow() {
+    const s = this.stacks.get(this.focused);
+    if (!s?.layout) return [];
+    const all = s.layout.rects.map((r) => this.controlFor(r.entry)).filter(Boolean);
+    const key = all.map((c) => c.key).join('\n\n');
+    if (s.controlDrawn !== key) {
+      s.controlDrawn = key;
+      this.drawControls(s, all);
+    }
+    return all;
+  }
+
+  /** Instrument `entry`'s Control plane, or null (laid out once per graph, panel, Stack layout and instrument). */
+  controlFor(entry) {
     const s = this.stacks.get(this.focused);
     const card = s?.cards.get(entry);
     const r = s?.layout?.rects.find((x) => x.entry === entry);
     if (!entry || !card || !r || !this.graph) return null;
+    s.controls ??= new Map();
+    const known = s.controls.get(entry);
     const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${entry}\n${this.panel?.html?.length ?? 0}:${s.key}`;
-    if (s.control?.key === key) return s.control;
+    if (known?.key === key) return known;
     const measured = this.measureControls(card, r);
-    if (!measured) return s.control?.entry === entry ? s.control : null;
+    if (!measured) return known ?? null;
     const t0 = performance.now();
     const wiring = this.wiringNow();
     const engine = engineOf(entry, this.model.owner);
@@ -1502,9 +1524,9 @@ export class SignalPlane extends HTMLElement {
     // A cable from outside enters where the Wiring level's port of the same connection is.
     const edgeYs = new Map((wiring?.layout.ports ?? []).filter((p) => p.entry === entry && p.side === 'in').map((p) => [p.address, p.y]));
     const layout = controlLayout({ rect: { x: r.x, y: r.y, w: r.w, h: r.h }, controls: measured.controls, blocked: measured.blocked, engine, autos, edgeYs, inner, title: instrumentTitle(entry, this.cards) });
-    s.control = { key, entry, layout, controls: measured.controls, autos, ms: performance.now() - t0 };
-    this.drawControl(s, s.control);
-    return s.control;
+    const control = { key, entry, layout, controls: measured.controls, autos, ms: performance.now() - t0 };
+    s.controls.set(entry, control);
+    return control;
   }
 
   /**
@@ -1533,9 +1555,35 @@ export class SignalPlane extends HTMLElement {
     return { controls, blocked };
   }
 
-  drawControl(s, control) {
-    const { layout } = control;
+  /** The Stack's Control drawing: each instrument's plane, its items' ids led by its entry. */
+  drawControls(s, controls) {
     const root = svg('g', { transform: 'translate(-2 -2)' });
+    s.controlItems = [];
+    s.controlElements = new Map();
+    s.readouts = new Map();
+    for (const control of controls) {
+      const one = this.drawControl(control);
+      root.append(one.root);
+      for (const item of one.items) s.controlItems.push({ ...item, id: `${control.entry}|${item.id}`, entry: control.entry });
+      for (const [id, element] of one.elements) s.controlElements.set(`${control.entry}|${id}`, element);
+      for (const [id, ro] of one.readouts) s.readouts.set(`${control.entry}|${id}`, ro);
+    }
+    // An arrowhead per kind, its colour written out: WebKit draws a marker's \`context-stroke\` black.
+    const defs = svg('defs');
+    for (const [kind, colour] of Object.entries(ARROW_COLOURS)) {
+      const marker = svg('marker', { id: `plane-arrow-${kind}`, viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
+      marker.append(svg('path', { d: 'M0 0 L8 4 L0 8 z', fill: colour }));
+      defs.append(marker);
+    }
+    s.controlSvg.replaceChildren(defs, root);
+    s.controlShown = null;
+    this.markSelection();
+  }
+
+  /** One instrument's Control plane drawn: its group, hit items, elements by id and readouts. */
+  drawControl(control) {
+    const { layout } = control;
+    const root = svg('g');
     const r = layout.rect;
     const elements = new Map();
     const items = [];
@@ -1604,7 +1652,7 @@ export class SignalPlane extends HTMLElement {
       items.push({ kind: p.kind, id: p.id, pin: p, x: p.x, y: p.y });
     }
     // The inner value's readouts (ADR 0050 §11): text and a bar on the control's range, updated from the `parameters` stream.
-    s.readouts = new Map();
+    const readouts = new Map();
     for (const ro of layout.readouts) {
       const g = svg('g', { class: 'c-readout' });
       const text = svg('text', { class: 'c-readout-text', x: ro.x + ro.w / 2, y: ro.y + 9, 'text-anchor': 'middle' }, 'inner —');
@@ -1614,32 +1662,16 @@ export class SignalPlane extends HTMLElement {
       g.append(svg('title', {}, `The inner value at ${ro.address}: what the engine plays, its own modulation included`));
       root.append(g);
       const element = control.controls.find((x) => x.id === ro.control)?.element ?? null;
-      s.readouts.set(ro.id, { ...ro, text, fill, element, shown: '' });
+      readouts.set(ro.id, { ...ro, text, fill, element, shown: '' });
     }
-    // An arrowhead per kind, its colour written out: WebKit draws a marker's \`context-stroke\` black.
-    const defs = svg('defs');
-    for (const [kind, colour] of Object.entries(ARROW_COLOURS)) {
-      const marker = svg('marker', { id: `plane-arrow-${kind}`, viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
-      marker.append(svg('path', { d: 'M0 0 L8 4 L0 8 z', fill: colour }));
-      defs.append(marker);
-    }
-    s.controlSvg.replaceChildren(defs, root);
-    s.controlItems = items;
-    s.controlElements = elements;
-    s.controlShown = null;
-    this.markSelection();
+    return { root, items, elements, readouts };
   }
 
   renderControl(fades) {
     const s = this.stacks.get(this.focused);
     if (!s) return;
-    if (!(fades.sheet > 0) || !this.opened) {
-      hide(s.controlSvg);
-      this.updateInner([]);
-      return;
-    }
-    const control = this.controlNow();
-    if (!control) {
+    const controls = fades.sheet > 0 ? this.controlsNow() : [];
+    if (!controls.length) {
       hide(s.controlSvg);
       this.updateInner([]);
       return;
@@ -1647,7 +1679,7 @@ export class SignalPlane extends HTMLElement {
     show(s.controlSvg);
     opacity(s.controlSvg, fades.sheet);
     this.cull(s, s.controlItems, s.controlElements, 'controlShown');
-    this.updateInner(control.layout.readouts);
+    this.updateInner(controls.flatMap((c) => c.layout.readouts));
   }
 
   /** The inner values' stream (`parameters`, ADR 0050 §11): subscribed while a Control plane shows them, at most 64. */
@@ -1740,9 +1772,8 @@ export class SignalPlane extends HTMLElement {
     const map = this.engineMap();
     if (map) {
       this.schematic.fitted = true;
-      // The layer chosen alone: the instrument's board fills the board's stage, wherever the cube is on the plane.
-      const onto = this.layer === 'engine' ? this.boardStage(map) : map.onto;
-      this.schematic.setView?.(frameOnto(map.frame, onto, map.offset));
+      // The board is laid on its cube where the plane's view shows it: every layer keeps the zoom and the position (the owner's, 2026-11-02).
+      this.schematic.setView?.(frameOnto(map.frame, map.onto, map.offset));
     }
     // Just un-hidden, the board has no stage or layout yet: laid on the cube again once it has.
     if ((!this.schematic.viewport?.w || !map) && !this.deepPending) {
@@ -1773,26 +1804,15 @@ export class SignalPlane extends HTMLElement {
     this.boardWatch = requestAnimationFrame(step);
   }
 
-  /** The board's stage in the plane's stage pixels, inside a margin (where a chosen Engine layer lays the instrument's board). */
-  boardStage(map) {
-    const box = this.schematic.stage?.getBoundingClientRect?.();
-    const w = box?.width || this.viewport.w;
-    const h = box?.height || this.viewport.h;
-    return { x: map.offset.x + MARGIN_PX, y: map.offset.y + MARGIN_PX, w: Math.max(1, w - 2 * MARGIN_PX), h: Math.max(1, h - 2 * MARGIN_PX) };
-  }
-
-  /** The board's top-level view mapped back to the plane, the board given up (zooming out of it, Escape at its top). */
+  /** The board's top-level view mapped back to the plane, the board given up (zooming out of it, Escape at its top, another layer chosen). */
   leaveEngine() {
-    // The layer chosen alone: the plane's view stays where it was left.
-    if (this.layer) {
-      this.deepOwned = false;
-      return;
-    }
-    const map = this.engineMap();
-    const view = this.schematic.view;
-    if (map && view) {
-      const root = reroot(view, (l) => this.schematic.layoutOf(l), '');
-      this.view = planeFromFrame(root, map.frame, map.cube, map.offset);
+    if (this.deepOwned) {
+      const map = this.engineMap();
+      const view = this.schematic.view;
+      if (map && view) {
+        const root = reroot(view, (l) => this.schematic.layoutOf(l), '');
+        this.view = planeFromFrame(root, map.frame, map.cube, map.offset);
+      }
     }
     this.deepOwned = false;
   }
@@ -1820,13 +1840,13 @@ export class SignalPlane extends HTMLElement {
       this.barKey = key;
       // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
       const layers = html('div', { className: 'layers', role: 'group', ariaLabel: 'Layers' });
-      for (const [id, label] of LAYERS) {
+      for (const [id, label] of BAR_LAYERS) {
         const b = html('button', { type: 'button', className: 'layer', textContent: label, title: this.layerTitle(id) });
-        const here = id === level && !deeper.length;
+        const here = (id === level || (id === 'stack' && level === 'setup')) && !deeper.length;
         b.setAttribute('aria-current', String(here));
-        b.disabled = id !== 'setup' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
+        b.disabled = id !== 'stack' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
         if (id === 'engine' && level === 'engine' && deeper.length) b.addEventListener('click', () => this.schematic.goTo?.(''));
-        else if (!here) b.addEventListener('click', () => this.goTo(id));
+        else if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
         layers.append(b);
       }
       // The Engine's deeper layers, as its zoom draws them (Layer 1 inside a chip, Layer 2 inside one of its chips …): named by number, the chip in the title.
@@ -1880,7 +1900,7 @@ export class SignalPlane extends HTMLElement {
   /** A layer button's title: what it shows. */
   layerTitle(id) {
     if (id === 'setup') return 'Project: the whole project, its Stacks and devices';
-    if (id === 'stack') return this.focused ? `Stack ${this.focused}: its instruments' front panels` : 'No Stack';
+    if (id === 'stack') return this.focused ? `Stack ${this.focused}: its instruments' front panels` : 'Stack: the whole project, its Stacks and devices';
     if (id === 'wiring') return 'Wiring: the cables between the instruments';
     const name = this.opened ? instrumentTitle(this.opened, this.cards) : 'the instrument in the middle';
     return id === 'control' ? `Control: ${name}'s bindings and automation` : `Engine: ${name}'s inside`;
@@ -1932,11 +1952,33 @@ export class SignalPlane extends HTMLElement {
       const known = rects.some((r) => r.entry === this.opened) ? this.opened : null;
       this.opened = instrumentAt(rects, centre) ?? known ?? rects[0]?.entry ?? null;
     }
+    // Into the Engine, the view kept: the instrument whose engine (its cube) shows the most on the stage opens.
+    if (level === 'engine') this.opened = this.cubeInView() ?? this.opened;
     if (this.editing && level !== 'stack') this.closeEditLayout();
     this.layer = level;
     this.deepOwned = false;
     this.barKey = null;
     this.render();
+  }
+
+  /** The instrument whose Control cube covers the most of the stage at the present view, or null when none shows. */
+  cubeInView() {
+    const rect = this.focusRect();
+    if (!rect) return null;
+    let best = null;
+    let most = 0;
+    for (const control of this.controlsNow()) {
+      const c = control.layout.cube;
+      const on = screenRect(this.view, { x: rect.x + c.x, y: rect.y + c.y, w: c.w, h: c.h });
+      const w = Math.min(on.x + on.w, this.viewport.w) - Math.max(on.x, 0);
+      const h = Math.min(on.y + on.h, this.viewport.h) - Math.max(on.y, 0);
+      const area = w > 0 && h > 0 ? w * h : 0;
+      if (area > most) {
+        most = area;
+        best = control.entry;
+      }
+    }
+    return best;
   }
 
   /** The view at depth `z` (`depthOf`) zoomed from `base` about `at` (stage pixels), its top kept in the Stack. */
@@ -2333,14 +2375,21 @@ export class SignalPlane extends HTMLElement {
     return hit ? { level: which, ...hit.item } : null;
   }
 
-  /** The control of the opened instrument at screen point `at` (its measured rectangle), or null. */
+  /** A press on an instrument's Control plane opens that instrument (its engine is the one the Engine layer shows). */
+  adopt(hit) {
+    if (!hit?.entry || hit.level !== 'control' || hit.entry === this.opened) return;
+    this.opened = hit.entry;
+    this.barKey = null;
+  }
+
+  /** The control at screen point `at` (its measured rectangle), or null. */
   controlAt(at) {
-    const control = this.stacks.get(this.focused)?.control;
+    const controls = [...(this.stacks.get(this.focused)?.controls?.values() ?? [])];
     const rect = this.focusRect();
-    if (!control || !rect) return null;
+    if (!controls.length || !rect) return null;
     const p = toPlane(this.view, at);
     const q = { x: p.x - rect.x, y: p.y - rect.y };
-    return control.controls.find((c) => q.x >= c.rect.x && q.x <= c.rect.x + c.rect.w && q.y >= c.rect.y && q.y <= c.rect.y + c.rect.h) ?? null;
+    return controls.flatMap((c) => c.controls).find((c) => q.x >= c.rect.x && q.x <= c.rect.x + c.rect.w && q.y >= c.rect.y && q.y <= c.rect.y + c.rect.h) ?? null;
   }
 
   /** Before a control sees a press: a pin, a via or a port under it starts a cable (ADR 0051 §9: patch cables at Wiring, automation and binds at Control). */
@@ -2351,6 +2400,7 @@ export class SignalPlane extends HTMLElement {
     const at = this.point(event);
     const hit = this.hitAt(at);
     if (!hit || !DRAG_FROM.has(hit.kind)) return;
+    this.adopt(hit);
     event.stopPropagation();
     event.preventDefault();
     this.settleTravel();
@@ -2376,6 +2426,7 @@ export class SignalPlane extends HTMLElement {
     const at = this.point(event);
     // A wire, a cable or a box of the edited drawing: selected (by its connection or port, kept at every zoom); the empty sheet clears it.
     const hit = this.hitAt(at);
+    this.adopt(hit);
     if (hit?.kind === 'cube' && this.editedLevel() === 'control') {
       this.gesture = { hit, id: event.pointerId, start: at, moved: false };
       return;
@@ -2485,17 +2536,17 @@ export class SignalPlane extends HTMLElement {
     }
     // Control.
     if (from.kind === 'via') {
-      const control = this.stacks.get(this.focused)?.control?.controls.find((c) => c.id === from.control);
+      const control = this.controlFor(from.entry)?.controls.find((c) => c.id === from.control);
       if (!control) return;
       if (to?.kind === 'param') return this.rebind(control, to.address);
-      if (to?.kind === 'cube') return this.chooseParameter(control, at);
+      if (to?.kind === 'cube' && to.entry === from.entry) return this.chooseParameter(control, at);
       return this.say('Not bound: drop the leg on a pin of the engine’s connector, or on the engine');
     }
     const target = this.controlAt(at);
     if (!target) return this.say('No automation: drop the cable on a control');
     const bind = target.writes ? target.binds[0] : null;
     if (!bind) return this.say(`Not connected: ${target.label || target.tag} reads, it drives nothing`);
-    if (from.kind === 'cube') return this.chooseOutput(this.opened, at, (a) => this.writePatch([addConnection(a, bind)], `${a} → ${bind}`), bind);
+    if (from.kind === 'cube') return this.chooseOutput(from.entry ?? this.opened, at, (a) => this.writePatch([addConnection(a, bind)], `${a} → ${bind}`), bind);
     const source = from.kind === 'auto-pin' ? from.pin.address : from.kind === 'external' ? from.pin.from : null;
     if (!source) return;
     if (from.kind === 'auto-pin' && from.pin.address.split('/').length > 2) return this.say(`${source} is inside the engine: connect it there, in its Engine`);
@@ -2774,6 +2825,8 @@ export class SignalPlane extends HTMLElement {
   /** A zoom by `factor` about screen point `at`: coming to a Stack's fit from below focuses it (its width fitted); below the control band the instrument under `at` is the one that opens. Never the selection. */
   zoomBy(factor, at) {
     if (this.layer) {
+      // The board's view is the plane's, zoomed on from there (the bar's −/+ at the Engine layer).
+      if (this.layer === 'engine') this.leaveEngine();
       // The layer is chosen alone: the zoom only scales, about `at` (no focus, no instrument opens, no fit stop).
       const fit = this.fitK() ?? fitScale(this.layout?.bounds ?? { w: 1, h: 1 }, this.viewport);
       const k = Math.min(fit * 64, Math.max(fit * MIN_SCALE, this.view.k * factor));
