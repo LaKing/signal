@@ -43,6 +43,8 @@ export class ButtonPan {
   down(event) {
     if (event.button !== 1 && event.button !== 2) return false;
     if (this.skip?.(event)) return false;
+    // A pan whose release was never seen (its capture lost elsewhere): let go first, its swallow removed.
+    if (this.active) this.finish(this.active);
     event.preventDefault();
     this.capture?.setPointerCapture?.(event.pointerId);
     if (this.host.dataset) this.host.dataset.panning = '';
@@ -73,12 +75,9 @@ export class ButtonPan {
   up(event) {
     const pan = this.active;
     if (!pan || event.pointerId !== pan.id) return false;
-    this.active = null;
-    if (this.host.dataset) delete this.host.dataset.panning;
     event.stopPropagation();
     // A release on other platforms brings its contextmenu after pointerup: still held back for a moment.
-    const doc = this.doc();
-    setTimeout(() => doc?.removeEventListener('contextmenu', pan.swallow, true), 0);
+    this.finish(pan, true);
     if (event.type === 'pointercancel' || pan.moved || pan.button !== 2) return true;
     const now = event.timeStamp ?? performance.now();
     if (this.onDoubleRight && isDoubleRight(this.lastRight, now, pan.start)) {
@@ -91,8 +90,26 @@ export class ButtonPan {
     // A right click without a move: its menu, where it was pressed.
     const replay = new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: pan.start.x, clientY: pan.start.y, button: 2 });
     replay.signalReplayed = true;
-    pan.target.dispatchEvent(replay);
+    // Its element drawn again meanwhile (gone from the page): the menu from the stage.
+    const target = pan.target?.isConnected === false ? (this.capture ?? this.host) : pan.target;
+    target.dispatchEvent(replay);
     return true;
+  }
+
+  /** The pointer's capture lost before its release (the stage hidden, another element took it): the pan is let go, no menu. */
+  lost(event) {
+    const pan = this.active;
+    if (pan && event.pointerId === pan.id) this.finish(pan);
+  }
+
+  /** `pan` ended: no longer active, the cursor back, the document's contextmenu no longer held back (`later`: after this turn). */
+  finish(pan, later = false) {
+    if (this.active === pan) this.active = null;
+    if (this.host.dataset) delete this.host.dataset.panning;
+    const doc = this.doc();
+    const release = () => doc?.removeEventListener('contextmenu', pan.swallow, true);
+    if (later) setTimeout(release, 0);
+    else release();
   }
 
   doc() {

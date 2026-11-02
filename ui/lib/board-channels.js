@@ -437,7 +437,7 @@ export function siftBand(list, cost) {
       let best = below;
       let bestAt = 0;
       let here = below;
-      let current = at === 0 ? below : null;
+      let current = below;
       for (let p = 1; p <= order.length; p++) {
         const o = order[p - 1];
         here += cost(o, item) - cost(item, o);
@@ -448,7 +448,7 @@ export function siftBand(list, cost) {
         }
       }
       // Kept where it was unless the new place is strictly better.
-      const to = current !== null && current <= best ? at : bestAt;
+      const to = current <= best ? at : bestAt;
       order.splice(to, 0, item);
       if (to !== at) moved = true;
     }

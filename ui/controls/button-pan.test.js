@@ -77,3 +77,22 @@ test('isDoubleRight: soon and near', () => {
   assert.ok(!isDoubleRight({ at: 0, x: 0, y: 0 }, 10, { x: 8, y: 0 }));
   assert.ok(!isDoubleRight(null, 10, { x: 0, y: 0 }));
 });
+
+test('a cancel or a lost capture lets the pan go with no menu, its swallow removed; a press after a lost release starts clean', async () => {
+  const r = rig();
+  r.pan.down(r.ev('pointerdown', { button: 2, clientX: 5, clientY: 5 }));
+  r.pan.up(r.ev('pointercancel', { clientX: 5, clientY: 5, timeStamp: 10 }));
+  assert.equal(r.sent.length, 0, 'a cancel opens no menu');
+  await new Promise((done) => setTimeout(done, 1));
+  assert.equal(r.listeners.length, 0, 'the swallow is removed after the release');
+  r.pan.down(r.ev('pointerdown', { button: 2, clientX: 5, clientY: 5 }));
+  r.pan.lost(r.ev('lostpointercapture', {}));
+  assert.equal(r.listeners.length, 0, 'removed at once when the capture is lost');
+  assert.equal(r.host.dataset.panning, undefined);
+  assert.equal(r.pan.move(r.ev('pointermove', { clientX: 9, clientY: 9 })), false);
+  // A release never seen: the next press lets the old pan go first.
+  r.pan.down(r.ev('pointerdown', { button: 1, clientX: 0, clientY: 0, pointerId: 1 }));
+  r.pan.down(r.ev('pointerdown', { button: 2, clientX: 0, clientY: 0, pointerId: 2 }));
+  assert.equal(r.listeners.length, 1, 'one swallow, the new pan\'s');
+  assert.equal(r.pan.up(r.ev('pointerup', { pointerId: 1, clientX: 0, clientY: 0 })), false, 'another pointer\'s release is not this pan\'s');
+});

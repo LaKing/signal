@@ -602,11 +602,15 @@ export class SignalSchematic extends HTMLElement {
     this.stage.addEventListener('pointermove', (e) => this.buttonPan.move(e), true);
     this.stage.addEventListener('pointerup', (e) => this.buttonPan.up(e), true);
     this.stage.addEventListener('pointercancel', (e) => this.buttonPan.up(e), true);
+    this.stage.addEventListener('lostpointercapture', (e) => this.buttonPan.lost(e));
     // The Add module browser's panes scroll with the wheel: they are not the drawing's.
     registerWheel(this, (event) => event.composedPath().includes(this.stage) && !this.editor.holds(event));
     // Safari's pinch.
-    this.svg.addEventListener('gesturestart', (e) => this.pinch(e, true));
-    this.svg.addEventListener('gesturechange', (e) => this.pinch(e, false));
+    // On the Deck over the whole stage (a face's control too, as the wheel), else over the drawing.
+    this.svg.addEventListener('gesturestart', (e) => this.onDeck() || this.pinch(e, true));
+    this.svg.addEventListener('gesturechange', (e) => this.onDeck() || this.pinch(e, false));
+    this.stage.addEventListener('gesturestart', (e) => this.onDeck() && this.pinch(e, true), true);
+    this.stage.addEventListener('gesturechange', (e) => this.onDeck() && this.pinch(e, false), true);
     this.addEventListener('keydown', (e) => this.key(e));
     // Its own context menu, where no page menu took the right click (in a browser).
     this.menu = new ContextMenu({ label: 'Schematic' });
@@ -1379,7 +1383,9 @@ export class SignalSchematic extends HTMLElement {
     // A card (the Deck's Wiring boxes' look, 2026-11-02): a header band with its name and module, within HEADER (no layout changes).
     if (node.kind === 'instance') {
       const at = bakedRect(baked, { x: node.x, y: node.y, w: node.w, h: HEADER - 4 });
-      if (at) group.append(el('path', { class: 'head', d: headPath(at, CARD_RX * m, at.y !== bakedPoint(baked, node).y) }));
+      // Inset by half the box's 1.5 px edge, so the band never covers it.
+      const inset = at && { x: at.x + 0.75, y: at.y + 0.75, width: at.width - 1.5, height: at.height - 0.75 };
+      if (inset && inset.width > 0 && inset.height > 0) group.append(el('path', { class: 'head', d: headPath(inset, Math.max(0, CARD_RX * m - 0.75), at.y !== bakedPoint(baked, node).y) }));
     }
     // 2026-10-30: a closed slot's face, its part as on the panel, over this area (ui/controls/schematic-faces.js).
     if (node.face && !isOpen && node.kind === 'instance') {

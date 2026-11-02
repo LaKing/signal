@@ -138,7 +138,11 @@ test('siftBand: each net moved to its best lane (the Deck\'s nesting), kept on a
   const sifted = siftBand(worst, cost);
   assert.equal(total(sifted), 0, sifted.map((it) => it.net).join(''));
   assert.deepEqual(siftBand(sifted, cost), sifted, 'a nested order stays');
-  assert.deepEqual(bandOrder(items), bandOrder([...items].reverse()), 'the same lanes from any start');
+  for (const start of [items, worst, [items[2], items[0], items[3], items[1]]]) assert.equal(total(bandOrder(start).map((net) => items.find((it) => it.net === net))), 0, 'nested from any start');
+  // A tie: two nets that never meet stay in the order given.
+  const apart = [{ net: 'p', xs: 0, xe: [10] }, { net: 'q', xs: 100, xe: [110] }];
+  assert.deepEqual(siftBand(apart, cost).map((it) => it.net), ['p', 'q']);
+  assert.deepEqual(siftBand([...apart].reverse(), cost).map((it) => it.net), ['q', 'p'], 'kept on a tie');
 });
 
 test('a die\'s parameter legs: one bundle LEG_LANE apart under the strip, nested so that they cross each other rarely (the synth: 257 crossings before 2026-11-02)', () => {

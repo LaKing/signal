@@ -460,6 +460,7 @@ export class SignalPlane extends HTMLElement {
     this.stage.addEventListener('pointermove', (e) => this.buttonPan.move(e), true);
     this.stage.addEventListener('pointerup', (e) => this.buttonPan.up(e), true);
     this.stage.addEventListener('pointercancel', (e) => this.buttonPan.up(e), true);
+    this.stage.addEventListener('lostpointercapture', (e) => this.buttonPan.lost(e));
     this.stage.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.stage.addEventListener('pointerup', (e) => this.pointerUp(e));
     this.stage.addEventListener('pointercancel', () => this.cancelPointer());
@@ -2698,6 +2699,8 @@ export class SignalPlane extends HTMLElement {
     if (this.deep.hidden || this.level() !== 'engine' || !event.composedPath().includes(this.deep)) return;
     // The layer chosen alone: the board's wheel is the board's, zooming out past its fit too (it never leaves the layer).
     if (this.layer) return;
+    // Locked, or Shift with a mouse's wheel: the board scrolls, it never hands a zoom back.
+    if (this.zoomLock || (event.shiftKey && !event.ctrlKey)) return;
     const out = (event.ctrlKey || this.kindOf(event) !== 'trackpad') && event.deltaY > 0;
     if (!out || !this.boardAtTop()) return;
     const fit = this.fitK();
