@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  IDENTITY, MAX_SCALE, MIN_SCALE, commandView, compose, fit, focus, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, wheelView, zoomAt,
+  IDENTITY, MAX_SCALE, MIN_SCALE, commandView, compose, fit, focus, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, wheelView, zoomAt, deckWheelView,
 } from './schematic-view.js';
 
 test('wheelView: a trackpad pans both ways, Shift+wheel sideways, a mouse and a pinch zoom about the pointer', () => {
@@ -136,4 +136,18 @@ test('a fit can keep clear of a bar at the top and of labels at the sides', () =
   assert.ok(Math.abs(barred.y + barred.k * 500 - (1000 - 24)) < 1e-9);
   const sided = fit({ x: 0, y: 0, w: 1000, h: 10 }, { w: 1000, h: 1000 }, 24, 24, 120);
   assert.ok(Math.abs(sided.k - 760 / 1000) < 1e-9);
+});
+
+test('deckWheelView: the Deck\'s pointer on the Engine board; the zoom lock scrolls and zooms nothing', () => {
+  const view = { k: 2, x: 10, y: 20 };
+  const at = { x: 300, y: 200 };
+  assert.deepEqual(deckWheelView(view, { deltaX: 4, deltaY: -6 }, 'trackpad', at), pan(view, -4, 6), 'two fingers pan');
+  assert.deepEqual(deckWheelView(view, { deltaY: 100 }, 'mouse', at), zoomAt(view, wheelFactor(100), at), 'a mouse wheel zooms about the pointer');
+  assert.deepEqual(deckWheelView(view, { deltaY: 100, shiftKey: true }, 'mouse', at), pan(view, 0, -100), 'Shift pans up and down');
+  assert.deepEqual(deckWheelView(view, { deltaX: 100, deltaY: 0, shiftKey: true }, 'mouse', at), pan(view, 0, -100), 'a Mac turns Shift+wheel sideways: still up and down');
+  assert.deepEqual(deckWheelView(view, { deltaY: 5, ctrlKey: true }, 'pinch', at), zoomAt(view, wheelFactor(5, { pinch: true }), at), 'a pinch zooms');
+  assert.deepEqual(deckWheelView(view, { deltaY: 100 }, 'mouse', at, { lock: true }), pan(view, 0, -100), 'locked: the wheel scrolls');
+  assert.equal(deckWheelView(view, { deltaY: 5, ctrlKey: true }, 'pinch', at, { lock: true }), view, 'locked: a pinch zooms nothing');
+  assert.deepEqual(deckWheelView(view, { deltaX: 3, deltaY: 2 }, 'trackpad', at, { lock: true }), pan(view, -3, -2), 'locked: two fingers still pan');
+  assert.equal(deckWheelView(view, { deltaY: 0 }, 'mouse', at), view, 'nothing to do: the same view');
 });

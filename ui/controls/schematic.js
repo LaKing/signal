@@ -93,7 +93,8 @@ import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schemat
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
-import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, commandView, deckWheelView, fit, focus, matrix, pan, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
+import { ButtonPan, closePageMenu } from './button-pan.js';
 import { WheelKinds } from '../lib/wheel.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel } from './keyboard.js';
@@ -258,6 +259,7 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
    Edit and the context menu stand for them, and Inspect opens the sidebar as a floating panel. */
 :host([plane]) { --side-width: 0px; }
 :host([plane]) .bar { display: none; }
+:host([data-panning]) .stage { cursor: move; }
 :host([plane]) .side { display: none; }
 :host([plane][inspecting]) .side { display: flex; left: auto; right: 12px; top: 12px; bottom: auto; width: 300px; max-height: calc(100% - 24px); z-index: 20;
   border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
@@ -568,6 +570,28 @@ export class SignalSchematic extends HTMLElement {
     });
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
+    // On the Deck (`plane`, ADR 0051's amendment of 2026-11-02) the wheel is the board's over all of its stage, a face's
+    // knob or fader too, and the right or the middle button held pans; the standalone schematic keeps its own.
+    this.stage.addEventListener('wheel', (e) => this.deckWheel(e), { passive: false, capture: true });
+    this.buttonPan = new ButtonPan(this, {
+      capture: this.stage,
+      pan: (dx, dy) => {
+        this.stopZoom();
+        this.setView(pan(this.view, dx, dy));
+      },
+      doubleRight: () => this.dispatchEvent(new CustomEvent('signal-zoom-lock', { bubbles: true, composed: true })),
+      closeMenu: () => {
+        closePageMenu(this.ownerDocument);
+        this.closeMenu();
+      },
+      skip: (event) => !this.onDeck() || this.editor.holds(event),
+    });
+    this.stage.addEventListener('pointerdown', (e) => {
+      if (this.buttonPan.down(e)) this.closeMenu();
+    }, true);
+    this.stage.addEventListener('pointermove', (e) => this.buttonPan.move(e), true);
+    this.stage.addEventListener('pointerup', (e) => this.buttonPan.up(e), true);
+    this.stage.addEventListener('pointercancel', (e) => this.buttonPan.up(e), true);
     // The Add module browser's panes scroll with the wheel: they are not the drawing's.
     registerWheel(this, (event) => event.composedPath().includes(this.stage) && !this.editor.holds(event));
     // Safari's pinch.
@@ -1985,8 +2009,10 @@ export class SignalSchematic extends HTMLElement {
     const additive = event.shiftKey || event.metaKey || (!MAC && event.ctrlKey);
     const base = { start: at, last: at, hit, moved: false, additive, pointer: event.pointerId };
     // Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background: the marquee (a plain drag pans).
-    if (marqueeStarts(hit, event, MAC)) {
-      this.gesture = { ...base, marquee: true };
+    // On the Deck (ADR 0051's amendment of 2026-11-02) the left button never pans: a plain drag there is a marquee.
+    const deck = this.onDeck();
+    if (marqueeStarts(hit, event, MAC, deck)) {
+      this.gesture = { ...base, marquee: true, plain: !additive };
       return;
     }
     // Edit patch: a press on an output starts a connection (a Shift- or
@@ -2013,7 +2039,7 @@ export class SignalSchematic extends HTMLElement {
     const follow = action === 'move' ? new DragFollow(dragged.level, dragGroup(this.selected, dragged)) : null;
     const held = action === 'hold';
     // The press's own part (`clicked`) is what a click selects; `hit` is what a drag moves.
-    this.gesture = { ...base, hit: follow || held ? dragged : hit, clicked: hit, k, follow, held };
+    this.gesture = { ...base, hit: follow || held ? dragged : hit, clicked: hit, k, follow, held, still: deck && action === 'pan' };
   }
 
   /** What is at screen point `at`: under the opaque plate (ADR 0047 §5) the background, else the drawing's hit. */
@@ -2059,7 +2085,7 @@ export class SignalSchematic extends HTMLElement {
       // A box around the open composite (M2.13-3): not moved, and said so once.
       if (!gesture.said) this.say(`Not moved: ${gesture.hit.address} is around the open ${editLevel(this.drawn).path}; close it (×) first`);
       gesture.said = true;
-    } else this.setView(pan(this.view, at.x - last.x, at.y - last.y));
+    } else if (!gesture.still) this.setView(pan(this.view, at.x - last.x, at.y - last.y));
   }
 
   /** The marquee's rectangle on screen, from the press to the pointer (`{x, y, w, h}`, `w` and `h` positive). */
@@ -2094,11 +2120,15 @@ export class SignalSchematic extends HTMLElement {
     if (gesture.connect) this.editor.cancelConnect();
     if (gesture.marquee) {
       this.hideMarquee();
-      if (!gesture.moved) return;
-      gesture.last = at;
-      // What it takes (boxes, panel controls, the wires between the boxes) is added to the selection.
-      this.select(union(this.selected, inside(this.drawn, this.marqueeRect(gesture))));
-      return;
+      if (gesture.moved) {
+        gesture.last = at;
+        // What it takes (boxes, panel controls, the wires between the boxes) is added to the selection (a plain one's replaces it).
+        const taken = inside(this.drawn, this.marqueeRect(gesture));
+        this.select(gesture.plain ? taken : union(this.selected, taken));
+        return;
+      }
+      // A plain press on the Deck's background that did not move: a click there (the selection let go).
+      if (!gesture.plain) return;
     }
     if (!gesture.moved) {
       // The selection before a click, unless it is a double-click's second: a double-click gives it back (`doubleClick`).
@@ -2376,8 +2406,38 @@ export class SignalSchematic extends HTMLElement {
     this.setView(next);
   }
 
+  /** Whether this board is the Deck's Engine (`plane`); false where it cannot tell (a stub without attributes). */
+  onDeck() {
+    try {
+      return Boolean(this.hasAttribute?.('plane'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The Deck's wheel (`deckWheelView`): over the whole stage, ahead of a
+   * face's control; the plane's zoom lock (`zoomLock`, set by the plane)
+   * turns a mouse's wheel into a scroll. Not the standalone schematic's.
+   */
+  deckWheel(event) {
+    if (!this.onDeck() || this.editor.holds(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const kind = event.ctrlKey ? 'pinch' : this.wheelKinds.kind(event, event.timeStamp);
+    const at = this.point(event);
+    const next = deckWheelView(this.view, event, kind, at, { lock: Boolean(this.zoomLock) });
+    if (next === this.view) return;
+    this.closeMenu();
+    this.stopZoom();
+    this.zoomed(next.k / this.view.k, at);
+    this.setView(next);
+  }
+
   pinch(event, start) {
     event.preventDefault();
+    // The Deck's zoom lock: a pinch zooms nothing.
+    if (this.zoomLock && this.onDeck()) return;
     if (start) this.pinchScale = 1;
     this.closeMenu();
     const factor = event.scale / (this.pinchScale || 1);

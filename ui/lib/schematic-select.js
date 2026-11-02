@@ -310,11 +310,14 @@ export function dragGroup(selected, hit) {
  * Whether a press on `hit` with `event`'s modifiers starts the marquee: a
  * Shift- or ⌘-drag (Ctrl-drag off a Mac, `mac` false) on the background,
  * as Shift- and ⌘-click add to the selection (2026-10-30). On a Mac
- * Ctrl-press is the right click, never a marquee.
+ * Ctrl-press is the right click, never a marquee. On the Deck's Engine
+ * board (`deck`, ADR 0051's amendment of 2026-11-02: the left button is
+ * never a pan) a plain drag on the background is a marquee too.
  */
-export function marqueeStarts(hit, event, mac) {
+export function marqueeStarts(hit, event, mac, deck = false) {
   if (hit?.kind !== 'background') return false;
-  return Boolean(event?.shiftKey || event?.metaKey || (!mac && event?.ctrlKey));
+  if (mac && event?.ctrlKey) return false;
+  return Boolean(deck || event?.shiftKey || event?.metaKey || (!mac && event?.ctrlKey));
 }
 
 /**

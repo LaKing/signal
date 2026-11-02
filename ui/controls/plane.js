@@ -84,6 +84,7 @@ import { reroot } from '../lib/schematic-scene.js';
 import { GESTURE_GAP_MS, WheelKinds } from '../lib/wheel.js';
 import { wheelFactor, wheelPixels } from '../lib/schematic-view.js';
 import { isPressable, isTextField, registerWheel, takesWheel } from './keyboard.js';
+import { ButtonPan, closePageMenu } from './button-pan.js';
 import { keyCommand } from '../lib/keys.js';
 import { bindAddresses } from './base.js';
 import { cardMenu, cardsOf, menuMessage } from '../app/lib/cards.js';
@@ -417,6 +418,9 @@ export class SignalPlane extends HTMLElement {
     this.deep = html('div', { className: 'deep', hidden: true });
     this.schematic = document.createElement('signal-schematic');
     this.schematic.setAttribute('plane', '');
+    // One zoom lock, the plane's (its bar's switch, localStorage): the board reads it and asks for its toggle (a double right click).
+    this.schematic.zoomLock = this.zoomLock;
+    this.schematic.addEventListener('signal-zoom-lock', () => this.toggleZoomLock());
     // ADR 0051 §8: no Plate / X-ray / Board switch; the board is the Engine, laid on an instrument's cube.
     this.schematic.board?.restore?.({ layer: 'board' });
     this.deep.append(this.schematic);
@@ -440,10 +444,22 @@ export class SignalPlane extends HTMLElement {
     this.stage.addEventListener('pointerdown', (e) => this.pointerDownCapture(e), true);
     this.stage.addEventListener('pointerdown', (e) => this.pointerDown(e));
     // The right or the middle button dragged pans (a right click that does not move keeps its menu).
-    this.stage.addEventListener('pointerdown', (e) => this.buttonPanDown(e), true);
-    this.stage.addEventListener('pointermove', (e) => this.buttonPanMove(e), true);
-    this.stage.addEventListener('pointerup', (e) => this.buttonPanUp(e), true);
-    this.stage.addEventListener('pointercancel', (e) => this.buttonPanUp(e), true);
+    // A right click that does not move opens its menu on the release; a double right click toggles the zoom lock.
+    // Not on the Engine's board, which pans the same way by itself (`<signal-schematic plane>`).
+    this.buttonPan = new ButtonPan(this, {
+      capture: this.stage,
+      pan: (dx, dy) => {
+        this.settleTravel();
+        this.setView(panBy(this.view, dx, dy));
+      },
+      doubleRight: () => this.toggleZoomLock(),
+      closeMenu: () => closePageMenu(),
+      skip: (event) => (event.composedPath?.().includes(this.deep) && this.level() === 'engine') || this.overEditor(event),
+    });
+    this.stage.addEventListener('pointerdown', (e) => this.buttonPan.down(e), true);
+    this.stage.addEventListener('pointermove', (e) => this.buttonPan.move(e), true);
+    this.stage.addEventListener('pointerup', (e) => this.buttonPan.up(e), true);
+    this.stage.addEventListener('pointercancel', (e) => this.buttonPan.up(e), true);
     this.stage.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.stage.addEventListener('pointerup', (e) => this.pointerUp(e));
     this.stage.addEventListener('pointercancel', () => this.cancelPointer());
@@ -2006,6 +2022,7 @@ export class SignalPlane extends HTMLElement {
   toggleZoomLock() {
     this.zoomLock = !this.zoomLock;
     writeZoomLock(this.zoomLock);
+    if (this.schematic) this.schematic.zoomLock = this.zoomLock;
     this.zoomLockButton?.setAttribute('aria-pressed', String(this.zoomLock));
     this.say(this.zoomLock ? 'Zoom lock on: the wheel scrolls' : 'Zoom lock off: the wheel zooms');
   }
@@ -2637,70 +2654,6 @@ export class SignalPlane extends HTMLElement {
     }
   }
 
-  /**
-   * The right or the middle button held pans the view at once (the cursor
-   * changes on the press). A right click that does not move opens its menu on
-   * the release (the owner's, 2026-11-02): the system's own right click,
-   * which macOS sends on the press, is held back and sent again then. Not on
-   * the Engine's board, which has its own.
-   */
-  buttonPanDown(event) {
-    if (event.button !== 1 && event.button !== 2) return;
-    if (event.composedPath?.().includes(this.deep) && this.level() === 'engine') return;
-    if (this.overEditor(event)) return;
-    event.preventDefault();
-    this.stage.setPointerCapture?.(event.pointerId);
-    this.dataset.panning = '';
-    const at = { x: event.clientX, y: event.clientY };
-    const pan = { id: event.pointerId, button: event.button, target: event.composedPath?.()[0] ?? event.target, start: at, last: at, moved: false };
-    // The system's right click while the button is down (macOS: on the press; others: on the release) is held back.
-    pan.swallow = (e) => {
-      if (e.signalReplayed) return;
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    document.addEventListener('contextmenu', pan.swallow, true);
-    this.buttonPan = pan;
-  }
-
-  buttonPanMove(event) {
-    const pan = this.buttonPan;
-    if (!pan || event.pointerId !== pan.id) return;
-    event.stopPropagation();
-    if (!pan.moved && Math.hypot(event.clientX - pan.start.x, event.clientY - pan.start.y) >= 4) pan.moved = true;
-    const dx = event.clientX - pan.last.x;
-    const dy = event.clientY - pan.last.y;
-    pan.last = { x: event.clientX, y: event.clientY };
-    if (!dx && !dy) return;
-    this.settleTravel();
-    this.setView(panBy(this.view, dx, dy));
-  }
-
-  buttonPanUp(event) {
-    const pan = this.buttonPan;
-    if (!pan || event.pointerId !== pan.id) return;
-    this.buttonPan = null;
-    delete this.dataset.panning;
-    event.stopPropagation();
-    // A release on other platforms brings its contextmenu after pointerup: still held back for a moment.
-    setTimeout(() => document.removeEventListener('contextmenu', pan.swallow, true), 0);
-    if (pan.moved || pan.button !== 2) return;
-    // A second right click soon after, near the first: the zoom lock toggles, and no menu (the first one's is closed).
-    const now = event.timeStamp ?? performance.now();
-    const last = this.lastRightClick;
-    if (last && now - last.at < 400 && Math.hypot(pan.start.x - last.x, pan.start.y - last.y) < 8) {
-      this.lastRightClick = null;
-      document.querySelector('signal-app-context-menu')?.close?.();
-      this.toggleZoomLock();
-      return;
-    }
-    this.lastRightClick = { at: now, x: pan.start.x, y: pan.start.y };
-    // A right click without a move: its menu, where it was pressed.
-    const replay = new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: pan.start.x, clientY: pan.start.y, button: 2 });
-    replay.signalReplayed = true;
-    pan.target.dispatchEvent(replay);
-  }
-
   /** A pointer cancelled or its capture lost: no cable is left half drawn, no pan left running. */
   cancelPointer() {
     this.gesture = null;
@@ -2743,6 +2696,8 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     if (this.deep.hidden || this.level() !== 'engine' || !event.composedPath().includes(this.deep)) return;
+    // The layer chosen alone: the board's wheel is the board's, zooming out past its fit too (it never leaves the layer).
+    if (this.layer) return;
     const out = (event.ctrlKey || this.kindOf(event) !== 'trackpad') && event.deltaY > 0;
     if (!out || !this.boardAtTop()) return;
     const fit = this.fitK();

@@ -98,6 +98,9 @@ test('Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background starts the marq
   assert.ok(marqueeStarts(background, { ctrlKey: true }, false), 'Ctrl off a Mac');
   assert.ok(!marqueeStarts(background, { ctrlKey: true }, true), 'Ctrl on a Mac is the right click');
   assert.ok(!marqueeStarts(background, {}, true), 'a plain drag pans');
+  assert.ok(marqueeStarts(background, {}, true, true), 'on the Deck a plain drag is a marquee (the left button never pans)');
+  assert.ok(!marqueeStarts(background, { ctrlKey: true }, true, true), 'on the Deck too, Ctrl on a Mac is the right click');
+  assert.ok(!marqueeStarts(instanceHit(entry, box), {}, true, true), 'on the Deck, on a box: its own action');
   assert.ok(!marqueeStarts(instanceHit(entry, box), { metaKey: true }, true), 'on a box: a ⌘-click toggles it');
 });
 

@@ -189,6 +189,32 @@ export function wheelView(view, event, kind, at) {
   return d ? zoomAt(view, wheelFactor(d, { deltaMode: mode, pinch: kind === 'pinch' }), at) : view;
 }
 
+/**
+ * The view after wheel `event` on the Deck's Engine board (ADR 0051's
+ * amendment of 2026-11-02: the pointer the same on every layer), its
+ * gesture's `kind` (`WheelKinds`: `mouse`, `trackpad`, `pinch`) at screen
+ * point `at`: a trackpad's two fingers pan; a pinch (or Ctrl with the
+ * wheel) zooms about the pointer; a mouse's wheel zooms about the pointer,
+ * or pans up and down with Shift. With the zoom lock (`lock`) a mouse's
+ * wheel pans up and down and nothing zooms. The same view when nothing
+ * changes.
+ */
+export function deckWheelView(view, event, kind, at, { lock = false } = {}) {
+  const mode = event.deltaMode ?? 0;
+  if (kind === 'trackpad') {
+    const dx = wheelPixels(event.deltaX || 0, mode);
+    const dy = wheelPixels(event.deltaY || 0, mode);
+    return dx || dy ? pan(view, -dx, -dy) : view;
+  }
+  if (kind !== 'pinch' && (event.shiftKey || lock)) {
+    const d = wheelPixels(event.deltaY || event.deltaX || 0, mode);
+    return d ? pan(view, 0, -d) : view;
+  }
+  if (lock) return view;
+  const d = event.deltaY || 0;
+  return d ? zoomAt(view, wheelFactor(d, { deltaMode: mode, pinch: kind === 'pinch' }), at) : view;
+}
+
 /** The keys' step: zooming in and out from the keyboard is by this about the centre; the arrows pan a tenth of the viewport. */
 export const KEY_ZOOM = 1.25;
 
