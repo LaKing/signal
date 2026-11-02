@@ -410,5 +410,48 @@ export function bandOrder(items) {
     }
     if (!changed) break;
   }
-  return list.map((it) => it.net);
+  return siftBand(list, cost).map((it) => it.net);
+}
+
+/**
+ * Sifting (the Deck's nesting, ui/lib/plane-control.js `legLanes`, for
+ * nets with several drops; the owner, 2026-11-02: fewer crossings among
+ * the legs): each net in turn taken out of `list` (top to bottom) and put
+ * back where its crossings with all the others (`cost(above, below)`) are
+ * fewest, the first such place on a tie, until a pass moves none (at most
+ * SWAP_PASSES). Neighbouring swaps alone stop in a local order where a
+ * net's best place is several lanes away. Deterministic.
+ */
+export function siftBand(list, cost) {
+  const order = [...list];
+  const n = order.length;
+  for (let pass = 0; pass < SWAP_PASSES; pass++) {
+    let moved = false;
+    for (const item of [...order]) {
+      const at = order.indexOf(item);
+      order.splice(at, 1);
+      // Placed at p: every one above it (order[0 .. p-1]) over it, every one below under it.
+      let below = 0;
+      for (const o of order) below += cost(item, o);
+      let best = below;
+      let bestAt = 0;
+      let here = below;
+      let current = at === 0 ? below : null;
+      for (let p = 1; p <= order.length; p++) {
+        const o = order[p - 1];
+        here += cost(o, item) - cost(item, o);
+        if (p === at) current = here;
+        if (here < best) {
+          best = here;
+          bestAt = p;
+        }
+      }
+      // Kept where it was unless the new place is strictly better.
+      const to = current !== null && current <= best ? at : bestAt;
+      order.splice(to, 0, item);
+      if (to !== at) moved = true;
+    }
+    if (!moved) break;
+  }
+  return order;
 }

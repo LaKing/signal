@@ -570,6 +570,15 @@ const CONNECTOR_PAD = 12;
 export const PARAMS = '@params';
 /** A die's edges lie this far (layout units) outside what it holds, where no interface pin sets them. */
 export const DIE_MARGIN = 32;
+/**
+ * A die's parameters run in a band under its strip, LEG_LANE apart (the
+ * Deck's Control band's pitch, ui/lib/plane-control.js `LANE`): one
+ * bundle, not a field of tracks (the owner, 2026-11-02). Horizontals of
+ * different nets may lie TRACK / 2 apart (board-route.js `freeH`). The
+ * die keeps its height (room for TRACK per net), so its package's shape,
+ * and the level around it, do not change: the room left is under the band.
+ */
+export const LEG_LANE = TRACK / 2;
 /** Between a die's parameters' strip and its highest chip: room for the drops, at least. */
 const PARAM_GAP = 48;
 
@@ -1081,7 +1090,7 @@ function flowBoard({ nodes, byId, edges, back, die, controlRects, board, positio
     });
     const order = bandOrder([...items.values()]);
     const start = top + (connected ? combDepth(params.outs.length) : 0) + TRACK;
-    order.forEach((net, k) => bandAt.set(net, start + k * TRACK));
+    order.forEach((net, k) => bandAt.set(net, start + k * LEG_LANE));
   }
   const planned = new Map();
   const ends = (e) => ({ a: e.from.node === PARAMS ? params.outs.find((p) => p.name === e.from.port) : anchor(byId.get(e.from.node), e.from.port, true), b: anchor(byId.get(e.to.node), e.to.port, false) });

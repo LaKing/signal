@@ -8,10 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { orderTracks, planChannels } from './board-channels.js';
+import { bandOrder, orderTracks, planChannels, siftBand } from './board-channels.js';
 import { straighten } from './board-straighten.js';
 import { junctions } from './board-net.js';
-import { PARAMS, layout } from './schematic-layout.js';
+import { LEG_LANE, PARAMS, layout } from './schematic-layout.js';
 import { exportFacts } from './schematic-groups.js';
 
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
@@ -96,4 +96,64 @@ test('straighten: a staircase between two pins becomes a Z where it is clear, an
   assert.equal(free.get(0).length, 4, 'two bends');
   const blocked = straighten([{ id: 0, net: 'n', corners: stairs.map((p) => ({ ...p })) }], [{ id: 'box', x: 0, y: 30, w: 200, h: 10 }, { id: 'box2', x: -20, y: 5, w: 10, h: 100 }]);
   assert.ok(!blocked.has(0) || blocked.get(0).length < stairs.length);
+});
+
+/** The crossings among a die's parameter legs (different nets; a vertical through a horizontal, ends excluded). */
+function legCrossings(d) {
+  const legs = d.wires.filter((w) => w.from.node === PARAMS && !w.labelled);
+  const segs = (c) => c.slice(1).map((q, i) => [c[i], q]);
+  let n = 0;
+  for (let i = 0; i < legs.length; i++) {
+    for (let j = i + 1; j < legs.length; j++) {
+      if (legs[i].from.port === legs[j].from.port) continue;
+      for (const [a, b] of segs(legs[i].corners)) {
+        for (const [c, e] of segs(legs[j].corners)) {
+          const h1 = a.y === b.y;
+          if (h1 === (c.y === e.y)) continue;
+          const [H, V] = h1 ? [[a, b], [c, e]] : [[c, e], [a, b]];
+          const x = V[0].x;
+          const y = H[0].y;
+          if (x > Math.min(H[0].x, H[1].x) && x < Math.max(H[0].x, H[1].x) && y > Math.min(V[0].y, V[1].y) && y < Math.max(V[0].y, V[1].y)) n++;
+        }
+      }
+    }
+  }
+  return n;
+}
+
+test('siftBand: each net moved to its best lane (the Deck\'s nesting), kept on a tie, deterministic', () => {
+  // Four legs going left from a strip, sources and drops in the same order: nested, none crosses (cost 0).
+  const items = [
+    { net: 'a', xs: 100, xe: [10] },
+    { net: 'b', xs: 120, xe: [30] },
+    { net: 'c', xs: 140, xe: [50] },
+    { net: 'd', xs: 160, xe: [70] },
+  ];
+  const range = (it) => [Math.min(it.xs, ...it.xe), Math.max(it.xs, ...it.xe)];
+  const inside = (x, r) => x > r[0] && x < r[1];
+  const cost = (i, j) => (inside(j.xs, range(i)) ? 1 : 0) + i.xe.filter((x) => inside(x, range(j))).length;
+  const total = (order) => order.reduce((s, it, k) => s + order.slice(k + 1).reduce((t, o) => t + cost(it, o), 0), 0);
+  const worst = [...items].reverse();
+  assert.ok(total(worst) > 0);
+  const sifted = siftBand(worst, cost);
+  assert.equal(total(sifted), 0, sifted.map((it) => it.net).join(''));
+  assert.deepEqual(siftBand(sifted, cost), sifted, 'a nested order stays');
+  assert.deepEqual(bandOrder(items), bandOrder([...items].reverse()), 'the same lanes from any start');
+});
+
+test('a die\'s parameter legs: one bundle LEG_LANE apart under the strip, nested so that they cross each other rarely (the synth: 257 crossings before 2026-11-02)', () => {
+  const d = die('moog_voice');
+  const strip = d.nodes.find((n) => n.id === PARAMS);
+  const legs = d.wires.filter((w) => w.from.node === PARAMS);
+  assert.ok(legs.length >= 20 && legs.every((w) => !w.labelled));
+  // Each net's run in the band: its first horizontal under the strip.
+  const lanes = [...new Set(legs.map((w) => w.corners.find((p, k) => k > 0 && w.corners[k - 1].y === p.y && p.y > strip.y)?.y).filter(Number.isFinite))].sort((a, b) => a - b);
+  const steps = lanes.slice(1).map((y, k) => y - lanes[k]);
+  assert.ok(steps.filter((s) => s === LEG_LANE).length >= steps.length / 2, `lanes ${LEG_LANE} apart: ${steps.join(' ')}`);
+  assert.ok(legCrossings(d) <= 40, `${legCrossings(d)} crossings among the legs`);
+  for (const name of VOICES.filter((v) => v !== 'moog_voice')) {
+    const v = die(name);
+    const n = v.wires.filter((w) => w.from.node === PARAMS).length;
+    assert.ok(legCrossings(v) <= Math.max(4, n), `${name}: ${legCrossings(v)} crossings among ${n} legs`);
+  }
 });
