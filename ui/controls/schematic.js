@@ -88,7 +88,7 @@ import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, un
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { MAX_DEPTH, boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, risen, scene } from '../lib/schematic-scene.js';
-import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
+import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, headPath, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
@@ -109,6 +109,8 @@ import { SchematicFaces } from './schematic-faces.js';
 import { BOARD_CSS, SchematicBoard } from './schematic-board.js';
 import { HIT_OPACITY, ZOOM_MS, ease, surroundOpacity, tween, zoomInView } from '../lib/board-zoom.js';
 
+/** A module's card radius (layout units), the Deck's Wiring boxes' (ui/controls/plane.js `.w-box`). */
+const CARD_RX = 6;
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
 const DRAG_PX = 3;
@@ -147,7 +149,11 @@ const CSS = `
 /* The drawing area. Its size changes only with the element's or the sidebar's collapse. */
 .stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
-.box { fill: var(--signal-panel, #1f232b); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
+.box { fill: var(--signal-card, #161a20); stroke: var(--signal-card-edge, #3d4552); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+/* A card's header band (the Deck's look): its name and module on it. */
+.head { fill: var(--signal-card-head, #212733); pointer-events: none; }
+.open > .head { opacity: var(--title, 1); }
+.muted > .head, .slot.empty > .head { fill: none; }
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
 .composite > .frame { fill: none; stroke: color-mix(in srgb, var(--signal-muted, #8a93a3) 55%, transparent); vector-effect: non-scaling-stroke; }
 .open > .box { fill: var(--signal-bg, #16181d); }
@@ -260,6 +266,8 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 :host([plane]) { --side-width: 0px; }
 :host([plane]) .bar { display: none; }
 :host([data-panning]) .stage { cursor: move; }
+/* The Deck draws no dashed or dotted line (the owner, 2026-11-02): an empty slot and a muted chip keep their colours, solid. */
+:host([plane]) .slot.empty > .box, :host([plane]) .muted > .box { stroke-dasharray: none; }
 :host([plane]) .side { display: none; }
 :host([plane][inspecting]) .side { display: flex; left: auto; right: 12px; top: 12px; bottom: auto; width: 300px; max-height: calc(100% - 24px); z-index: 20;
   border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
@@ -1365,7 +1373,12 @@ export class SignalSchematic extends HTMLElement {
     };
     // ADR 0047 §7 (phase 4): a chip is a package, a body with its pins as short legs on its edges; nothing else on it
     // looks like a pin (the notch at its top, read as one, is gone).
-    rect(node, { class: 'box', rx: 4 * m });
+    rect(node, { class: 'box', rx: CARD_RX * m });
+    // A card (the Deck's Wiring boxes' look, 2026-11-02): a header band with its name and module, within HEADER (no layout changes).
+    if (node.kind === 'instance') {
+      const at = bakedRect(baked, { x: node.x, y: node.y, w: node.w, h: HEADER - 4 });
+      if (at) group.append(el('path', { class: 'head', d: headPath(at, CARD_RX * m, at.y !== bakedPoint(baked, node).y) }));
+    }
     // 2026-10-30: a closed slot's face, its part as on the panel, over this area (ui/controls/schematic-faces.js).
     if (node.face && !isOpen && node.kind === 'instance') {
       const f = node.face;
@@ -1383,7 +1396,7 @@ export class SignalSchematic extends HTMLElement {
     }
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
-      label({ x: node.x + 8, y: node.y + 27 }, 10, { class: slotted ? 'module slot-content' : 'module' }, node.subtitle ?? node.module);
+      label({ x: node.x + 8, y: node.y + 26 }, 9.5, { class: slotted ? 'module slot-content' : 'module' }, node.subtitle ?? node.module);
     }
     // ADR 0037 §7: a slot's "+" pins add an input or an output to its interface (shown in Edit patch only, by the CSS).
     if (slotted && !isOpen && text(9)) {
@@ -1446,7 +1459,7 @@ export class SignalSchematic extends HTMLElement {
       // A composite's and a frame's pins are labelled by the level's labels (drawLabels), in its units as well.
       if (text(9) && !isOpen && !node.composite && node.kind === 'instance' && pin.side !== 'top') {
         // Beside a face, cut to its column (its whole name in its tooltip).
-        label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, node.face ? fitText(pin.name, FACE_LABEL_CHARS) : pin.name);
+        label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3.5 }, 10, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, node.face ? fitText(pin.name, FACE_LABEL_CHARS) : pin.name);
       }
       if (metered && pin.shape === 'signal') {
         // Fixed size whatever its state: only the fill's place and width change. An input's inside its box at the left, an output's at the right.

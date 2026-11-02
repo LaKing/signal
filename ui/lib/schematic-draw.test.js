@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CLIP_PX, HUGE_PIN_PX, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE,
-  bake, bakeHolds, bakeScale, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems,
+  bake, bakeHolds, bakeScale, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, headPath, inBounds, reconcile, sameItems,
 } from './schematic-draw.js';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
@@ -254,4 +254,10 @@ test('a pan at Fit keeps every level’s elements and bake; only matrices move',
       assert.ok(Math.abs(moved.x - was.x - dx) < 1e-9 && moved.k === was.k, 'the matrix moved by the pan');
     });
   }
+});
+
+test('headPath: a card\'s header band, its top corners rounded as its box, its bottom square; square when clipped', () => {
+  assert.equal(headPath({ x: 10, y: 20, width: 100, height: 30 }, 6), 'M10 50V26A6 6 0 0 1 16 20H104A6 6 0 0 1 110 26V50Z');
+  assert.equal(headPath({ x: 10, y: 20, width: 100, height: 30 }, 6, true), 'M10 50V20H110V50Z');
+  assert.equal(headPath({ x: 0, y: 0, width: 8, height: 4 }, 6), 'M0 4V2A2 2 0 0 1 2 0H6A2 2 0 0 1 8 2V4Z', 'never more than half its height');
 });

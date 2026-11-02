@@ -133,6 +133,22 @@ export function bakedRect(baked, r) {
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
+/**
+ * A card's header band (the Deck's look, 2026-11-02): the path of `at`
+ * (`bakedRect`'s `{x, y, width, height}`) with its top corners rounded by
+ * `r` (no more than half its height or width), its bottom square, so it
+ * sits flush in a box of radius `r`. Square on top too when `square` (the
+ * band clipped at the top of the stage).
+ */
+export function headPath(at, r, square = false) {
+  const k = square ? 0 : Math.max(0, Math.min(r, at.height / 2, at.width / 2));
+  const n = (v) => Math.round(v * 100) / 100;
+  const [x0, y0, x1, y1] = [n(at.x), n(at.y), n(at.x + at.width), n(at.y + at.height)];
+  if (!k) return `M${x0} ${y1}V${y0}H${x1}V${y1}Z`;
+  const q = n(k);
+  return `M${x0} ${y1}V${n(y0 + k)}A${q} ${q} 0 0 1 ${n(x0 + k)} ${y0}H${n(x1 - k)}A${q} ${q} 0 0 1 ${x1} ${n(y0 + k)}V${y1}Z`;
+}
+
 /** A segment `a`–`b` clipped to the box (Liang–Barsky), or null. */
 function clipSegment(a, b, box) {
   let t0 = 0;
