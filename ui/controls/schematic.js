@@ -268,6 +268,8 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 :host([data-panning]) .stage { cursor: move; }
 /* The Deck draws no dashed or dotted line (the owner, 2026-11-02): an empty slot and a muted chip keep their colours, solid. */
 :host([plane]) .slot.empty > .box, :host([plane]) .muted > .box { stroke-dasharray: none; }
+/* Its cables' corners and ends round, as the Deck's Wiring cables (\`.w-cable\`). */
+:host([plane]) .wire { stroke-linejoin: round; stroke-linecap: round; }
 :host([plane]) .side { display: none; }
 :host([plane][inspecting]) .side { display: flex; left: auto; right: 12px; top: 12px; bottom: auto; width: 300px; max-height: calc(100% - 24px); z-index: 20;
   border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }

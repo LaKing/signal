@@ -313,7 +313,7 @@ function pairCost(a, b) {
  * those going up (attached on the left below where they leave right) left
  * to right as their start goes down, those going down right to left as
  * theirs does, the better of the two orders of these sets, then
- * neighbouring swaps while one makes fewer crossings.
+ * neighbouring swaps while one makes fewer crossings, then sifting.
  */
 export function orderTracks(groups) {
   const startOf = (g) => {
@@ -344,7 +344,8 @@ export function orderTracks(groups) {
     }
     if (!changed) break;
   }
-  return list;
+  // Then each group to its best track (`siftBand`, as a die's band; 2026-11-02): neighbouring swaps stop in local orders.
+  return siftBand(list, pairCost);
 }
 
 /** A channel holding `n` tracks is this wide (at least MIN_CHANNEL; a margin, `edge`, only as wide as its tracks need). */

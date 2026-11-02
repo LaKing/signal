@@ -157,3 +157,27 @@ test('a die\'s parameter legs: one bundle LEG_LANE apart under the strip, nested
     assert.ok(legCrossings(v) <= Math.max(4, n), `${name}: ${legCrossings(v)} crossings among ${n} legs`);
   }
 });
+
+test('orderTracks: no group would cross fewer wires on another track of its channel (sifted, 2026-11-02)', () => {
+  const cost = (a, b) => a.ends.filter((e) => e.dir === 'R' && e.y > b.y0 && e.y < b.y1).length + b.ends.filter((e) => e.dir === 'L' && e.y > a.y0 && e.y < a.y1).length;
+  const total = (list) => list.reduce((s, g, i) => s + list.slice(i + 1).reduce((t, h) => t + cost(g, h), 0), 0);
+  // A fixed pseudo-random channel: twelve groups, each attached left and right at heights in 0..400.
+  let seed = 7;
+  const next = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648) * 400;
+  const groups = Array.from({ length: 12 }, (_, i) => {
+    const a = Math.round(next());
+    const b = Math.round(next());
+    return { first: i, y0: Math.min(a, b), y1: Math.max(a, b), ends: [{ dir: 'L', y: a }, { dir: 'R', y: b }] };
+  });
+  const order = orderTracks(groups);
+  const best = total(order);
+  for (let i = 0; i < order.length; i++) {
+    for (let j = 0; j < order.length; j++) {
+      const moved = [...order];
+      const [g] = moved.splice(i, 1);
+      moved.splice(j, 0, g);
+      assert.ok(total(moved) >= best, `moving ${g.first} to ${j}: ${total(moved)} < ${best}`);
+    }
+  }
+  assert.deepEqual(orderTracks(groups).map((g) => g.first), order.map((g) => g.first), 'deterministic');
+});
