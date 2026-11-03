@@ -237,3 +237,12 @@ The owner's decisions while trying the plane in Signal.app (`./start.sh --dev`).
 - **The pointer, the same on every layer.** A mouse's wheel zooms about the pointer, over a knob or a fader too; Shift with it pans up and down; a trackpad's two fingers pan and a pinch zooms; the right or the middle button held pans at once, and a right click that does not move opens the context menu on its release. The left button is always the element's own action, never a pan. The Engine's board and the Edit layout editor keep their own.
 - **Knobs and faders.** A click without a move grabs the control: it follows the pointer with no button held until the next click or Escape (`stickyDrag`); the double-click and the held drag are as before.
 - **Setup level.** Every device has a box of its own (the "Other devices" list is gone), the ones in use first. The main window opens maximized.
+
+## Amendment (2026-11-03): the Engine is a layer of the plane *(owner)*
+The owner's decisions after trying the 2026-11-02 Engine. They replace §8's Engine (ADR 0047's board laid on the cube) and the 2026-11-02 amendment's board placement; the rest stands.
+- **One view for every layer.** Stack · Wiring · Control · Engine keep the zoom and the position; a layer changes only what is drawn. The bar has no Project button: the whole project is the Stack layer's.
+- **Control shows every instrument** of the focused Stack at once; a press on one opens it.
+- **The Engine is drawn on the plane** (`ui/lib/plane-engine.js`), not by the embedded `<signal-schematic plane>` board (removed from the Deck; the standalone schematic page stays). Every instrument's instances are cards in the Deck's look inside the instrument's own rectangle, with their signal connections; parameter legs and controls are the Control layer's and are not drawn there.
+- **Composites open by zoom, in place and recursively**: a chip's inside fades in within its card's body as the card grows on screen; the bar shows Layer 1, Layer 2 … while the view is inside one; a chip's context menu has Show Chip.
+- **Editing at the Engine** (`ui/lib/plane-engine-edit.js`): the bar's Edit switch; connect by dragging pin to pin, Delete, Add module…, Remove, through `patch` with the plane's one undo history. Inside a chip the edits are the composite definition's (every instance), as in the schematic.
+- **Lines** on the Deck are solid (no dashes) and turn at 45°, as a circuit board's traces (localStorage `signal.plane.corners` = "round" restores arcs).
