@@ -149,6 +149,8 @@ test('polylines: collinear points dropped, corners rounded', () => {
   assert.deepEqual(simplify([{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }]), [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }]);
   assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]), 'M0 0 L10 0 L10 10');
   assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 4), 'M0 0 L6 0 Q10 0 10 4 L10 10');
+  assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 20 }], 4, 'chamfer'), 'M0 0 L12 0 L20 8 L20 20', 'a 45° cut of 2r');
+  assert.equal(polylinePath([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 4, 'chamfer'), 'M0 0 L5 0 L10 5 L10 10', 'at most half a side');
 });
 
 test('every port and cable of the studio’s Wiring is hit at its own place, at the Wiring level’s scale', async () => {

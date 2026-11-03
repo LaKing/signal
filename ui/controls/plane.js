@@ -147,6 +147,14 @@ function writeZoomLock(on) {
 const LAYERS = [['setup', 'Project'], ['stack', 'Stack'], ['wiring', 'Wiring'], ['control', 'Control'], ['engine', 'Engine']];
 const LAYER_NAME = Object.fromEntries(LAYERS);
 /** The bar's layers: the Project is the Stack layer's, not a button of its own (the owner's, 2026-11-02). */
+/** The lines' corners on the Deck: 'chamfer' (45°, a circuit board's traces) or 'round'; localStorage `signal.plane.corners` overrides. */
+const CORNERS = (() => {
+  try {
+    return globalThis.localStorage?.getItem('signal.plane.corners') === 'round' ? 'round' : 'chamfer';
+  } catch {
+    return 'chamfer';
+  }
+})();
 const BAR_LAYERS = LAYERS.filter(([id]) => id !== 'setup');
 /** The chosen layer's zoom limit out, relative to the focused Stack's fit. */
 const MIN_SCALE = 0.02;
@@ -1489,7 +1497,7 @@ export class SignalPlane extends HTMLElement {
       items.push({ kind: 'box', id, entry: b.entry, x: b.x, y: b.y, w: b.w, h: b.h });
     }
     for (const c of layout.cables) {
-      const path = svg('path', { class: `w-cable k-${c.kind}`, d: polylinePath(c.points, 6), 'data-id': c.id });
+      const path = svg('path', { class: `w-cable k-${c.kind}`, d: polylinePath(c.points, 6, CORNERS), 'data-id': c.id });
       path.append(svg('title', {}, `${c.from} → ${c.to} (${c.kind})${c.b.edge || c.a.edge ? ', through the Stack’s edge' : ''}`));
       cables.append(path);
       for (const j of c.junctions) cables.append(svg('circle', { class: `w-junction k-${c.kind}`, cx: j.x, cy: j.y, r: 3.5 }));
@@ -1677,7 +1685,7 @@ export class SignalPlane extends HTMLElement {
       root.append(svg('text', { class: 'c-ribbon-label', x: x0, y: band.y - 2 }, `params ×${layout.legs.length}`));
     }
     for (const l of layout.legs) {
-      const path = svg('path', { class: `c-leg${l.reads ? ' reads' : ''}`, d: polylinePath(l.points, 3) });
+      const path = svg('path', { class: `c-leg${l.reads ? ' reads' : ''}`, d: polylinePath(l.points, 3, CORNERS) });
       path.append(svg('title', {}, `${control.controls.find((c) => c.id === l.control)?.label || l.address} ⇢ ${l.address}`));
       root.append(path);
       elements.set(l.id, path);
@@ -1689,7 +1697,7 @@ export class SignalPlane extends HTMLElement {
       items.push({ kind: 'via', id: viaId, control: l.control, x: l.via.x, y: l.via.y });
     }
     for (const w of layout.wires) {
-      const path = svg('path', { class: `c-auto k-${w.auto.kind}${w.auto.inner ? ' inner' : ''}${w.auto.source === 'external' ? ' external' : ''}`, d: polylinePath(w.points, 4), 'marker-end': `url(#plane-arrow-${w.auto.kind})` });
+      const path = svg('path', { class: `c-auto k-${w.auto.kind}${w.auto.inner ? ' inner' : ''}${w.auto.source === 'external' ? ' external' : ''}`, d: polylinePath(w.points, 4, CORNERS), 'marker-end': `url(#plane-arrow-${w.auto.kind})` });
       path.append(svg('title', {}, `${w.auto.source === 'external' ? 'External control cable' : 'Automation'}: ${w.auto.from} → ${w.auto.to}${w.auto.inner ? ` (inside ${w.auto.level}: edited in its Engine)` : ''}`));
       root.append(path);
       elements.set(w.id, path);
@@ -1885,7 +1893,7 @@ export class SignalPlane extends HTMLElement {
     const edgeNote = parent ? `, through ${parent.card.name}’s edge` : ', through the instrument’s edge';
     const wires = svg('g', { class: 'e-wires' });
     for (const w of laid.wires) {
-      const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k), ...line(2) }), wireKey(full(w.from), full(w.to)), keyed);
+      const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k, CORNERS), ...line(2) }), wireKey(full(w.from), full(w.to)), keyed);
       path.append(svg('title', {}, `${full(w.from)} → ${full(w.to)} (${w.kind})${w.edge ? edgeNote : ''}`));
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));

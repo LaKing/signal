@@ -305,8 +305,11 @@ export function simplify(points) {
   return out;
 }
 
-/** An orthogonal polyline's SVG path, its corners rounded by up to `r` (plane units). */
-export function polylinePath(points, r = 0) {
+/**
+ * An orthogonal polyline's SVG path, its corners rounded by up to `r` (plane units), or with `corner` 'chamfer' cut at
+ * 45° as a circuit board's traces (the owner's question, 2026-11-03), each cut up to `2r` and at most half of either side.
+ */
+export function polylinePath(points, r = 0, corner = 'round') {
   const f = (n) => Math.round(n * 100) / 100;
   if (!points.length) return '';
   let d = `M${f(points[0].x)} ${f(points[0].y)}`;
@@ -318,12 +321,13 @@ export function polylinePath(points, r = 0) {
       continue;
     }
     const prev = points[i - 1];
-    const a = Math.min(r, Math.hypot(p.x - prev.x, p.y - prev.y) / 2, Math.hypot(next.x - p.x, next.y - p.y) / 2);
+    const a = Math.min(corner === 'chamfer' ? 2 * r : r, Math.hypot(p.x - prev.x, p.y - prev.y) / 2, Math.hypot(next.x - p.x, next.y - p.y) / 2);
     const ux = Math.sign(p.x - prev.x);
     const uy = Math.sign(p.y - prev.y);
     const vx = Math.sign(next.x - p.x);
     const vy = Math.sign(next.y - p.y);
-    d += ` L${f(p.x - ux * a)} ${f(p.y - uy * a)} Q${f(p.x)} ${f(p.y)} ${f(p.x + vx * a)} ${f(p.y + vy * a)}`;
+    if (corner === 'chamfer') d += ` L${f(p.x - ux * a)} ${f(p.y - uy * a)} L${f(p.x + vx * a)} ${f(p.y + vy * a)}`;
+    else d += ` L${f(p.x - ux * a)} ${f(p.y - uy * a)} Q${f(p.x)} ${f(p.y)} ${f(p.x + vx * a)} ${f(p.y + vy * a)}`;
   }
   return d;
 }
