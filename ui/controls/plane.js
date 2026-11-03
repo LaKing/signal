@@ -43,8 +43,10 @@
 //     instrument's edge; no parameter legs or controls (the Control
 //     layer's). The front panels, Wiring and Control drawings fade out and
 //     each instrument's rectangle stays as a faint frame. The view never
-//     changes when the layer does. Composites are one card each for now
-//     (their insides, by zoom, come next).
+//     changes when the layer does. A composite is one card (a chip); zoomed
+//     in, its inside fades in within the card's body, in place and scaled
+//     into it, recursively (`renderInsides`), and the bar names the chips
+//     the view is inside (Layer 1, Layer 2, …).
 // The levels are nested fades of one zoom; no rectangle moves, and zoom
 // never changes the selection.
 // The Stacks are `ui/plane.toml` (served as /project/plane.toml), or one
@@ -77,7 +79,7 @@ import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-contr
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
-import { CARD_RX, engineLayout } from '../lib/plane-engine.js';
+import { CARD_RX, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
@@ -137,6 +139,10 @@ const LAYER_NAME = Object.fromEntries(LAYERS);
 const BAR_LAYERS = LAYERS.filter(([id]) => id !== 'setup');
 /** The chosen layer's zoom limit out, relative to the focused Stack's fit. */
 const MIN_SCALE = 0.02;
+/** The zoom's limit in, relative to the focused Stack's fit: deep enough for chips inside chips at the Engine layer, still bounded. */
+const DEEP_SCALE = 4096;
+/** At most this many chips' insides kept built while off the stage (detached, out of the document); more are dropped and built again when needed. */
+const INSIDES_KEPT = 48;
 
 /** The factor of one zoom key (`plane.zoom_in`, `plane.zoom_out`), about the stage's centre. */
 const KEY_ZOOM = 1.25;
@@ -295,6 +301,9 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .e-edge { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .e-edge.in { fill: var(--signal-meter-rms, #3ecf8e); }
+.e-plain { fill: #1d232c; pointer-events: none; }
+.e-pin-label.halo { stroke: #161a20; stroke-linejoin: round; paint-order: stroke; }
+.e-inside .e-card { fill: #1b2028; }
 .rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .chooser { position: absolute; z-index: 5; width: min(640px, calc(100% - 16px)); overflow: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 4px; border-radius: 6px; background: var(--signal-panel, #1f232b); border: 1px solid #3a414d; box-shadow: 0 6px 20px #0008; }
 .chooser-title { grid-column: 1 / -1; padding: 2px 6px 4px; color: var(--signal-muted, #8a93a3); }
@@ -1372,7 +1381,7 @@ export class SignalPlane extends HTMLElement {
     this.renderWiring(fades);
     this.renderControl(fades);
     this.renderEngine(fades);
-    this.renderBar(level, this.layer ? this.scaleRatio() : r);
+    this.renderBar(level, this.layer ? this.scaleRatio() : r, level === 'engine' ? this.chipsNow() : []);
   }
 
   /** The Setup level's text sizes at scale `k` (`textSizes`: readable at the Setup's fit, never past the room the layout gives them), as custom properties every level's text reads. */
@@ -1773,53 +1782,26 @@ export class SignalPlane extends HTMLElement {
     const root = svg('g', { transform: 'translate(-2 -2)' });
     const items = [];
     const elements = new Map();
+    // The chips (composite cards) by id, the top level's in order, and the insides built (`renderInsides`).
+    s.engineChips = new Map();
+    s.engineTopChips = [];
+    s.insidesBuilt = new Set();
     for (const e of engines.layouts) {
       const g = svg('g', { 'data-entry': e.entry });
       const r = e.rect;
       g.append(svg('rect', { class: 'e-frame', x: r.x + 2, y: r.y + 2, width: r.w - 4, height: r.h - 4, rx: 6 }));
       g.append(svg('text', { class: 'e-title', x: r.x + 16, y: r.y + 18 }, `${String(e.title).toUpperCase()}${e.cards.length ? '' : ' · NO ENGINE'}`));
-      const k = e.scale;
-      const wires = svg('g', { class: 'e-wires' });
-      for (const w of e.wires) {
-        const id = `${e.entry}|${w.id}`;
-        const path = svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k) });
-        path.append(svg('title', {}, `${w.from} → ${w.to} (${w.kind})${w.edge ? ', through the instrument’s edge' : ''}`));
-        wires.append(path);
-        for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
-        elements.set(id, path);
-        items.push({ id, points: w.points });
-      }
-      g.append(wires);
-      for (const c of e.cards) {
-        const id = `${e.entry}|${c.id}`;
-        // A composite is one card for now; step 2 lays its inside out in `c.body` (ui/lib/plane-engine.js `layLevel`).
-        const card = svg('g', { class: `e-node${c.composite ? ' composite' : ''}`, 'data-name': c.name });
-        card.append(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k }));
-        // The header band inset by half the card's edge, as the schematic's cards.
-        card.append(svg('path', { class: 'e-head', d: headPath({ x: c.head.x + 0.75 * k, y: c.head.y + 0.75 * k, width: c.head.w - 1.5 * k, height: c.head.h - 0.75 * k }, Math.max(0, (CARD_RX - 0.75) * k)) }));
-        card.append(svg('text', { class: 'e-name', x: c.x + 8 * k, y: c.y + 14 * k, 'font-size': 12 * k }, c.name));
-        card.append(svg('text', { class: 'e-module', x: c.x + 8 * k, y: c.y + 26 * k, 'font-size': 9.5 * k }, c.module));
-        card.append(svg('title', {}, `${c.name}: ${c.module}${c.composite ? ' (a composite: zooming into its inside comes next)' : ''}`));
-        g.append(card);
-        elements.set(id, card);
-        items.push({ id, x: c.x, y: c.y, w: c.w, h: c.h });
-      }
-      for (const p of e.pins) {
-        const id = `${e.entry}|${p.id}`;
-        const dot = svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k });
-        dot.append(svg('title', {}, `${p.address} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
-        const label = svg('text', { class: 'e-pin-label', x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end' }, p.name);
-        g.append(dot, label);
-        elements.set(id, dot);
-        items.push({ id, x: p.x, y: p.y });
-      }
+      const add = (id, element, item) => {
+        const key = `${e.entry}|${id}`;
+        elements.set(key, element);
+        items.push({ id: key, ...item });
+      };
+      this.drawLevel(s, g, e, { entry: e.entry, parent: null, add });
       for (const p of e.edges) {
-        const id = `${e.entry}|${p.id}`;
         const dot = svg('circle', { class: `e-edge ${p.side}`, cx: p.x, cy: p.y, r: 5 });
         dot.append(svg('title', {}, p.side === 'in' ? `${p.from} → ${p.address}: through the instrument’s edge` : `${p.address} → ${p.to}: through the instrument’s edge`));
         g.append(dot);
-        elements.set(id, dot);
-        items.push({ id, x: p.x, y: p.y });
+        add(p.id, dot, { x: p.x, y: p.y });
       }
       root.append(g);
     }
@@ -1827,6 +1809,71 @@ export class SignalPlane extends HTMLElement {
     s.engineItems = items;
     s.engineElements = elements;
     s.engineShown = null;
+  }
+
+  /**
+   * One level of an Engine drawn into `g` (`layLevel`'s, plane units): its wires, its cards and their pins, each with a hover
+   * title. `parent`: the chip it is the inside of (null at the instrument's own level); `add(id, element, item)`: the culling's
+   * registration (the instrument's level only). Each composite card is registered as a chip (`s.engineChips`): its plain body
+   * shows until its inside, laid out and drawn when first revealed (`renderInsides`), fades in over it. Inside a chip the lines
+   * are drawn at the level's scale (the plane's transform is the stage's CSS one, which `non-scaling-stroke` does not undo).
+   */
+  drawLevel(s, g, laid, { entry, parent, add = null }) {
+    const k = laid.scale;
+    const prefix = parent?.address ?? '';
+    // A line's width at this level: the stylesheet's (plane units) at the instrument's level, at scale inside a chip.
+    const line = (width) => (parent ? { style: `stroke-width: ${+(width * k).toPrecision(4)}` } : {});
+    // An address as the person knows it: inside the chip /synth, `fenv.gate` is /synth/fenv.gate and its input `gate` /synth.gate.
+    const full = (a) => {
+      if (!parent) return a;
+      const text = String(a);
+      if (text.startsWith('@inputs.') || text.startsWith('@outputs.')) return `${prefix}.${text.slice(text.indexOf('.') + 1)}`;
+      return `${prefix}/${text.replace(/^\//, '')}`;
+    };
+    const edgeNote = parent ? `, through ${parent.card.name}’s edge` : ', through the instrument’s edge';
+    const wires = svg('g', { class: 'e-wires' });
+    for (const w of laid.wires) {
+      const path = svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k), ...line(2) });
+      path.append(svg('title', {}, `${full(w.from)} → ${full(w.to)} (${w.kind})${w.edge ? edgeNote : ''}`));
+      wires.append(path);
+      for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
+      add?.(w.id, path, { points: w.points });
+    }
+    g.append(wires);
+    const composites = new Set();
+    for (const c of laid.cards) {
+      const card = svg('g', { class: `e-node${c.composite ? ' composite' : ''}`, 'data-name': c.name });
+      card.append(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k, ...line(c.composite ? 2 : 1.5) }));
+      // The header band inset by half the card's edge, as the schematic's cards.
+      card.append(svg('path', { class: 'e-head', d: headPath({ x: c.head.x + 0.75 * k, y: c.head.y + 0.75 * k, width: c.head.w - 1.5 * k, height: c.head.h - 0.75 * k }, Math.max(0, (CARD_RX - 0.75) * k)) }));
+      card.append(svg('text', { class: 'e-name', x: c.x + 8 * k, y: c.y + 14 * k, 'font-size': 12 * k }, c.name));
+      card.append(svg('text', { class: 'e-module', x: c.x + 8 * k, y: c.y + 26 * k, 'font-size': 9.5 * k }, c.module));
+      const address = `${prefix}/${c.name}`;
+      const count = c.composite ? (this.graph?.composites?.[c.module]?.instances?.length ?? 0) : 0;
+      card.append(svg('title', {}, `${address}: ${c.module}${c.composite ? ` (a chip of ${count} instances: zoom in to see its inside; its context menu shows it whole)` : ''}`));
+      if (c.composite) {
+        composites.add(c.id);
+        // The plain body: a faint panel where the inside will show, fading out as it comes in.
+        const plain = svg('rect', { class: 'e-plain', x: c.body.x, y: c.body.y, width: c.body.w, height: c.body.h, rx: 3 * k });
+        card.append(plain);
+        const id = parent ? `${parent.id}/${c.id}` : c.id;
+        card.dataset.chip = id;
+        const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, parent, children: [], laid: undefined, group: null };
+        s.engineChips.set(id, chip);
+        (parent ? parent.children : s.engineTopChips).push(chip);
+      }
+      g.append(card);
+      add?.(c.id, card, { x: c.x, y: c.y, w: c.w, h: c.h });
+    }
+    for (const p of laid.pins) {
+      const dot = svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) });
+      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
+      // A chip's pin labels stay over its inside, kept legible by a halo of the card's colour.
+      const halo = composites.has(p.card);
+      const label = svg('text', { class: `e-pin-label${halo ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(halo ? { 'stroke-width': 2.5 * k } : {}) }, p.name);
+      g.append(dot, label);
+      add?.(p.id, dot, { x: p.x, y: p.y });
+    }
   }
 
   renderEngine(fades) {
@@ -1838,6 +1885,89 @@ export class SignalPlane extends HTMLElement {
     show(s.engineSvg);
     opacity(s.engineSvg, fades.deep);
     this.cull(s, s.engineItems, s.engineElements, 'engineShown');
+    this.renderInsides(s);
+  }
+
+  /** A chip's inside laid out (`insideOf`), once: kept on the chip, which lives as long as the Engine's layout (its key: the graph, the Stack's layout, who holds what). */
+  insideFor(chip) {
+    if (chip.laid === undefined) chip.laid = insideOf({ graph: this.graph, card: chip.card, pins: chip.pins, scale: chip.scale });
+    return chip.laid;
+  }
+
+  /**
+   * The chips' insides by zoom (no layout read, no layout per frame): a chip on the stage whose body is wide enough on screen
+   * (`revealShare`) has its inside laid out and drawn once, kept, and put in its card at that opacity while its plain body fades out;
+   * recursively, the chips inside it. The others' insides are taken out of the document (a few kept built, INSIDES_KEPT), so
+   * what is drawn stays bounded by what is on the stage.
+   */
+  renderInsides(s) {
+    const rect = this.focusRect();
+    if (!rect || !s.engineTopChips) return;
+    const v = this.view;
+    const margin = 24;
+    const wanted = new Set();
+    const visit = (chip) => {
+      const c = chip.card;
+      const share = revealShare(c.body.w * v.k);
+      const x = (rect.x + c.x) * v.k + v.x;
+      const y = (rect.y + c.y) * v.k + v.y;
+      const on = share > 0 && x < this.viewport.w + margin && x + c.w * v.k > -margin && y < this.viewport.h + margin && y + c.h * v.k > -margin;
+      opacity(chip.plain, on ? 1 - share : 1);
+      if (!on || !this.insideFor(chip)) return;
+      if (!chip.group) {
+        chip.group = svg('g', { class: 'e-inside' });
+        this.drawLevel(s, chip.group, chip.laid, { entry: chip.entry, parent: chip });
+      }
+      // Kept in order of use: the least recently drawn are dropped first.
+      s.insidesBuilt.delete(chip);
+      s.insidesBuilt.add(chip);
+      wanted.add(chip);
+      // Under the card's own pins and labels (drawn after the cards), over its body.
+      if (chip.group.parentNode !== chip.element) chip.element.append(chip.group);
+      opacity(chip.group, share);
+      for (const child of chip.children) visit(child);
+    };
+    for (const chip of s.engineTopChips) visit(chip);
+    let spare = s.insidesBuilt.size - wanted.size;
+    for (const chip of [...s.insidesBuilt]) {
+      if (wanted.has(chip)) continue;
+      if (chip.group?.parentNode) chip.group.remove();
+      if (spare > INSIDES_KEPT && s.insidesBuilt.has(chip)) spare -= this.dropInside(s, chip);
+    }
+  }
+
+  /** A chip's inside dropped (built again when next revealed), with the chips inside it; how many built insides that dropped. */
+  dropInside(s, chip) {
+    let dropped = s.insidesBuilt.delete(chip) ? 1 : 0;
+    for (const child of chip.children) {
+      dropped += this.dropInside(s, child);
+      s.engineChips.delete(child.id);
+    }
+    chip.children = [];
+    chip.group = null;
+    return dropped;
+  }
+
+  /** The chips the view is inside (`chipPath`, from the laid-out cards, no DOM): the stage's centre in a fully revealed chip's body, deeper and deeper. */
+  chipsNow() {
+    const s = this.stacks.get(this.focused);
+    const rect = this.focusRect();
+    if (this.level() !== 'engine' || !s?.engines || !s.engineChips || !rect || !this.viewport.w) return [];
+    const p = toPlane(this.view, { x: this.viewport.w / 2, y: this.viewport.h / 2 });
+    const cards = s.engines.layouts.flatMap((e) => e.cards);
+    const path = chipPath(cards, { x: p.x - rect.x, y: p.y - rect.y }, this.view.k, (card, id) => {
+      const chip = s.engineChips.get(id);
+      return chip ? this.insideFor(chip) : null;
+    });
+    return path.map((step) => s.engineChips.get(step.id));
+  }
+
+  /** The view travels to show a chip (`part`: its `body`, the Layer N buttons; else the whole card, Show Chip). */
+  showChip(chip, part = null) {
+    const rect = this.focusRect();
+    if (!chip || !rect) return;
+    const r = part === 'body' ? chip.card.body : chip.card;
+    this.travel(fitAll({ x: rect.x + r.x, y: rect.y + r.y, w: r.w, h: r.h }, this.viewport), this.layer ? 0 : LIFT);
   }
 
   /** Docks the level bar (the breadcrumb, the zoom, Edit layout) in `host`, such as the app's toolbar, with its styles. */
@@ -1849,21 +1979,33 @@ export class SignalPlane extends HTMLElement {
     this.bar.classList.add('docked');
   }
 
-  renderBar(level, r) {
+  /** The bar: the layers (with, inside chips at the Engine, a Layer N button per chip, `chips` outermost first), the zoom, the lock, Edit. */
+  renderBar(level, r, chips = []) {
     const instruments = this.instrumentRects().length > 0;
-    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}`;
+    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}|${chips.map((c) => c.id).join(' ')}`;
     if (key !== this.barKey) {
       this.barKey = key;
       // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
       const layers = html('div', { className: 'layers', role: 'group', ariaLabel: 'Layers' });
       for (const [id, label] of BAR_LAYERS) {
         const b = html('button', { type: 'button', className: 'layer', textContent: label, title: this.layerTitle(id) });
-        const here = id === level || (id === 'stack' && level === 'setup');
+        const deeper = id === 'engine' && chips.length > 0;
+        const here = (id === level && !deeper) || (id === 'stack' && level === 'setup');
         b.setAttribute('aria-current', String(here));
         b.disabled = id !== 'stack' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
-        if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
+        // Inside a chip, Engine travels back out to the instrument whole.
+        if (deeper) b.addEventListener('click', () => this.outOfChips(chips[0]));
+        else if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
         layers.append(b);
       }
+      // Inside chips (derived from the view): Layer 1 the outermost, the deepest marked; a click fits that chip's body on the stage.
+      chips.forEach((chip, i) => {
+        const deepest = i === chips.length - 1;
+        const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${chip.card.name} (${chip.address})` });
+        b.setAttribute('aria-current', String(deepest));
+        b.addEventListener('click', () => this.showChip(chip, 'body'));
+        layers.append(b);
+      });
       this.levelText = html('span', { className: 'level' });
       const zoom = html('span', { className: 'zoom' });
       const step = (text, factor, title) => {
@@ -1892,6 +2034,15 @@ export class SignalPlane extends HTMLElement {
     }
     const text = `${r ? r.toFixed(2) : '0'}×`;
     if (this.levelText.textContent !== text) this.levelText.textContent = text;
+  }
+
+  /** From inside a chip back out to the Engine of its instrument, whole on the stage (chosen layer), or at the engine band's end (coupled zoom). */
+  outOfChips(chip) {
+    if (!chip) return;
+    if (this.layer) return this.fitOnScreen(this.focused, chip.entry);
+    this.opened = chip.entry;
+    this.barKey = null;
+    this.enterEngine();
   }
 
   /** A layer button's title: what it shows. */
@@ -2268,7 +2419,7 @@ export class SignalPlane extends HTMLElement {
    * The plane's items in the app's context menu (`contextMenu`, as
    * ui/app/app.js asks every element on the click's path): on a front
    * panel's card at the Stack level, Edit layout, and in Signal.app the
-   * card's Move to items; Show Instrument and Show Stack on every layer; else none.
+   * card's Move to items; at the Engine, Show Chip on a chip's card; Show Instrument and Show Stack on every layer; else none.
    */
   contextMenu(event) {
     const path = event.composedPath?.() ?? [];
@@ -2286,9 +2437,14 @@ export class SignalPlane extends HTMLElement {
     const s = this.stacks.get(name);
     const entry = [...(s?.cards ?? [])].find(([, element]) => path.includes(element))?.[0] ?? null;
     const shows = [];
+    // At the Engine, on a chip's card (the innermost card under the click): Show Chip first.
+    const node = level === 'engine' && name === this.focused ? path.find((n) => n?.classList?.contains?.('e-node')) : null;
+    const chip = node?.dataset?.chip ? s?.engineChips?.get(node.dataset.chip) : null;
+    if (chip) shows.push({ id: 'show-chip', label: 'Show Chip' }, { id: 'separator' });
     if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
     shows.push({ id: 'show-stack', label: 'Show Stack' });
     const show = (id) => {
+      if (id === 'show-chip') return this.showChip(chip), true;
       if (id === 'show-instrument') return this.fitOnScreen(name, entry), true;
       if (id === 'show-stack') return this.fitOnScreen(name, null), true;
       return false;
@@ -2766,7 +2922,7 @@ export class SignalPlane extends HTMLElement {
     if (this.layer) {
       // The layer is chosen alone: the zoom only scales, about `at` (no focus, no instrument opens, no fit stop).
       const fit = this.fitK() ?? fitScale(this.layout?.bounds ?? { w: 1, h: 1 }, this.viewport);
-      const k = Math.min(fit * 64, Math.max(fit * MIN_SCALE, this.view.k * factor));
+      const k = Math.min(fit * DEEP_SCALE, Math.max(fit * MIN_SCALE, this.view.k * factor));
       this.lift = 0;
       this.setView(zoomAbout(this.view, k / this.view.k, at));
       return;
@@ -2775,7 +2931,8 @@ export class SignalPlane extends HTMLElement {
     if (this.ratio() < FOCUS_BAND[0]) this.focusUnder(at);
     const fit = this.fitK();
     const r0 = this.scaleRatio();
-    const step = zoomStep({ view: this.view, opened: this.opened, lift: this.lift }, factor, at, { fit, rects: this.instrumentRects(), maxR: this.engineBandNow()[1] });
+    // Past the engine band the zoom goes on, into the chips (still the Engine level), as far as DEEP_SCALE.
+    const step = zoomStep({ view: this.view, opened: this.opened, lift: this.lift }, factor, at, { fit, rects: this.instrumentRects(), maxR: Math.max(this.engineBandNow()[1], DEEP_SCALE + LIFT) });
     if (step.opened !== this.opened) {
       this.opened = step.opened;
       this.barKey = null;

@@ -18,10 +18,13 @@
 //     `assignTracks` gives tracks); and the
 //     connections that cross the instrument's edge, entering and leaving at
 //     the height of the Wiring layer's port of the same connection.
-// Composites are one card each here. Step 2 opens them: `layLevel` lays out
-// any level (`{instances, connections}`) in any area, so a composite's
-// inside (`graph.composites[card.module]`) is laid out in its card's `body`
-// by the same function, with its frame's inputs and outputs as the edges.
+// Composites are one card each; zooming in reveals a composite's inside in
+// place (`insideOf`): `layLevel` lays out any level (`{instances,
+// connections}`) in any area, so the inside (`graph.composites[module]`) is
+// laid out in its card's `body` by the same function, scaled into it, with
+// the composite's inputs and outputs entering and leaving at its card's
+// pins' heights; recursively, a composite inside one reveals the same way.
+// `chipPath` names the composites the view is inside (the bar's Layer N).
 // Presentation only (rule 4): nothing is stored. Deterministic: instances
 // and connections in source order, fixed tie-breaks. Pure; no DOM.
 
@@ -58,11 +61,13 @@ const OWN_PORT = /^\/?[^/.]+\.[^/.]+$/;
  * (`Map(address → y)`: where a connection from outside enters at the
  * area's left edge, keyed by the inner input it reaches, and where one
  * leaves at the right edge, keyed by the inner output), `frame` (the
- * rectangle whose edges they are; default `area`). Returns `{scale, cards,
+ * rectangle whose edges they are; default `area`), `joinEdges` (wires
+ * entering from one source are one net, a fan-out; default each its own).
+ * Returns `{scale, cards,
  * pins, wires, edges, lanes}`, plane units:
  *   - a card `{id, name, module, composite, x, y, w, h, head, body,
- *     column, ins, outs}`; `body` the area below its header, where step 2
- *     lays out a composite's inside;
+ *     column, ins, outs}`; `body` the area below its header, where a
+ *     composite's inside is laid out (`insideOf`);
  *   - a pin `{id, card, name, address, side, kind, parameter, connected,
  *     x, y}`;
  *   - a wire `{id, index, from, to, kind, route, points, junctions}`:
@@ -84,7 +89,7 @@ function strip({ reserved, ...laid }) {
 }
 
 /** One pass of `layLevel`: `reserve` the lanes kept above and below the cards (`{over, feedback}`), or null for as many as might be needed. */
-function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), frame = area }, reserve) {
+function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), frame = area, joinEdges = false }, reserve) {
   const all = level?.instances ?? [];
   const wanted = names ? new Set(names) : null;
   const instances = all.filter((i) => !wanted || wanted.has(i.name));
@@ -159,8 +164,8 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   let overs = 0;
   let backs = 0;
   for (const w of wires) {
-    // Wires entering from one outside source keep apart: each its own edge pin, its own net.
-    w.srcKey = w.edge === 'in' ? `e ${w.c.to}` : `s ${w.c.from}`;
+    // Wires entering from one outside source keep apart: each its own edge pin, its own net (`joinEdges`: one net per source, a composite's input fanning out).
+    w.srcKey = w.edge === 'in' && !joinEdges ? `e ${w.c.to}` : `s ${w.c.from}`;
     w.dstKey = `d ${w.c.to}`;
     if (w.b === w.a + 1) net(w.a, w.srcKey);
     else {
@@ -253,7 +258,9 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     }
   });
   // Ends: an inner pin, or the frame's edge at the Wiring's height (else spread down the frame, in order).
-  const clampY = (y) => Math.min(frame.y + frame.h - 4, Math.max(frame.y + 4, y));
+  // Kept off the frame's corners: 4 plane units, less in a small frame (a chip's card, deep inside).
+  const inset = Math.min(4, frame.h / 8);
+  const clampY = (y) => Math.min(frame.y + frame.h - inset, Math.max(frame.y + inset, y));
   const spread = () => {
     let k = 0;
     return () => frame.y + TITLE + (k++ + 0.5) * 2 * PU;
@@ -438,4 +445,89 @@ export function engineLayout({ entry, rect, names = [], graph, edgeIns = new Map
   const level = graph?.top ?? { instances: [], connections: [] };
   const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, frame: rect }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0 } };
   return { entry, rect, area, title, ...laid };
+}
+
+/** A composite's inside fades in as its card's body grows on screen: from the first width to the second (screen px). */
+export const REVEAL = Object.freeze([240, 480]);
+/** How deep `chipPath` looks (a guard: a graph never nests itself). */
+export const MAX_DEPTH = 16;
+/** A pin label's width by its name's length, in the cards' units (the 9 px label at the pin ± 6). */
+const LABEL_CHAR = 5.2;
+const LABEL_PAD = 8;
+
+/** How far a composite's inside is revealed when its card's body is `px` wide on screen: 0 to 1 over REVEAL, a smoothstep. */
+export function revealShare(px) {
+  const [a, b] = REVEAL;
+  if (!(px > a)) return 0;
+  if (px >= b) return 1;
+  const t = (px - a) / (b - a);
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * A composite card's inside laid out in its body (plane units): `graph`
+ * (its `composites[card.module]`: instances, connections, and the inputs,
+ * parameters and outputs that lead in and out), `card` and `pins` (the
+ * level's where the card was laid out, `layLevel`'s), `scale` (that
+ * level's). The inside is `layLevel`'s, in the body less the room the
+ * card's pin labels take, so nothing of the card moves; a wire from an input
+ * (or a driven parameter) enters at its pin's height on the card's left
+ * edge, a wire to an output leaves at its pin's height on the right edge,
+ * and an input feeding several inner ports is one net. Returns `layLevel`'s
+ * with `{module, area, frame}`, or null when the graph has no such
+ * composite. Pure; the same arguments give the same inside.
+ */
+export function insideOf({ graph, card, pins = [], scale = 1 }) {
+  const def = graph?.composites?.[card?.module];
+  if (!def || !card.body) return null;
+  const mine = pins.filter((p) => p.card === card.id);
+  const connections = [...(def.connections ?? [])];
+  const edgeIns = new Map();
+  const edgeOuts = new Map();
+  for (const p of mine) {
+    if (p.side === 'in') {
+      const from = (p.parameter ? def.parameters : def.inputs)?.find((x) => x.name === p.name);
+      for (const to of from?.to ?? []) {
+        connections.push({ from: `@inputs.${p.name}`, to });
+        if (!edgeIns.has(to)) edgeIns.set(to, p.y);
+      }
+    } else {
+      const out = def.outputs?.find((x) => x.name === p.name);
+      if (!out?.from) continue;
+      connections.push({ from: out.from, to: `@outputs.${p.name}` });
+      if (!edgeOuts.has(out.from)) edgeOuts.set(out.from, p.y);
+    }
+  }
+  // The body less the pin labels' room on each side (at most 30% of it each).
+  const labels = (side) => Math.max(0, ...mine.filter((p) => p.side === side).map((p) => (LABEL_PAD + LABEL_CHAR * String(p.name).length) * scale));
+  const b = card.body;
+  const left = Math.min(0.3 * b.w, Math.max(0, labels('in') - (b.x - card.x)));
+  const right = Math.min(0.3 * b.w, Math.max(0, labels('out') - (card.x + card.w - (b.x + b.w))));
+  const area = { x: b.x + left, y: b.y, w: Math.max(1e-6, b.w - left - right), h: Math.max(1e-6, b.h) };
+  const frame = { x: card.x, y: card.y, w: card.w, h: card.h };
+  const laid = layLevel({ level: { instances: def.instances ?? [], connections }, area, edgeIns, edgeOuts, frame, joinEdges: true });
+  return { module: card.module, area, frame, ...laid };
+}
+
+/**
+ * The composites the view is inside (the bar's Layer N; derived from the
+ * view, no state of its own): of `cards` (a level's, plane units) the
+ * composite whose body holds plane point `p` and is at least `full` screen
+ * px wide at scale `k` (fully revealed), then of its inside
+ * (`insideFor(card, id)`: the laid inside, or null) the same, deeper.
+ * `[{id, card, laid}]`, outermost first; `id` the cards' ids joined by `/`.
+ */
+export function chipPath(cards, p, k, insideFor, full = REVEAL[1]) {
+  const path = [];
+  let level = cards;
+  while (level && path.length < MAX_DEPTH) {
+    const card = level.find((c) => c.composite && c.body && c.body.w * k >= full && p.x >= c.body.x && p.x <= c.body.x + c.body.w && p.y >= c.body.y && p.y <= c.body.y + c.body.h);
+    if (!card) break;
+    const id = path.length ? `${path.at(-1).id}/${card.id}` : card.id;
+    const laid = insideFor(card, id);
+    if (!laid) break;
+    path.push({ id, card, laid });
+    level = laid.cards;
+  }
+  return path;
 }

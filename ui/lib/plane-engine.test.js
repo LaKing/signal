@@ -16,7 +16,7 @@ import { assignInstruments, edgePins, stackMembers } from './plane-instruments.j
 import { pinPlaces, stackLayout } from './plane-layout.js';
 import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { engineOf } from './plane-control.js';
-import { engineLayout, layLevel, orderedTracks } from './plane-engine.js';
+import { REVEAL, chipPath, engineLayout, insideOf, layLevel, orderedTracks, revealShare } from './plane-engine.js';
 import { PU } from './plate.js';
 
 const root = new URL('../../', import.meta.url);
@@ -213,4 +213,149 @@ test('odd graphs: a port inside an instance is not its own, two wires entering f
   assert.ok(ea.points[1].x !== ec.points[1].x || sa[1] < sc[0] || sc[1] < sa[0], 'never joined on one vertical');
   assert.deepEqual([ea.junctions, ec.junctions], [[], []]);
   for (const w of laid.wires) for (const p of w.points) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
+});
+
+// Step 2: a composite's inside, revealed by zoom in its card's body (the owner's, 2026-11-03).
+
+test('a chip’s inside: every inner instance inside the card’s body, apart; the edges at the card’s pins’ heights; an input fanning out one net', () => {
+  const { engines } = studio();
+  let chips = 0;
+  for (const e of engines) for (const card of e.cards.filter((c) => c.composite)) {
+    chips++;
+    const inside = insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale });
+    const def = STUDIO.composites[card.module];
+    assert.deepEqual(inside.cards.map((c) => c.name).sort(), def.instances.map((i) => i.name).sort(), `${card.name}: every inner instance placed`);
+    assert.ok(inside.scale < e.scale, `${card.name}: scaled into the body`);
+    for (const c of inside.cards) assert.ok(within(c, card.body), `${card.name}: ${c.name} inside the body`);
+    for (let i = 0; i < inside.cards.length; i++) for (let j = i + 1; j < inside.cards.length; j++) assert.ok(!overlap(inside.cards[i], inside.cards[j]), `${card.name}: ${inside.cards[i].name} and ${inside.cards[j].name} apart`);
+    const pins = e.pins.filter((p) => p.card === card.id);
+    for (const edge of inside.edges) {
+      const name = edge.side === 'in' ? edge.from.slice('@inputs.'.length) : edge.to.slice('@outputs.'.length);
+      const pin = pins.find((p) => p.side === edge.side && p.name === name);
+      assert.ok(pin, `${card.name}: ${edge.id} has its pin`);
+      assert.equal(edge.y, pin.y, `${card.name}: ${edge.id} at its pin’s height`);
+      assert.equal(edge.x, edge.side === 'in' ? card.x : card.x + card.w, `${card.name}: ${edge.id} on the card’s edge`);
+    }
+    for (const w of inside.wires) for (let i = 1; i < w.points.length; i++) {
+      const [p, q] = [w.points[i - 1], w.points[i]];
+      assert.ok(within({ x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(p.x - q.x), h: Math.abs(p.y - q.y) }, card), `${card.name}: ${w.id} inside the card`);
+      for (const c of inside.cards) assert.ok(!crosses(p, q, c), `${card.name}: ${w.from} → ${w.to} passes over ${c.name}`);
+    }
+  }
+  assert.equal(chips, 9, 'the synth, the seven drum voices and the echo');
+  const synth = engines.find((e) => e.entry === 'card:mono-synth');
+  const voice = synth.cards.find((c) => c.name === 'synth');
+  const inside = insideOf({ graph: STUDIO, card: voice, pins: synth.pins, scale: synth.scale });
+  assert.deepEqual(inside.edges.filter((x) => x.side === 'in').map((x) => `${x.from} ${x.address}`), ['@inputs.gate fenv.gate', '@inputs.gate aenv.gate', '@inputs.hz glide.in', '@inputs.hz hz_prev.in', '@inputs.velocity velamp.b']);
+  assert.deepEqual(inside.edges.filter((x) => x.side === 'out').map((x) => x.address), ['volume.out']);
+  // The gate's two branches: one net, so one track in the edge channel (no two wires along one another).
+  const gate = inside.wires.filter((w) => w.from === '@inputs.gate');
+  assert.equal(gate.length, 2);
+  assert.equal(gate[0].points[1].x, gate[1].points[1].x, 'the gate’s branches share their track');
+  // The kick's velocity is a parameter its sequencer drives: its inside's edge enters at that pin, to every inner port it sets.
+  const drums = engines.find((e) => e.entry === 'card:rhythm-composer');
+  const kick = drums.cards.find((c) => c.name === 'kick');
+  const kickInside = insideOf({ graph: STUDIO, card: kick, pins: drums.pins, scale: drums.scale });
+  const velocity = drums.pins.find((p) => p.card === kick.id && p.name === 'velocity');
+  const targets = STUDIO.composites.kick909.parameters.find((p) => p.name === 'velocity').to;
+  assert.deepEqual(kickInside.edges.filter((x) => x.from === '@inputs.velocity').map((x) => x.address), targets);
+  for (const x of kickInside.edges.filter((y) => y.from === '@inputs.velocity')) assert.equal(x.y, velocity.y);
+  // No such composite: no inside.
+  assert.equal(insideOf({ graph: STUDIO, card: { ...kick, module: 'nope' }, pins: drums.pins }), null);
+});
+
+/** A graph with a composite inside a composite: `fx` (an `outer`: a filter `inner` between two gains) at the top. */
+function nested() {
+  const inst = (name, module, ins, outs, composite = false) => ({
+    name,
+    address: name,
+    module,
+    composite,
+    parameters: [{ name: 'gain', address: `${name}.gain` }],
+    ports: [...ins.map((p) => ({ name: p, address: `${name}.${p}`, direction: 'in', shape: 'signal', kind: 'audio', rate: 1 })), ...outs.map((p) => ({ name: p, address: `${name}.${p}`, direction: 'out', shape: 'signal', kind: 'audio', rate: 1 }))],
+  });
+  const top = (i) => ({ ...i, address: `/${i.name}`, ports: i.ports.map((p) => ({ ...p, address: `/${p.address}` })) });
+  return {
+    top: {
+      instances: [top(inst('src', 'std.osc', [], ['out'])), top(inst('fx', 'outer', ['in'], ['out'], true))],
+      connections: [{ from: '/src.out', to: '/fx.in' }],
+    },
+    composites: {
+      outer: {
+        inputs: [{ name: 'in', to: ['pre.in'] }],
+        outputs: [{ name: 'out', from: 'post.out' }],
+        parameters: [],
+        instances: [inst('pre', 'std.gain', ['in'], ['out']), inst('inner', 'inner', ['in'], ['out'], true), inst('post', 'std.gain', ['in'], ['out'])],
+        connections: [{ from: 'pre.out', to: 'inner.in' }, { from: 'inner.out', to: 'post.in' }],
+      },
+      inner: {
+        inputs: [{ name: 'in', to: ['lp.in', 'hp.in'] }],
+        outputs: [{ name: 'out', from: 'mix.out' }],
+        parameters: [],
+        instances: [inst('lp', 'std.lp', ['in'], ['out']), inst('hp', 'std.hp', ['in'], ['out']), inst('mix', 'std.mix', ['a', 'b'], ['out'])],
+        connections: [{ from: 'lp.out', to: 'mix.a' }, { from: 'hp.out', to: 'mix.b' }],
+      },
+    },
+  };
+}
+
+test('recursive: a chip inside a chip reveals in its own card’s body, its edges at that card’s pins, however small; deterministic', () => {
+  const graph = nested();
+  // A roomy level, and one so small that the inner chip's card is a few plane units tall.
+  for (const area of [{ x: 0, y: 0, w: 1000, h: 400 }, { x: 0, y: 0, w: 60, h: 24 }]) {
+    const top = layLevel({ level: graph.top, area });
+    const fx = top.cards.find((c) => c.name === 'fx');
+    const outer = insideOf({ graph, card: fx, pins: top.pins, scale: top.scale });
+    const inner = outer.cards.find((c) => c.name === 'inner');
+    assert.equal(inner.composite, true);
+    const deep = insideOf({ graph, card: inner, pins: outer.pins, scale: outer.scale });
+    assert.deepEqual(deep.cards.map((c) => c.name).sort(), ['hp', 'lp', 'mix']);
+    for (const c of deep.cards) assert.ok(within(c, inner.body) && within(c, fx.body), `${c.name} inside its card’s body, inside the outer one’s`);
+    assert.ok(deep.scale < outer.scale && outer.scale < top.scale, 'each level smaller');
+    const pinY = (side) => outer.pins.find((p) => p.card === inner.id && p.side === side).y;
+    assert.deepEqual(deep.edges.map((x) => [x.side, x.address, x.y]), [['in', 'lp.in', pinY('in')], ['in', 'hp.in', pinY('in')], ['out', 'mix.out', pinY('out')]]);
+    for (const w of deep.wires) for (const p of w.points) assert.ok(within({ x: p.x, y: p.y, w: 0, h: 0 }, inner), `${w.id} inside the inner card (${inner.h.toFixed(2)} tall)`);
+    assert.deepEqual(insideOf({ graph: structuredClone(graph), card: inner, pins: outer.pins, scale: outer.scale }), deep, 'the same inside every time');
+  }
+});
+
+test('reveal: none below the first width, whole from the second, monotonic between', () => {
+  assert.equal(revealShare(0), 0);
+  assert.equal(revealShare(REVEAL[0]), 0);
+  assert.equal(revealShare(REVEAL[1]), 1);
+  assert.equal(revealShare(1e9), 1);
+  let last = 0;
+  for (let px = REVEAL[0]; px <= REVEAL[1]; px += 5) {
+    const s = revealShare(px);
+    assert.ok(s >= last && s <= 1);
+    last = s;
+  }
+});
+
+test('Layer N: the chips whose fully revealed body holds the view’s centre, outermost first; none when too small or outside', () => {
+  const graph = nested();
+  const top = layLevel({ level: graph.top, area: { x: 0, y: 0, w: 1000, h: 400 } });
+  const fx = top.cards.find((c) => c.name === 'fx');
+  const insides = new Map();
+  const insideFor = (card, id) => {
+    if (!insides.has(id)) {
+      const parent = id.includes('/') ? insides.get(id.slice(0, id.lastIndexOf('/'))) : top;
+      insides.set(id, insideOf({ graph, card, pins: parent.pins, scale: parent.scale }));
+    }
+    return insides.get(id);
+  };
+  const outer = insideFor(fx, fx.id);
+  const inner = outer.cards.find((c) => c.name === 'inner');
+  const centre = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+  const k1 = REVEAL[1] / fx.body.w;
+  assert.deepEqual(chipPath(top.cards, centre(inner.body), k1 * 0.99, insideFor), [], 'not yet fully revealed');
+  assert.deepEqual(chipPath(top.cards, centre(inner.body), k1, insideFor).map((s) => s.id), ['card fx'], 'Layer 1: inside fx; inner too small yet');
+  const k2 = REVEAL[1] / inner.body.w;
+  const two = chipPath(top.cards, centre(inner.body), k2, insideFor);
+  assert.deepEqual(two.map((s) => s.id), ['card fx', 'card fx/card inner'], 'Layer 2: inside inner, inside fx');
+  assert.deepEqual(two.map((s) => s.card.name), ['fx', 'inner']);
+  assert.equal(two[1].laid, insides.get('card fx/card inner'), 'from the cached insides');
+  assert.deepEqual(chipPath(top.cards, { x: fx.body.x - 1, y: fx.body.y }, k2, insideFor), [], 'the centre outside every chip');
+  const pre = outer.cards.find((c) => c.name === 'pre');
+  assert.deepEqual(chipPath(top.cards, centre(pre.body), k2, insideFor).map((s) => s.id), ['card fx'], 'on a plain card inside: Layer 1 only');
 });
