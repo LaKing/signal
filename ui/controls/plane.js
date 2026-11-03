@@ -278,7 +278,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .c-readout-track { fill: #2a2f38; }
 .c-readout-fill { fill: var(--signal-effective, #ffb74d); }
 /* The Engine layer (2026-11-03): each instrument's inside in its rectangle, the cards in the Deck's look; colours written out (WebKit). */
-.e-frame { fill: none; stroke: #4a5260; stroke-width: 1; stroke-dasharray: 6 5; vector-effect: non-scaling-stroke; }
+.e-frame { fill: none; stroke: #3a414d; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .e-title { fill: var(--signal-muted, #8a93a3); font-size: var(--w-title, 16px); letter-spacing: 0.16em; font-weight: 600; opacity: 0.7; }
 .e-card { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-card.composite { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
