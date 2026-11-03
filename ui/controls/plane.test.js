@@ -698,6 +698,17 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   assert.deepEqual(marked(), ['card /echo']);
   // No edit without Edit: Delete removes nothing, the menu offers no edit; Show in sees the instance.
   assert.equal(p.deleteSelection(), false);
+  // A Wiring cable's selection marked at the Engine is not removed there.
+  const keep = p.selection;
+  const writes = [];
+  const write = p.writePatch;
+  p.writePatch = (...args) => (writes.push(args), Promise.resolve(false));
+  p.select({ kind: 'cable', from: '/synth.out', to: '/echo.in', edge: false });
+  assert.ok(marked().includes('wire /synth.out /echo.in'));
+  press(p, page, 'Delete', [p]);
+  assert.deepEqual(writes, []);
+  p.writePatch = write;
+  p.select(keep);
   const menu = (at) => p.contextMenu({ ...at, composedPath: () => [s.engineSvg, s.element, p] });
   assert.deepEqual(menu(onEcho).items.map((i) => i.id), ['copy-address', 'separator', 'show-instrument', 'show-stack']);
   assert.deepEqual(menu(onEcho).hit, { kind: 'instance', address: '/echo' });

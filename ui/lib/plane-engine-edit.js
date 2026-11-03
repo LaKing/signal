@@ -89,9 +89,12 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
   }
   // Inside a chip the edge dots are its card's own pins (the level around's items).
   if (!prefix) {
+    // An output leaving to several places: one dot (one id) for its connections.
+    const shared = new Map();
+    for (const e of laid?.edges ?? []) shared.set(e.id, (shared.get(e.id) ?? 0) + 1);
     for (const e of laid?.edges ?? []) {
       const [from, to] = e.side === 'in' ? [e.from, e.address] : [e.address, e.to];
-      items.push({ kind: 'e-edge', id: `${scope}|${e.id}`, key: wireKey(from, to), x: e.x, y: e.y, entry, patchLevel: level, prefix, chip, from: norm(from), to: norm(to), written: { from: written(from), to: written(to) }, edge: e.side, frame: false });
+      items.push({ kind: 'e-edge', id: `${scope}|${e.id}`, key: wireKey(from, to), x: e.x, y: e.y, entry, patchLevel: level, prefix, chip, from: norm(from), to: norm(to), written: { from: written(from), to: written(to) }, edge: e.side, frame: false, shared: shared.get(e.id) > 1 });
     }
   }
   return items;
@@ -173,6 +176,7 @@ export function removeOps(item) {
   if (item?.kind === 'e-card') return { level: item.patchLevel, ops: [removeInstance(item.name)], what: `${item.address} removed` };
   if (item?.kind === 'e-wire' || item?.kind === 'e-edge') {
     if (item.frame) return { error: `Not removed: ${exportsReason(item.patchLevel)}` };
+    if (item.shared) return { error: `Not removed: the dot at ${item.from} stands for several connections; select the wire to remove` };
     return { level: item.patchLevel, ops: [removeConnection(item.written.from, item.written.to)], what: `${item.from} → ${item.to} removed` };
   }
   return { error: 'Select a wire or a card to remove it' };
@@ -223,24 +227,30 @@ export function outStep(chips) {
  * The instances added from an instrument's Engine and not joined to any
  * instrument yet (an instance with no control and no connection is in
  * none, ui/lib/plane-instruments.js `assignInstruments`): `owner` with each
- * of `placed` (`Map(name → entry)`, view state of this page) put in its
- * entry while the assignment leaves it in none, and the names to forget
- * (joined an instrument, a device slot, or an entry no longer known; one
- * not in the graph is kept: its add's graph push is still to come).
- * `{owner, forget}`; `owner` a new Map.
+ * of `placed` (`Map(name → {entry, seen})`, view state of this page) put in
+ * its entry while the assignment leaves it in none; the names to forget
+ * (joined an instrument, a device slot, an entry no longer known, or gone
+ * from the graph after it was seen there; one not seen yet is kept: its
+ * add's graph push is still to come), and those seen now.
+ * `{owner, forget, seen}`; `owner` a new Map.
  */
 export function placedOwners(owner, placed, instances = [], entries = new Set()) {
   const out = new Map(owner);
   const forget = [];
-  for (const [name, entry] of placed ?? []) {
+  const seen = [];
+  for (const [name, { entry, seen: before = false }] of placed ?? []) {
     const instance = instances.find((i) => i.name === name);
-    // Not in the graph (yet: the patch's graph push follows; or again: an undo of its removal): kept.
-    if (!instance) continue;
+    if (!instance) {
+      // Not in the graph yet (the patch's graph push follows): kept; gone after it came (undone, removed): forgotten.
+      if (before) forget.push(name);
+      continue;
+    }
     if (out.get(name) || roleOf(instance) || !entries.has(entry)) {
       forget.push(name);
       continue;
     }
+    seen.push(name);
     out.set(name, entry);
   }
-  return { owner: out, forget };
+  return { owner: out, forget, seen };
 }

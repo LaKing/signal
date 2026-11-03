@@ -198,7 +198,7 @@ export default {
     { "id": "plane.page_down", "scope": "plane", "label": "Scroll the focused Stack down a page", "keys": ["PageDown"] },
     { "id": "plane.page_up", "scope": "plane", "label": "Scroll the focused Stack up a page", "keys": ["PageUp"] },
     { "id": "plane.delete", "scope": "plane", "label": "At Wiring and Control: remove the selected cable; at the Engine with Edit on: the selected connection or instance", "keys": ["Delete", "Backspace"] },
-    { "id": "plane.undo", "scope": "plane", "label": "At Wiring, Control and the Engine (Edit on): undo the last patch written there", "keys": ["Cmd+Z"] },
+    { "id": "plane.undo", "scope": "plane", "label": "At Wiring, Control and the Engine (Edit on): undo the last patch the plane wrote (one history for the three)", "keys": ["Cmd+Z"] },
     { "id": "plane.redo", "scope": "plane", "label": "At Wiring, Control and the Engine (Edit on): redo", "keys": ["Shift+Cmd+Z"] },
 
     { "id": "schematic_edit.undo", "scope": "schematic_edit", "label": "Undo the last patch", "keys": ["Cmd+Z"] },

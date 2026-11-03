@@ -85,7 +85,7 @@ import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-contr
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
-import { CARD_RX, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
+import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
 import { ENGINE_SELECTABLE, addOps, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
@@ -688,11 +688,12 @@ export class SignalPlane extends HTMLElement {
     this.graphKey = JSON.stringify([graph?.top?.instances?.map((i) => [i.name, i.module, i.ports?.length, i.parameters?.length]), graph?.top?.connections?.map((c) => [c.from, c.to]), Object.entries(graph?.composites ?? {}).map(([k, c]) => [k, c.connections?.map((x) => [x.from, x.to]), c.parameters?.map((x) => [x.name, x.to]), c.instances?.map((x) => [x.name, x.module, x.composite])])]);
     const cleared = this.session.graphSeen(graph);
     if (cleared?.cleared) this.say(cleared.cleared);
-    // The instances kept where they were added are this project's (another one's names are not).
-    const project = graph?.projectId ?? `${graph?.folder ?? ''}\n${graph?.project ?? ''}`;
+    // The instances kept where they were added, and an Engine selection, are this opening's (another project's names are not).
+    const project = `${graph?.projectId ?? `${graph?.folder ?? ''}\n${graph?.project ?? ''}`}\n${graphGeneration(graph) ?? ''}`;
     if (project !== this.placedFor) {
       this.placed.clear();
       this.placedFor = project;
+      if (this.selection?.kind === 'engine') this.select(null);
     }
     this.readPlane().then(() => this.recompute());
   }
@@ -743,8 +744,9 @@ export class SignalPlane extends HTMLElement {
     this.cards = cards;
     const assigned = assignInstruments({ instances, connections, cards });
     // An instance added from an instrument's Engine stays in it until it is joined to one (view state, `placedOwners`).
-    const { owner, forget } = placedOwners(assigned, this.placed, instances, new Set([...cards.map((c) => entryOf(c)), ...slots]));
+    const { owner, forget, seen } = placedOwners(assigned, this.placed, instances, new Set([...cards.map((c) => entryOf(c)), ...slots]));
     for (const name of forget) this.placed.delete(name);
+    for (const name of seen) this.placed.get(name).seen = true;
     // The unstacked warning needs the plane: computed on the plane read (or derived), then checked with it.
     let shown = planeOf(this.planeText, cards, plateWidth, { slots });
     const members = stackMembers(shown.plane, owner, instances);
@@ -2051,7 +2053,7 @@ export class SignalPlane extends HTMLElement {
   }
 
   /** The view travels to show a chip (`part`: its `body`, the Layer N buttons; else the whole card, Show Chip). */
-  showChip(chip, part = null) {
+  showChip(chip, part = null, maxK = Infinity) {
     const rect = this.focusRect();
     const fit = this.fitK();
     if (!chip || !rect || !fit) return;
@@ -2066,7 +2068,7 @@ export class SignalPlane extends HTMLElement {
       }
       k = Math.max(k, fit * splitDepth(this.engineBandNow()[1]).r);
     }
-    this.travel(this.viewAround(target, Math.min(k, fit * DEEP_SCALE)), this.layer ? 0 : LIFT);
+    this.travel(this.viewAround(target, Math.min(k, fit * DEEP_SCALE, maxK)), this.layer ? 0 : LIFT);
   }
 
   /** The view at scale `k` with plane rectangle `r`'s centre at the stage's centre. */
@@ -2174,10 +2176,18 @@ export class SignalPlane extends HTMLElement {
 
   /** Escape inside chips: out one chip level (the parent chip's body fitted, or from the outermost its instrument whole); whether it was inside one. */
   outOneChip() {
-    const step = outStep(this.chipsNow());
+    const chips = this.chipsNow();
+    const step = outStep(chips);
     if (!step) return false;
-    if (step.chip) this.showChip(step.chip, step.part);
-    else this.outOfChips(step.instrument);
+    // Never so close that the chip left is still entered (its body under the full reveal's width), or Escape would repeat itself.
+    const cap = (REVEAL[1] - 1) / Math.max(1e-9, chips.at(-1).card.body.w);
+    if (step.chip) return this.showChip(step.chip, step.part, cap), true;
+    const r = this.instrumentRects().find((x) => x.entry === step.instrument.entry);
+    if (this.layer && r && fitAll(r, this.viewport).k > cap) {
+      this.opened = step.instrument.entry;
+      this.barKey = null;
+      this.travel(this.viewAround(r, cap), 0);
+    } else this.outOfChips(step.instrument);
     return true;
   }
 
@@ -2644,7 +2654,8 @@ export class SignalPlane extends HTMLElement {
     const rect = this.focusRect();
     if (!which || !s || !rect) return null;
     if (which === 'engine') {
-      // The Engine: a card, a pin, a wire (inside a revealed chip too), else the empty space of a chip's body or an instrument.
+      // Laid out for the graph now (a push since the last render draws it first), then: a card, a pin, a wire (inside a revealed chip too), else the empty space of a chip's body or an instrument.
+      if (!this.enginesNow()) return null;
       const { items, revealed } = this.engineHitItems(s);
       const p = toPlane(this.view, at);
       const rects = s.engines.layouts.map((e) => ({ entry: e.entry, ...e.rect }));
@@ -2880,7 +2891,7 @@ export class SignalPlane extends HTMLElement {
   levelFile(level) {
     if (!level) return 'project.toml';
     const count = instanceCount(this.graph, level);
-    return `composites/${level}.toml: every instance of ${level}, ${count}`;
+    return `composites/${level}.toml, ${count === 1 ? 'its one instance' : `every one of its ${count} instances`}`;
   }
 
   /** A wire from Engine pin `from` dropped on `to` (a pin: connected; a card of its level: a chooser of what fits there). */
@@ -2940,9 +2951,9 @@ export class SignalPlane extends HTMLElement {
     this.addBrowser.close();
     const { target } = placing;
     // An instance with no control and no connection is in no instrument (`assignInstruments`): this page keeps it in the one it was added to.
-    if (!target.chip) this.placed.set(name, target.entry);
+    if (!target.chip) this.placed.set(name, { entry: target.entry, seen: false });
     this.writeEngine(addOps(target, module, name)).then((ok) => {
-      if (!ok && !target.chip && this.placed.get(name) === target.entry) this.placed.delete(name);
+      if (!ok && !target.chip && this.placed.get(name)?.entry === target.entry) this.placed.delete(name);
     });
     return null;
   }
@@ -3321,7 +3332,9 @@ export class SignalPlane extends HTMLElement {
     }
     if (this.onControl(event)) return;
     if (command === 'plane.delete') {
-      if ((level === 'wiring' || level === 'control' || level === 'engine') && this.deleteSelection()) event.preventDefault();
+      // At the Engine only its own selection, with Edit on (a Wiring cable marked there is removed at Wiring).
+      const mine = level === 'wiring' || level === 'control' || (level === 'engine' && this.selection?.kind === 'engine');
+      if (mine && this.deleteSelection()) event.preventDefault();
       return;
     }
     const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };

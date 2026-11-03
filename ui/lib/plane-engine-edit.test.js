@@ -145,6 +145,9 @@ test('remove: a card or a wire at its level, an edge dot’s connection at the t
   assert.deepEqual(removeOps(edge).ops, [{ op: 'connection.remove', from: 'transport.tick', to: 'melody.tick' }]);
   assert.match(removeOps(all.find((i) => i.kind === 'e-wire' && i.frame)).error, /moog_voice’s export/);
   assert.match(removeOps(pin(all, '/melody.hz')).error, /Select a wire or a card/);
+  // One dot for an output leaving to several places: its wire is removed, not the dot.
+  const shared = engineItems({ edges: [{ id: 'edge out a.out', side: 'out', address: 'a.out', to: 'b.in', x: 0, y: 0 }, { id: 'edge out a.out', side: 'out', address: 'a.out', to: 'c.in', x: 0, y: 0 }] }, { entry: 'e' });
+  assert.match(removeOps(shared[0]).error, /select the wire/);
 });
 
 test('add: at the instrument’s empty space the top level, in a chip’s its composite; no position (the Engine lays it out)', () => {
@@ -192,13 +195,15 @@ test('Escape inside chips: out one chip level, from the outermost to its instrum
 test('an instance added from an instrument’s Engine stays in it until a connection or a control joins it to one', () => {
   const instances = [{ name: 'trim' }, { name: 'bus' }, { name: 'out', module: 'std.audio_out' }, { name: 'lost' }];
   const owner = new Map([['trim', null], ['bus', 'card:master'], ['out', null], ['lost', null]]);
-  const placed = new Map([['trim', 'card:master'], ['bus', 'card:echo'], ['out', 'card:master'], ['lost', 'card:gone'], ['coming', 'card:master']]);
-  const { owner: next, forget } = placedOwners(owner, placed, instances, new Set(['card:master', 'card:echo']));
+  const at = (entry, seen = false) => ({ entry, seen });
+  const placed = new Map([['trim', at('card:master')], ['bus', at('card:echo')], ['out', at('card:master')], ['lost', at('card:gone')], ['coming', at('card:master')], ['undone', at('card:master', true)]]);
+  const { owner: next, forget, seen } = placedOwners(owner, placed, instances, new Set(['card:master', 'card:echo']));
+  assert.deepEqual(seen, ['trim']);
   assert.equal(next.get('trim'), 'card:master', 'in none: kept where it was added');
   assert.equal(next.get('bus'), 'card:master', 'joined one: the assignment’s');
   assert.equal(next.get('out'), null, 'a device slot is no instrument’s');
   assert.equal(next.get('lost'), null);
-  assert.deepEqual(forget.sort(), ['bus', 'lost', 'out']);
+  assert.deepEqual(forget.sort(), ['bus', 'lost', 'out', 'undone'], 'gone after it was seen: forgotten');
   assert.equal(owner.get('trim'), null, 'the assignment itself unchanged');
   assert.ok(!next.has('coming'), 'not in the graph yet: kept, nothing assigned');
 });
