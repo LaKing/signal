@@ -227,7 +227,7 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .pin.in { fill: var(--signal-meter-rms, #3ecf8e); }
 .pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-port, 28px); }
 .box { fill: #1b1f26; stroke: #4a5260; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.box.absent { fill: none; stroke-dasharray: 8 6; }
+.box.absent { fill: none; stroke-opacity: 0.5; }
 .box-title { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-title, 34px); font-weight: 600; }
 .box-note { fill: var(--signal-clip, #ff5252); font-size: var(--t-kind, 20px); }
 .box-kind { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); letter-spacing: 0.12em; }
