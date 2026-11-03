@@ -1844,7 +1844,7 @@ export class SignalPlane extends HTMLElement {
       add?.(w.id, path, { points: w.points });
     }
     g.append(wires);
-    const composites = new Set();
+    const composites = new Map();
     for (const c of laid.cards) {
       const card = svg('g', { class: `e-node${c.composite ? ' composite' : ''}`, 'data-name': c.name });
       card.append(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k, ...line(c.composite ? 2 : 1.5) }));
@@ -1856,13 +1856,13 @@ export class SignalPlane extends HTMLElement {
       const count = c.composite ? (this.graph?.composites?.[c.module]?.instances?.length ?? 0) : 0;
       card.append(svg('title', {}, `${address}: ${c.module}${c.composite ? ` (a chip of ${count} instances: zoom in to see its inside; its context menu shows it whole)` : ''}`));
       if (c.composite) {
-        composites.add(c.id);
         // The plain body: a faint panel where the inside will show, fading out as it comes in.
         const plain = svg('rect', { class: 'e-plain', x: c.body.x, y: c.body.y, width: c.body.w, height: c.body.h, rx: 3 * k });
         card.append(plain);
         const id = parent ? `${parent.id}/${c.id}` : c.id;
         card.dataset.chip = id;
-        const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, parent, children: [], laid: undefined, group: null };
+        const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
+        composites.set(c.id, chip);
         s.engineChips.set(id, chip);
         (parent ? parent.children : s.engineTopChips).push(chip);
       }
@@ -1872,12 +1872,15 @@ export class SignalPlane extends HTMLElement {
     for (const p of laid.pins) {
       const dot = svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) });
       dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
-      // A chip's pin labels stay over its inside, kept legible by a halo of the card's colour.
-      const halo = composites.has(p.card);
-      const label = svg('text', { class: `e-pin-label${halo ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(halo ? { 'stroke-width': 2.5 * k } : {}) }, p.name);
-      g.append(dot, label);
+      // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
+      const chip = composites.get(p.card);
+      const label = svg('text', { class: `e-pin-label${chip ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(chip ? { 'stroke-width': 2.5 * k } : {}) }, p.name);
+      g.append(dot);
+      if (chip) chip.labels.append(label);
+      else g.append(label);
       add?.(p.id, dot, { x: p.x, y: p.y });
     }
+    for (const chip of composites.values()) g.append(chip.labels);
   }
 
   renderEngine(fades) {
@@ -1917,6 +1920,7 @@ export class SignalPlane extends HTMLElement {
       const y = (rect.y + c.y) * v.k + v.y;
       const on = share > 0 && x < this.viewport.w + margin && x + c.w * v.k > -margin && y < this.viewport.h + margin && y + c.h * v.k > -margin;
       opacity(chip.plain, on ? 1 - share : 1);
+      opacity(chip.labels, on ? 1 - share : 1);
       if (!on || !this.insideFor(chip)) return;
       if (!chip.group) {
         chip.group = svg('g', { class: 'e-inside' });
