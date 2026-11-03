@@ -19,6 +19,7 @@ const { SignalPlane } = await import('./plane.js');
 const { install } = await import('./keyboard.js');
 const { applyKeys } = await import('../lib/keys.js');
 const { setDefaultConnection } = await import('../signal-ui.js');
+const { stackLayout } = await import('../lib/plane-layout.js');
 
 const whitelist = JSON.parse(readFileSync(new URL('../lib/panel-whitelist.json', import.meta.url), 'utf8'));
 
@@ -72,6 +73,11 @@ class Node {
   removeAttribute(k) {
     this.attributes.delete(k);
   }
+  toggleAttribute(k, on = !this.attributes.has(k)) {
+    if (on) this.attributes.set(k, '');
+    else this.attributes.delete(k);
+    return on;
+  }
   addEventListener(type, fn) {
     this.listeners.push([type, fn]);
   }
@@ -85,6 +91,9 @@ class Node {
         this.children.push(n);
       }
     }
+  }
+  prepend(n) {
+    this.insertBefore(n, this.children[0]);
   }
   insertBefore(n, ref) {
     n.remove();
@@ -449,7 +458,6 @@ function press(p, page, key, path, more = {}, atTarget = () => {}) {
 
 function focusedPlane() {
   const p = new SignalPlane();
-  p.deep = new Node('div');
   p.stage = new Node('div');
   p.viewport = { w: 800, h: 600 };
   p.view = { k: 1, x: 0, y: 0 };
@@ -619,4 +627,48 @@ domTest('the layer chosen alone: Enter and Escape step through the layers, the v
   p.layer = 'wiring';
   press(p, page, 'Escape', [p]);
   assert.deepEqual(chosen, ['wiring', 'stack']);
+});
+
+// The Engine layer (the owner's decision of 2026-11-03): a drawing of the plane like the others, never the embedded board.
+
+domTest('the Engine layer draws every instrument’s inside in its own rectangle, in the Stack’s coordinates; the view stays, the Wiring and Control are out, Edit waits', async () => {
+  const p = await shown(plane());
+  p.bar = new Node('nav');
+  p.stage = new Node('div');
+  p.viewport = { w: 800, h: 600 };
+  p.focused = 'primary';
+  const s = p.stacks.get('primary');
+  const stack = p.model.plane.stacks.find((x) => x.name === 'primary');
+  s.layout = stackLayout(stack, stack.instruments.map((entry) => ({ entry, w: 1280, h: 200, x: null })));
+  p.focusRect = () => ({ x: 0, y: 0, w: s.layout.w, h: s.layout.h });
+  p.view = { k: 0.5, x: 10, y: -40 };
+  p.drawnK = 0.5;
+  p.dataset = {};
+  p.layer = 'engine';
+  p.drawView();
+  assert.deepEqual(p.view, { k: 0.5, x: 10, y: -40 }, 'the view never changes with the layer');
+  assert.equal(s.engineSvg.style.display, '', 'the Engine drawing shows');
+  assert.equal(s.wiringSvg.style.display, 'none', 'the Wiring is out');
+  assert.equal(s.controlSvg.style.display, 'none', 'the Control drawing is out');
+  for (const card of s.cards.values()) assert.equal(card.style.visibility, 'hidden', 'the front panels are out');
+  assert.equal(p.stage.querySelector('signal-schematic'), null, 'no embedded board');
+  const layouts = s.engines.layouts;
+  assert.deepEqual(layouts.map((e) => e.entry), s.layout.rects.map((r) => r.entry), 'one engine per instrument, all at once');
+  for (const e of layouts) for (const c of e.cards) {
+    const r = s.layout.rects.find((x) => x.entry === e.entry);
+    assert.ok(c.x >= r.x && c.y >= r.y && c.x + c.w <= r.x + r.w && c.y + c.h <= r.y + r.h, `${c.name} inside ${e.entry}`);
+  }
+  assert.deepEqual(layouts.flatMap((e) => e.cards.map((c) => c.name)).sort(), ['echo', 'melody', 'synth']);
+  const drawn = s.engineSvg.all();
+  assert.equal(drawn.filter((n) => n.getAttribute('class') === 'e-frame').length, layouts.length, 'each rectangle a faint frame');
+  assert.ok(drawn.some((n) => String(n.getAttribute('class')).startsWith('e-wire')), 'the connections drawn');
+  assert.ok(!drawn.some((n) => /^c-|leg|cube/.test(String(n.getAttribute('class') ?? ''))), 'no Control drawing at the Engine');
+  // Laid out once: drawn again only when what it depends on changes.
+  const before = s.engines;
+  p.drawView();
+  assert.equal(s.engines, before);
+  p.renderBar('engine', 1);
+  const edit = p.bar.querySelector('.edit-layout');
+  assert.equal(edit.disabled, true);
+  assert.equal(edit.title, 'Edit at the Engine layer: comes with step 3');
 });

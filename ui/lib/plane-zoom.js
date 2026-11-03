@@ -19,9 +19,9 @@
 //     scale grows again): the instrument under the zoom point opens into
 //     its Control plane (ui/lib/plane-control.js), the others fade to
 //     SURROUND;
-//   - the engine band (`engineBand`, from the cube's size): the cube's
-//     Engine, ADR 0047's board and its die zoom, fades in laid on the cube
-//     (`frameOnto`), past which the board has the input.
+//   - the engine band (`engineBand`, from the cube's size): the Engine
+//     layer (ui/lib/plane-engine.js), every instrument's inside in its
+//     rectangle, fades in.
 // The rectangles never move: the levels are nested footprints.
 // One curve in and out, no timer: the opacities are functions of the depth
 // `z` only (`r` below the fit), monotonic, exactly 0 and 1 at a band's ends. View state only (rule 4).
@@ -51,7 +51,7 @@ export const ENGINE_FROM = 0.6;
 export const ENGINE_GAP = 0.5;
 /** The stage's margin around a fitted Stack or the whole plane (px). */
 export const MARGIN_PX = 24;
-/** The view's scale limits relative to the fit: far enough out for any Setup, in to the engine band's end (the board zooms on by itself past it). */
+/** The view's scale limits relative to the fit: far enough out for any Setup, in to the engine band's end. */
 export const MIN_R = 0.01;
 export const MAX_R = CONTROL_BAND[1] + 2 * ENGINE_GAP;
 /** A ratio within this of 1 is the fit (rounding of a fitted view). */
@@ -136,8 +136,7 @@ export const ENGINE_BAND = engineBand();
  *     control band, then down to SURROUND over the engine band;
  *   - `controls`: its live controls (its front panel's), out over the
  *     wiring band and back over the control band, never below `panels`;
- *   - `deep`: the Engine (the board's die zoom), 0 up to 1 over the engine
- *     band.
+ *   - `deep`: the Engine layer, 0 up to 1 over the engine band.
  * Functions of `r` alone, so in and out are one curve (no timer).
  */
 export function planeFades(r, engine = ENGINE_BAND) {
@@ -260,33 +259,6 @@ export function panBy(view, dx, dy) {
  */
 export function reachesFit(r0, r1) {
   return r0 < 1 - FIT_EPSILON && r1 >= 1 - FIT_EPSILON;
-}
-
-/**
- * The Engine's view (ADR 0051 §8: Control → Engine, the existing die zoom):
- * a view of the board's coordinates (ui/lib/schematic-view.js, `o` = 0)
- * that lays rectangle `frame` (the instrument's chips on the board) on
- * screen rectangle `onto` (its cube as drawn), fitted inside it and
- * centred, so the cube's centre, the zoom point, stays put across the
- * cross-fade. `offset`: the board's stage's top-left from the plane's.
- */
-export function frameOnto(frame, onto, offset = { x: 0, y: 0 }) {
-  const k = Math.min(onto.w / Math.max(1e-9, frame.w), onto.h / Math.max(1e-9, frame.h));
-  return { k, ox: 0, oy: 0, x: onto.x + onto.w / 2 - (frame.x + frame.w / 2) * k - offset.x, y: onto.y + onto.h / 2 - (frame.y + frame.h / 2) * k - offset.y };
-}
-
-/**
- * The plane view `frameOnto` came from: the board's view `board` (any
- * origin) back to the plane view that draws plane rectangle `cube` where
- * the board draws `frame`.
- */
-export function planeFromFrame(board, frame, cube, offset = { x: 0, y: 0 }) {
-  const kb = board.k;
-  const fx = (frame.x + frame.w / 2 - (board.ox ?? 0)) * kb + board.x + offset.x;
-  const fy = (frame.y + frame.h / 2 - (board.oy ?? 0)) * kb + board.y + offset.y;
-  const ratio = Math.min(cube.w / Math.max(1e-9, frame.w), cube.h / Math.max(1e-9, frame.h));
-  const k = kb / Math.max(1e-12, ratio);
-  return { k, x: fx - (cube.x + cube.w / 2) * k, y: fy - (cube.y + cube.h / 2) * k };
 }
 
 /**

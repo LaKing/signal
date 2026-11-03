@@ -36,11 +36,15 @@
 //     cables landing on the controls, the inner values beside them
 //     (ui/lib/plane-control.js); the other instruments fade to SURROUND.
 //     Automation (`patch`) and binds (`panel.write`) are edited here;
-//   - **Engine**: zooming into the cube cross-fades to ADR 0047's board
-//     (<signal-schematic>, its layer switch hidden) laid on the cube, the
-//     instrument's chips filling it; past the band the board has the input,
-//     and its deep zoom into dies works as before. Zooming back out of the
-//     board's top level, or Escape there, returns to Control.
+//   - **Engine** (the owner's decision of 2026-11-03): every instrument's
+//     inside drawn in its own rectangle, in place, as a layer of the plane
+//     like the others (ui/lib/plane-engine.js): its instances as cards, their
+//     ports as pins, the signal connections between them and through the
+//     instrument's edge; no parameter legs or controls (the Control
+//     layer's). The front panels, Wiring and Control drawings fade out and
+//     each instrument's rectangle stays as a faint frame. The view never
+//     changes when the layer does. Composites are one card each for now
+//     (their insides, by zoom, come next).
 // The levels are nested fades of one zoom; no rectangle moves, and zoom
 // never changes the selection.
 // The Stacks are `ui/plane.toml` (served as /project/plane.toml), or one
@@ -49,14 +53,13 @@
 // Stack's width (ui/lib/plane-layout.js), its controls live as on the
 // panel: each card is the panel's own code (`showWritten`) in a shadow
 // root with the panel's style sheets. Every level is its own layer (the
-// Stacks' HTML, the Setup's SVG, each Stack's Wiring and Control SVG, the
-// board), one transform for the view; each is laid out lazily, when it
+// Stacks' HTML, the Setup's SVG, each Stack's Wiring, Control and Engine
+// SVG), one transform for the view; each is laid out lazily, when it
 // first shows, and cached; nothing is laid out per zoom frame. View state
 // only: the plane writes no file of its own (rule 4); its edits go through
 // the existing `patch` and `panel.write`.
 
 import { onDefaultConnection } from '../signal-ui.js';
-import './schematic.js';
 // Every control a front panel may hold is defined on the plane's page too (the open slot card among them).
 import './index.js';
 import { loadWhitelist, showWritten } from './panel-editor.js';
@@ -71,17 +74,18 @@ import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, s
 import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
-import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, panBy, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, splitDepth, toPlane, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
+import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
+import { CARD_RX, HEAD_H, engineLayout } from '../lib/plane-engine.js';
+import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
 import { addConnection, connectTargets, removeConnection } from '../lib/schematic-patch.js';
 import { formatValue } from '../lib/format.js';
 import { toPosition } from '../lib/taper.js';
 import { HIT_OPACITY, ZOOM_MS, ease, tween } from '../lib/board-zoom.js';
-import { reroot } from '../lib/schematic-scene.js';
-import { GESTURE_GAP_MS, WheelKinds } from '../lib/wheel.js';
+import { WheelKinds } from '../lib/wheel.js';
 import { wheelFactor, wheelPixels } from '../lib/schematic-view.js';
 import { isPressable, isTextField, registerWheel, takesWheel } from './keyboard.js';
 import { ButtonPan, closePageMenu } from './button-pan.js';
@@ -226,9 +230,6 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .small { fill: #1b1f26; stroke: #39404c; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .small-name { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-small, 26px); }
 .small-kind { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); }
-.deep { position: absolute; inset: 0; }
-.deep[hidden] { display: none; }
-.deep signal-schematic { height: 100%; }
 /* Edit layout (ADR 0051 §6): the project's panel page in its editor, over the plane. */
 .editor { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; background: var(--signal-bg, #15181d); }
 .editor-body { flex: 1; display: block; min-height: 0; overflow: auto; background: var(--signal-bg, #15181d); }
@@ -237,8 +238,8 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .notes p.error { color: var(--signal-clip, #ff5252); }
 .notes p.warning { color: var(--signal-effective, #ffb74d); }
 /* ADR 0051 phase 2: the Wiring level (the back of the rack) and the Control plane (the sheet under a front panel), each Stack's, in its coordinates. */
-svg.wiring, svg.control, svg.drag { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
-svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+svg.wiring, svg.control, svg.engine, svg.drag { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
 .w-box { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .w-box.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2.5; }
 .w-title { fill: var(--signal-muted, #8a93a3); font-size: var(--w-title, 16px); letter-spacing: 0.16em; font-weight: 600; }
@@ -276,13 +277,31 @@ svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFo
 .c-readout-text { fill: var(--signal-effective, #ffb74d); font-size: 9px; font-variant-numeric: tabular-nums; }
 .c-readout-track { fill: #2a2f38; }
 .c-readout-fill { fill: var(--signal-effective, #ffb74d); }
+/* The Engine layer (2026-11-03): each instrument's inside in its rectangle, the cards in the Deck's look; colours written out (WebKit). */
+.e-frame { fill: none; stroke: #4a5260; stroke-width: 1; stroke-dasharray: 6 5; vector-effect: non-scaling-stroke; }
+.e-title { fill: var(--signal-muted, #8a93a3); font-size: var(--w-title, 16px); letter-spacing: 0.16em; font-weight: 600; opacity: 0.7; }
+.e-card { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.e-card.composite { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
+.e-head { fill: #212733; pointer-events: none; }
+/* Hover titles: the cards, pins and wires take the pointer (it still reaches the stage: pan, wheel and menu are the Deck's). */
+.e-card, .e-pin, .e-edge { pointer-events: all; }
+.e-wire { pointer-events: stroke; }
+.e-name { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
+.e-module, .e-pin-label { fill: var(--signal-muted, #8a93a3); }
+.e-pin { fill: #2a2f38; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.e-pin.k-audio.connected { fill: var(--signal-accent, #4fc3f7); } .e-pin.k-control.connected { fill: #b39ddb; } .e-pin.k-events.connected { fill: var(--signal-meter-rms, #3ecf8e); } .e-pin.k-vector.connected { fill: var(--signal-effective, #ffb74d); }
+.e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.e-junction { stroke: none; }
+.e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
+.e-edge { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.e-edge.in { fill: var(--signal-meter-rms, #3ecf8e); }
 .rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .chooser { position: absolute; z-index: 5; width: min(640px, calc(100% - 16px)); overflow: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 4px; border-radius: 6px; background: var(--signal-panel, #1f232b); border: 1px solid #3a414d; box-shadow: 0 6px 20px #0008; }
 .chooser-title { grid-column: 1 / -1; padding: 2px 6px 4px; color: var(--signal-muted, #8a93a3); }
 .chooser button { text-align: left; background: none; border: none; color: var(--signal-fg, #d6dbe4); padding: 3px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer; }
 .chooser button:hover, .chooser button:focus-visible { background: #2c3340; outline: none; }
 .notes p.said { color: var(--signal-fg, #d6dbe4); }
-@media (prefers-reduced-motion: reduce) { .world, .deep { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .world { transition: none; } }
 `;
 
 /** A front panel's shadow root CSS: the panel's cards placed by the plane, the panel's own look otherwise. */
@@ -417,37 +436,19 @@ export class SignalPlane extends HTMLElement {
     this.world = html('div', { className: 'world' });
     this.setupSvg = svg('svg', { class: 'setup' });
     this.world.append(this.setupSvg);
-    this.deep = html('div', { className: 'deep', hidden: true });
-    this.schematic = document.createElement('signal-schematic');
-    this.schematic.setAttribute('plane', '');
-    // One zoom lock, the plane's (its bar's switch, localStorage): the board reads it and asks for its toggle (a double right click).
-    this.schematic.zoomLock = this.zoomLock;
-    this.schematic.addEventListener('signal-zoom-lock', () => this.toggleZoomLock());
-    // ADR 0051 §8: no Plate / X-ray / Board switch; the board is the Engine, laid on an instrument's cube.
-    this.schematic.board?.restore?.({ layer: 'board' });
-    this.deep.append(this.schematic);
-    // The board's levels drawn (its zoom into the dies): the bar's Layer 1, 2 … after the Engine.
-    this.boardLevels = [];
-    this.schematic.addEventListener('signal-board-levels', (event) => {
-      this.boardLevels = event.detail ?? [];
-      this.barKey = null;
-      if (this.level() === 'engine') this.render();
-    });
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
-    this.stage.append(this.world, this.deep, this.bar, this.notes);
+    this.stage.append(this.world, this.bar, this.notes);
     if (this.barDock) this.dockBar(this.barDock);
     root.append(html('style', { textContent: CSS }), this.stage);
-    // The wheel: the plane's own, but the board's in the Engine (it zooms into dies there); zooming back
-    // out of the board's top level comes back to the plane (captured before the board sees it).
+    // The wheel: the plane's own on every layer (captured before a knob or a fader sees it when the layer is chosen alone).
     this.stage.addEventListener('wheel', (e) => this.wheelCapture(e), { passive: false, capture: true });
     this.stage.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
-    registerWheel(this, (event) => !event.composedPath().includes(this.deep) || this.deep.hidden);
+    registerWheel(this);
     this.stage.addEventListener('pointerdown', (e) => this.pointerDownCapture(e), true);
     this.stage.addEventListener('pointerdown', (e) => this.pointerDown(e));
     // The right or the middle button dragged pans (a right click that does not move keeps its menu).
     // A right click that does not move opens its menu on the release; a double right click toggles the zoom lock.
-    // Not on the Engine's board, which pans the same way by itself (`<signal-schematic plane>`).
     this.buttonPan = new ButtonPan(this, {
       capture: this.stage,
       pan: (dx, dy) => {
@@ -456,7 +457,7 @@ export class SignalPlane extends HTMLElement {
       },
       doubleRight: () => this.toggleZoomLock(),
       closeMenu: () => closePageMenu(),
-      skip: (event) => (event.composedPath?.().includes(this.deep) && this.level() === 'engine') || this.overEditor(event),
+      skip: (event) => this.overEditor(event),
     });
     this.stage.addEventListener('pointerdown', (e) => this.buttonPan.down(e), true);
     this.stage.addEventListener('pointermove', (e) => this.buttonPan.move(e), true);
@@ -532,8 +533,6 @@ export class SignalPlane extends HTMLElement {
     this.cards = [];
     this.layout = null;
     this.panelPending = false;
-    this.deepOwned = false;
-    this.handoff = undefined;
     this.opened = null;
     this.lift = 0;
     this.selection = null;
@@ -759,15 +758,18 @@ export class SignalPlane extends HTMLElement {
     const roots = html('style', { textContent: this.rootCss });
     const note = html('p', { className: 'face-note' });
     shadow.append(links, html('style', { textContent: PANEL_CSS }), roots, note);
-    // ADR 0051 phase 2: the Wiring level behind the panels, the Control plane under them, the cable being drawn over all.
+    // ADR 0051 phase 2: the Wiring level behind the panels, the Control plane under them, the cable being drawn over all;
+    // the Engine layer (2026-11-03) with them, in the same coordinates.
     const wiringSvg = svg('svg', { class: 'wiring' });
     const controlSvg = svg('svg', { class: 'control' });
+    const engineSvg = svg('svg', { class: 'engine' });
     const rubberSvg = svg('svg', { class: 'drag' });
     wiringSvg.style.display = 'none';
     controlSvg.style.display = 'none';
-    element.append(rack, wiringSvg, controlSvg, host, rubberSvg, head);
+    engineSvg.style.display = 'none';
+    element.append(rack, wiringSvg, controlSvg, engineSvg, host, rubberSvg, head);
     this.world.insertBefore(element, this.setupSvg);
-    return { element, head, title, count, rack, host, shadow, links, roots, note, wiringSvg, controlSvg, rubberSvg, container: null, cards: new Map(), sizes: new Map(), key: null };
+    return { element, head, title, count, rack, host, shadow, links, roots, note, wiringSvg, controlSvg, engineSvg, rubberSvg, container: null, cards: new Map(), sizes: new Map(), key: null };
   }
 
   /** The style sheets of the panel, linked in a Stack's shadow root. */
@@ -1208,8 +1210,8 @@ export class SignalPlane extends HTMLElement {
   /** The opened instrument's engine band (`engineBand`, from its cube as laid out; the default until it is). */
   engineBandNow() {
     // Below the control band the default band does: no Control plane is laid out before it first shows.
-    if (!this.layer && this.ratio() < CONTROL_BAND[0]) return ENGINE_BAND;
-    if (this.layer && this.layer !== 'control' && this.layer !== 'engine') return ENGINE_BAND;
+    // A chosen layer draws each drawing wholly in or out: no cube decides a band there.
+    if (this.layer || this.ratio() < CONTROL_BAND[0]) return ENGINE_BAND;
     const cube = this.controlNow()?.layout?.cube;
     const fit = this.fitK();
     if (!cube || !fit || !this.viewport.w) return ENGINE_BAND;
@@ -1232,6 +1234,16 @@ export class SignalPlane extends HTMLElement {
     return this.engineBandNow()[1];
   }
 
+  /**
+   * The opacities drawn now (`planeFades` at `fadeDepth`). At the Engine
+   * layer chosen alone only the Engine drawing shows in the focused Stack:
+   * the front panels, the Wiring and the Control drawings are out.
+   */
+  fadesNow() {
+    const fades = planeFades(this.fadeDepth(), this.engineBandNow());
+    return this.layer === 'engine' ? { ...fades, panels: 0, controls: 0, board: 0, openWiring: 0, sheet: 0, deep: 1 } : fades;
+  }
+
   /** The person (or a command) moved the view: from now on it is theirs, never fitted again by itself. */
   setView(view) {
     this.stopTravel();
@@ -1245,7 +1257,7 @@ export class SignalPlane extends HTMLElement {
    * what the plane holds and draws now. `elements`: every element under it, the front panels'
    * and controls' shadow roots included; `drawn`: those shown (not `display: none`, `[hidden]` or
    * `visibility: hidden`, under no zero opacity); both per layer (`setup`, each Stack by name,
-   * `deep` the Engine's board, `chrome` the bar and notes). `renders` and `renderMs`: the
+   * `chrome` the bar and notes; the Engine drawing is its Stack's). `renders` and `renderMs`: the
    * view's renders since the plane was made, and their script time. Reads computed styles,
    * so it is called by a measurement, never per frame. Never writes anything. An order of
    * magnitude, not an exact count: light-DOM children of a shadow host count whether slotted
@@ -1278,7 +1290,7 @@ export class SignalPlane extends HTMLElement {
       const on = style.display !== 'none' && !element.hidden && Number(style.opacity) > 0 && style.visibility !== 'hidden';
       return walk(element, on, { elements: 1, drawn: on ? 1 : 0 });
     };
-    const layers = { setup: layer(this.setupSvg), deep: layer(this.deep), chrome: { elements: 0, drawn: 0 } };
+    const layers = { setup: layer(this.setupSvg), chrome: { elements: 0, drawn: 0 } };
     for (const part of [this.bar, this.notes]) {
       const counted = layer(part);
       layers.chrome.elements += counted.elements;
@@ -1286,7 +1298,7 @@ export class SignalPlane extends HTMLElement {
     }
     const stacks = {};
     for (const [name, s] of this.stacks) stacks[name] = layer(s.element);
-    const all = [layers.setup, layers.deep, layers.chrome, ...Object.values(stacks)];
+    const all = [layers.setup, layers.chrome, ...Object.values(stacks)];
     return {
       level: this.level(),
       view: { ...this.view },
@@ -1330,9 +1342,8 @@ export class SignalPlane extends HTMLElement {
     }
     this.renderText(v.k);
     const r = this.fadeDepth();
-    const engine = this.engineBandNow();
-    const fades = planeFades(r, engine);
-    const level = this.layer ?? levelOf(r, engine);
+    const fades = this.fadesNow();
+    const level = this.layer ?? levelOf(r, this.engineBandNow());
     this.dataset.level = level;
     opacity(this.setupSvg, fades.setup);
     for (const [name, s] of this.stacks) {
@@ -1355,12 +1366,13 @@ export class SignalPlane extends HTMLElement {
       if (!focused) {
         hide(s.wiringSvg);
         hide(s.controlSvg);
+        hide(s.engineSvg);
       }
     }
     this.renderWiring(fades);
     this.renderControl(fades);
-    this.renderDeep(fades, level);
-    this.renderBar(level, this.layer ? this.scaleRatio() : r, fades);
+    this.renderEngine(fades);
+    this.renderBar(level, this.layer ? this.scaleRatio() : r);
   }
 
   /** The Setup level's text sizes at scale `k` (`textSizes`: readable at the Setup's fit, never past the room the layout gives them), as custom properties every level's text reads. */
@@ -1725,101 +1737,106 @@ export class SignalPlane extends HTMLElement {
     });
   }
 
-  // The Engine (ADR 0051 §8: Control → Engine): ADR 0047's board and its die zoom, laid on the cube.
+  // The Engine layer (the owner's decision of 2026-11-03): every instrument's inside in its own rectangle (ui/lib/plane-engine.js),
+  // a drawing of the focused Stack like the Wiring and Control ones, in the same transform: the view never changes with the layer.
 
-  /** The opened instrument's chips on the board's top level (its coordinates), their union, or null. */
-  engineFrame() {
-    const names = new Set(this.controlNow()?.layout.cube.names ?? []);
-    const layout = this.schematic.layoutOf?.('');
-    const nodes = (layout?.nodes ?? []).filter((n) => n.kind === 'instance' && names.has(n.name));
-    if (!nodes.length) return null;
-    const x0 = Math.min(...nodes.map((n) => n.x));
-    const y0 = Math.min(...nodes.map((n) => n.y));
-    const x1 = Math.max(...nodes.map((n) => n.x + n.w));
-    const y1 = Math.max(...nodes.map((n) => n.y + n.h));
-    return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
-  }
-
-  /** Where the board's frame is laid: the cube on the plane and on the screen, and the board's stage's offset. */
-  engineMap(view = this.view) {
-    const rect = this.focusRect();
-    const c = this.controlNow()?.layout.cube;
-    const frame = this.engineFrame();
-    if (!rect || !c || !frame) return null;
-    const cube = { x: rect.x + c.x, y: rect.y + c.y, w: c.w, h: c.h };
-    const stage = this.schematic.stage?.getBoundingClientRect?.();
-    const own = this.stage.getBoundingClientRect();
-    const offset = stage ? { x: stage.left - own.left, y: stage.top - own.top } : { x: 0, y: 0 };
-    return { frame, cube, onto: screenRect(view, cube), offset };
-  }
-
-  renderDeep(fades, level) {
-    const shown = fades.deep > 0 && Boolean(this.opened);
-    if (this.deep.hidden === shown) this.deep.hidden = !shown;
-    if (!shown) {
-      this.deepOwned = false;
-      return;
-    }
-    opacity(this.deep, fades.deep);
-    this.deep.style.pointerEvents = level === 'engine' ? '' : 'none';
-    // The board's layout can land after it was first laid (its instrument's frame moves): a chosen Engine layer lays it again.
-    const frame = this.layer === 'engine' ? this.engineFrame() : null;
-    const frameKey = frame ? `${frame.x},${frame.y},${frame.w},${frame.h}` : '';
-    if (level === 'engine' && this.deepOwned && frameKey === this.deepFrameKey) return;
-    this.deepFrameKey = frameKey;
-    this.deepOwned = level === 'engine';
-    if (this.layer === 'engine') this.watchBoardFrame();
-    const map = this.engineMap();
-    if (map) {
-      this.schematic.fitted = true;
-      // The board is laid on its cube where the plane's view shows it: every layer keeps the zoom and the position (the owner's, 2026-11-02).
-      this.schematic.setView?.(frameOnto(map.frame, map.onto, map.offset));
-    }
-    // Just un-hidden, the board has no stage or layout yet: laid on the cube again once it has.
-    if ((!this.schematic.viewport?.w || !map) && !this.deepPending) {
-      this.deepPending = true;
-      requestAnimationFrame(() => {
-        this.deepPending = false;
-        if (!this.deep.hidden) {
-          this.deepOwned = false;
-          this.render();
-        }
+  /** Every instrument's Engine in the focused Stack (laid out and drawn once per graph, Stack layout and ownership), or null. */
+  enginesNow() {
+    const s = this.stacks.get(this.focused);
+    if (!s?.layout || !this.graph || !this.model) return null;
+    const wiring = this.wiringNow();
+    // What the Engine depends on: the structure, the Stack's layout, who holds what, and the Wiring's ports (where the edge is crossed).
+    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${wiring?.key ?? ''}\n${JSON.stringify([...this.model.owner])}`;
+    if (s.engines?.key === key) return s.engines;
+    const t0 = performance.now();
+    const ports = wiring?.layout.ports ?? [];
+    const layouts = s.layout.rects.map((r) => {
+      const mine = ports.filter((p) => p.entry === r.entry);
+      return engineLayout({
+        entry: r.entry,
+        rect: { x: r.x, y: r.y, w: r.w, h: r.h },
+        names: engineOf(r.entry, this.model.owner),
+        graph: this.graph,
+        edgeIns: new Map(mine.filter((p) => p.side === 'in').map((p) => [p.address, p.y])),
+        edgeOuts: new Map(mine.filter((p) => p.side === 'out').map((p) => [p.address, p.y])),
+        title: instrumentTitle(r.entry, this.cards),
       });
-    }
+    });
+    s.engines = { key, layouts, ms: performance.now() - t0 };
+    this.drawEngines(s, s.engines);
+    return s.engines;
   }
 
-  /** For a moment after the Engine layer is chosen: when the board's layout lands and its instrument's frame moves, the board is laid again. */
-  watchBoardFrame() {
-    if (this.boardWatch) return;
-    const until = performance.now() + 2000;
-    const step = () => {
-      if (this.layer !== 'engine' || performance.now() > until) {
-        this.boardWatch = null;
-        return;
+  /** The Stack's Engine drawing: per instrument its faint frame and title, its wires, its cards and their pins, each with a hover title. */
+  drawEngines(s, engines) {
+    const root = svg('g', { transform: 'translate(-2 -2)' });
+    const items = [];
+    const elements = new Map();
+    for (const e of engines.layouts) {
+      const g = svg('g', { 'data-entry': e.entry });
+      const r = e.rect;
+      g.append(svg('rect', { class: 'e-frame', x: r.x + 2, y: r.y + 2, width: r.w - 4, height: r.h - 4, rx: 6 }));
+      g.append(svg('text', { class: 'e-title', x: r.x + 16, y: r.y + 18 }, `${String(e.title).toUpperCase()}${e.cards.length ? '' : ' · NO ENGINE'}`));
+      const k = e.scale;
+      const wires = svg('g', { class: 'e-wires' });
+      for (const w of e.wires) {
+        const id = `${e.entry}|${w.id}`;
+        const path = svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k) });
+        path.append(svg('title', {}, `${w.from} → ${w.to} (${w.kind})${w.edge ? ', through the instrument’s edge' : ''}`));
+        wires.append(path);
+        for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
+        elements.set(id, path);
+        items.push({ id, points: w.points });
       }
-      const f = this.engineFrame();
-      if (f && `${f.x},${f.y},${f.w},${f.h}` !== this.deepFrameKey) this.render();
-      this.boardWatch = requestAnimationFrame(step);
-    };
-    this.boardWatch = requestAnimationFrame(step);
-  }
-
-  /** The board's top-level view mapped back to the plane, the board given up (zooming out of it, Escape at its top, another layer chosen). */
-  leaveEngine() {
-    if (this.deepOwned) {
-      const map = this.engineMap();
-      const view = this.schematic.view;
-      if (map && view) {
-        const root = reroot(view, (l) => this.schematic.layoutOf(l), '');
-        this.view = planeFromFrame(root, map.frame, map.cube, map.offset);
+      g.append(wires);
+      for (const c of e.cards) {
+        const id = `${e.entry}|${c.id}`;
+        // A composite is one card for now; step 2 lays its inside out in `c.body` (ui/lib/plane-engine.js `layLevel`).
+        const card = svg('g', { class: `e-node${c.composite ? ' composite' : ''}`, 'data-name': c.name });
+        card.append(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k }));
+        // The header band inset by half the card's edge, as the schematic's cards.
+        card.append(svg('path', { class: 'e-head', d: headPath({ x: c.head.x + 0.75 * k, y: c.head.y + 0.75 * k, width: c.head.w - 1.5 * k, height: c.head.h - 0.75 * k }, Math.max(0, (CARD_RX - 0.75) * k)) }));
+        card.append(svg('text', { class: 'e-name', x: c.x + 8 * k, y: c.y + 14 * k, 'font-size': 12 * k }, c.name));
+        card.append(svg('text', { class: 'e-module', x: c.x + 8 * k, y: c.y + 26 * k, 'font-size': 9.5 * k }, c.module));
+        card.append(svg('title', {}, `${c.name}: ${c.module}${c.composite ? ' (a composite: zooming into its inside comes next)' : ''}`));
+        g.append(card);
+        elements.set(id, card);
+        items.push({ id, x: c.x, y: c.y, w: c.w, h: c.h });
       }
+      for (const p of e.pins) {
+        const id = `${e.entry}|${p.id}`;
+        const dot = svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k });
+        dot.append(svg('title', {}, `${p.address} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
+        const label = svg('text', { class: 'e-pin-label', x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end' }, p.name);
+        g.append(dot, label);
+        elements.set(id, dot);
+        items.push({ id, x: p.x, y: p.y });
+      }
+      for (const p of e.edges) {
+        const id = `${e.entry}|${p.id}`;
+        const dot = svg('circle', { class: `e-edge ${p.side}`, cx: p.x, cy: p.y, r: 5 });
+        dot.append(svg('title', {}, p.side === 'in' ? `${p.from} → ${p.address}: through the instrument’s edge` : `${p.address} → ${p.to}: through the instrument’s edge`));
+        g.append(dot);
+        elements.set(id, dot);
+        items.push({ id, x: p.x, y: p.y });
+      }
+      root.append(g);
     }
-    this.deepOwned = false;
+    s.engineSvg.replaceChildren(root);
+    s.engineItems = items;
+    s.engineElements = elements;
+    s.engineShown = null;
   }
 
-  /** Whether the board is at its top level (nothing zoomed into), so the plane may take it back. */
-  boardAtTop() {
-    return !(this.schematic.pinned?.size > 0) && (this.schematic.view?.path ?? '') === '';
+  renderEngine(fades) {
+    const s = this.stacks.get(this.focused);
+    if (!s) return;
+    if (!(fades.deep > 0)) return hide(s.engineSvg);
+    const engines = this.enginesNow();
+    if (!engines) return hide(s.engineSvg);
+    show(s.engineSvg);
+    opacity(s.engineSvg, fades.deep);
+    this.cull(s, s.engineItems, s.engineElements, 'engineShown');
   }
 
   /** Docks the level bar (the breadcrumb, the zoom, Edit layout) in `host`, such as the app's toolbar, with its styles. */
@@ -1831,32 +1848,21 @@ export class SignalPlane extends HTMLElement {
     this.bar.classList.add('docked');
   }
 
-  renderBar(level, r, fades = planeFades(r)) {
+  renderBar(level, r) {
     const instruments = this.instrumentRects().length > 0;
-    const deeper = level === 'engine' ? this.boardLevels.slice(1) : [];
-    const boardEditing = Boolean(this.schematic?.editor?.editing);
-    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}|${deeper.map((l) => l.path).join(',')}|${boardEditing}`;
+    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}`;
     if (key !== this.barKey) {
       this.barKey = key;
       // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
       const layers = html('div', { className: 'layers', role: 'group', ariaLabel: 'Layers' });
       for (const [id, label] of BAR_LAYERS) {
         const b = html('button', { type: 'button', className: 'layer', textContent: label, title: this.layerTitle(id) });
-        const here = (id === level || (id === 'stack' && level === 'setup')) && !deeper.length;
+        const here = id === level || (id === 'stack' && level === 'setup');
         b.setAttribute('aria-current', String(here));
         b.disabled = id !== 'stack' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
-        if (id === 'engine' && level === 'engine' && deeper.length) b.addEventListener('click', () => this.schematic.goTo?.(''));
-        else if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
+        if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
         layers.append(b);
       }
-      // The Engine's deeper layers, as its zoom draws them (Layer 1 inside a chip, Layer 2 inside one of its chips …): named by number, the chip in the title.
-      deeper.forEach((l, i) => {
-        const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${l.name} (${l.path})` });
-        const here = i === deeper.length - 1;
-        b.setAttribute('aria-current', String(here));
-        if (!here) b.addEventListener('click', () => this.schematic.goTo?.(l.path));
-        layers.append(b);
-      });
       this.levelText = html('span', { className: 'level' });
       const zoom = html('span', { className: 'zoom' });
       const step = (text, factor, title) => {
@@ -1867,17 +1873,11 @@ export class SignalPlane extends HTMLElement {
       zoom.append(step('−', 1 / KEY_ZOOM, 'Zoom out'), this.levelText, step('+', KEY_ZOOM, 'Zoom in'));
       // One Edit switch: it edits the shown layer's arrangement (built for the Stack: its front panels' layout).
       const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit' });
-      const engine = level === 'engine';
-      const editable = level === 'stack' || engine;
-      edit.disabled = !editable;
-      edit.title = level === 'stack' ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : engine ? 'Edit: edit the patch here (add, remove and connect; written to the project’s files)' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
-      edit.setAttribute('aria-pressed', String(engine ? boardEditing : Boolean(this.editing)));
+      edit.disabled = level !== 'stack';
+      edit.title = level === 'stack' ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : level === 'engine' ? 'Edit at the Engine layer: comes with step 3' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
+      edit.setAttribute('aria-pressed', String(Boolean(this.editing)));
       edit.addEventListener('click', () => {
-        if (engine) {
-          this.schematic.editor?.setEditing(!this.schematic.editor.editing);
-          this.barKey = null;
-          this.render();
-        } else if (this.editing) this.closeEditLayout();
+        if (this.editing) this.closeEditLayout();
         else this.editLayout();
       });
       this.editButton = edit;
@@ -1889,10 +1889,6 @@ export class SignalPlane extends HTMLElement {
       this.zoomLockButton = lock;
       this.bar.replaceChildren(layers, zoom, lock, edit);
     }
-    // In the plane the bar fades out in the Engine, whose board has its own; docked (the toolbar), it stays.
-    const docked = this.bar.classList.contains('docked');
-    this.bar.hidden = !docked && level === 'engine';
-    opacity(this.bar, docked ? 1 : 1 - fades.deep);
     const text = `${r ? r.toFixed(2) : '0'}×`;
     if (this.levelText.textContent !== text) this.levelText.textContent = text;
   }
@@ -1903,7 +1899,7 @@ export class SignalPlane extends HTMLElement {
     if (id === 'stack') return this.focused ? `Stack ${this.focused}: its instruments' front panels` : 'Stack: the whole project, its Stacks and devices';
     if (id === 'wiring') return 'Wiring: the cables between the instruments';
     const name = this.opened ? instrumentTitle(this.opened, this.cards) : 'the instrument in the middle';
-    return id === 'control' ? `Control: ${name}'s bindings and automation` : `Engine: ${name}'s inside`;
+    return id === 'control' ? `Control: ${name}'s bindings and automation` : 'Engine: every instrument’s inside, in its place';
   }
 
   /** Goes to a layer from wherever the view is (a layer button). */
@@ -1911,7 +1907,6 @@ export class SignalPlane extends HTMLElement {
     if (this.layer) return this.chooseLayer(level);
     const rect = this.focusRect();
     const here = this.level();
-    if (here === 'engine' && level !== 'engine') this.leaveEngine();
     if (level === 'setup') return this.fitSetup();
     if (!rect) return;
     if (level === 'stack') return this.focusStack(this.focused);
@@ -1932,7 +1927,7 @@ export class SignalPlane extends HTMLElement {
     const at = { x: base.x + (opened.x + opened.w / 2) * base.k, y: base.y + (opened.y + opened.h / 2) * base.k };
     const control = this.depthView(CONTROL_BAND[1], base, at);
     if (level === 'control') return this.travel(control.to, control.lift);
-    // The Engine: from the instrument's Control plane, into its cube.
+    // The Engine: from the instrument's Control plane, on into its rectangle.
     this.stopTravel();
     this.view = control.to;
     this.lift = control.lift;
@@ -1943,7 +1938,6 @@ export class SignalPlane extends HTMLElement {
   /** The layer chosen alone (`zoomPicksLayer` false): the view stays where it is; Control and the Engine open the instrument in the middle (or the last opened). */
   chooseLayer(level) {
     if (level === this.layer) return;
-    if (this.layer === 'engine') this.leaveEngine();
     // Into Control or the Engine from above: the instrument in the middle of the stage opens (else the one opened, else the first).
     const above = this.layer !== 'control' && this.layer !== 'engine';
     if ((level === 'control' || level === 'engine') && (above || !this.instrumentRects().some((r) => r.entry === this.opened))) {
@@ -1952,33 +1946,10 @@ export class SignalPlane extends HTMLElement {
       const known = rects.some((r) => r.entry === this.opened) ? this.opened : null;
       this.opened = instrumentAt(rects, centre) ?? known ?? rects[0]?.entry ?? null;
     }
-    // Into the Engine, the view kept: the instrument whose engine (its cube) shows the most on the stage opens.
-    if (level === 'engine') this.opened = this.cubeInView() ?? this.opened;
     if (this.editing && level !== 'stack') this.closeEditLayout();
     this.layer = level;
-    this.deepOwned = false;
     this.barKey = null;
     this.render();
-  }
-
-  /** The instrument whose Control cube covers the most of the stage at the present view, or null when none shows. */
-  cubeInView() {
-    const rect = this.focusRect();
-    if (!rect) return null;
-    let best = null;
-    let most = 0;
-    for (const control of this.controlsNow()) {
-      const c = control.layout.cube;
-      const on = screenRect(this.view, { x: rect.x + c.x, y: rect.y + c.y, w: c.w, h: c.h });
-      const w = Math.min(on.x + on.w, this.viewport.w) - Math.max(on.x, 0);
-      const h = Math.min(on.y + on.h, this.viewport.h) - Math.max(on.y, 0);
-      const area = w > 0 && h > 0 ? w * h : 0;
-      if (area > most) {
-        most = area;
-        best = control.entry;
-      }
-    }
-    return best;
   }
 
   /** The view at depth `z` (`depthOf`) zoomed from `base` about `at` (stage pixels), its top kept in the Stack. */
@@ -2065,7 +2036,6 @@ export class SignalPlane extends HTMLElement {
   toggleZoomLock() {
     this.zoomLock = !this.zoomLock;
     writeZoomLock(this.zoomLock);
-    if (this.schematic) this.schematic.zoomLock = this.zoomLock;
     this.zoomLockButton?.setAttribute('aria-pressed', String(this.zoomLock));
     this.say(this.zoomLock ? 'Zoom lock on: the wheel scrolls' : 'Zoom lock off: the wheel zooms');
   }
@@ -2104,7 +2074,6 @@ export class SignalPlane extends HTMLElement {
   travelTo(z, at = { x: this.viewport.w / 2, y: this.viewport.h / 2 }) {
     const fit = this.fitK();
     if (!fit) return;
-    if (this.level() === 'engine') this.leaveEngine();
     const { r, lift } = splitDepth(z);
     let to = zoomAbout(this.view, (fit * r) / this.view.k, at, fit, this.engineBandNow()[1]);
     to = { ...to, ...clampTop(to, this.focusRect(), this.viewport) };
@@ -2120,15 +2089,11 @@ export class SignalPlane extends HTMLElement {
     this.travelTo(CONTROL_BAND[1], centre);
   }
 
-  /** Control → Engine: the view zoomed until the cube fills the stage, centred on it. */
+  /** Control → Engine (the coupled zoom): the view zoomed on into the engine band, about the opened instrument's centre. */
   enterEngine() {
-    const map = this.engineMap();
-    const fit = this.fitK();
-    if (!map || !fit) return;
-    const engine = this.engineBandNow();
-    const c = { x: map.onto.x + map.onto.w / 2, y: map.onto.y + map.onto.h / 2 };
-    const zoomed = zoomAbout(this.view, (fit * splitDepth(engine[1]).r) / this.view.k, c, fit, engine[1]);
-    this.travel(panBy(zoomed, this.viewport.w / 2 - c.x, this.viewport.h / 2 - c.y), LIFT);
+    const r = this.instrumentRects().find((x) => x.entry === this.opened);
+    if (!r) return;
+    this.travelTo(this.engineBandNow()[1], toScreen(this.view, { x: r.x + r.w / 2, y: r.y + r.h / 2 }));
   }
 
   // The pointer, the wheel, the keys.
@@ -2302,13 +2267,12 @@ export class SignalPlane extends HTMLElement {
    * The plane's items in the app's context menu (`contextMenu`, as
    * ui/app/app.js asks every element on the click's path): on a front
    * panel's card at the Stack level, Edit layout, and in Signal.app the
-   * card's Move to items; the board's own menu in the Engine; else none.
+   * card's Move to items; Show Instrument and Show Stack on every layer; else none.
    */
   contextMenu(event) {
     const path = event.composedPath?.() ?? [];
-    if (path.includes(this.deep) || (this.editing && path.includes(this.editing.overlay))) return null;
+    if (this.editing && path.includes(this.editing.overlay)) return null;
     const level = this.level();
-    if (level === 'engine') return null;
     const name = this.stackAt(event);
     // The Deck's empty background: a new Stack there (the owner's, 2026-11-02).
     if (!name) {
@@ -2355,7 +2319,7 @@ export class SignalPlane extends HTMLElement {
 
   /** The drawing the pointer edits at this zoom: `wiring`, `control`, or null (the more opaque one takes the press, ADR 0050 §6). */
   editedLevel() {
-    const fades = planeFades(this.fadeDepth(), this.engineBandNow());
+    const fades = this.fadesNow();
     if (fades.deep >= HIT_OPACITY) return null;
     if (fades.sheet >= HIT_OPACITY && this.opened) return 'control';
     if (fades.board >= HIT_OPACITY) return 'wiring';
@@ -2395,7 +2359,7 @@ export class SignalPlane extends HTMLElement {
   /** Before a control sees a press: a pin, a via or a port under it starts a cable (ADR 0051 §9: patch cables at Wiring, automation and binds at Control). */
   pointerDownCapture(event) {
     if (this.overEditor(event)) return;
-    if (event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser)) return;
+    if (event.button !== 0 || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser)) return;
     this.closeChooser();
     const at = this.point(event);
     const hit = this.hitAt(at);
@@ -2410,7 +2374,7 @@ export class SignalPlane extends HTMLElement {
 
   pointerDown(event) {
     if (this.overEditor(event)) return;
-    if (this.gesture || event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
+    if (this.gesture || event.button !== 0 || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
     // At the Setup level a press on a cable's device end or a Stack's out pin drags a Setup cable (ADR 0038, 0051 §3).
     if (event.button === 0 && this.level() === 'setup' && this.model && !this.onControl(event)) {
       const grabbed = this.setupCableAt(toPlane(this.view, this.point(event)));
@@ -2733,39 +2697,17 @@ export class SignalPlane extends HTMLElement {
 
   doubleClick(event) {
     if (this.overEditor(event)) return;
-    if (event.composedPath().includes(this.deep) || this.onControl(event)) return;
+    if (this.onControl(event)) return;
     const name = this.stackAt(event);
     if (name && this.level() === 'setup') this.focusStack(name);
   }
 
-  /** In the Engine the board zooms by itself; a zoom out of its top level comes back to the plane's Control. */
+  /** The layer chosen alone: the wheel is the plane's everywhere on it, over a knob or a fader too (the owner's, 2026-11-02). */
   wheelCapture(event) {
-    // The layer chosen alone: the wheel is the plane's everywhere on it, over a knob or a fader too (the owner's, 2026-11-02).
-    if (this.layer && !this.overEditor(event) && !(this.level() === 'engine' && event.composedPath().includes(this.deep))) {
-      event.stopPropagation();
-      event.preventDefault();
-      this.wheelZoom(event, false);
-      return;
-    }
-    if (this.deep.hidden || this.level() !== 'engine' || !event.composedPath().includes(this.deep)) return;
-    // The layer chosen alone: the board's wheel is the board's, zooming out past its fit too (it never leaves the layer).
-    if (this.layer) return;
-    // Locked, or Shift with a mouse's wheel: the board scrolls, it never hands a zoom back.
-    if (this.zoomLock || (event.shiftKey && !event.ctrlKey)) return;
-    const out = (event.ctrlKey || this.kindOf(event) !== 'trackpad') && event.deltaY > 0;
-    if (!out || !this.boardAtTop()) return;
-    const fit = this.fitK();
-    const map = this.engineMap();
-    if (!fit || !map) return;
-    const root = reroot(this.schematic.view, (l) => this.schematic.layoutOf(l), '');
-    const back = planeFromFrame(root, map.frame, map.cube, map.offset);
-    if (depthOf(back.k / fit, LIFT) > this.engineBandNow()[1] * 1.0001) return;
+    if (!this.layer || this.overEditor(event)) return;
     event.stopPropagation();
     event.preventDefault();
-    this.leaveEngine();
-    // The rest of this gesture is the plane's, zooming on out: one curve in and out.
-    this.handoff = event.timeStamp;
-    this.wheelZoom(event, true);
+    this.wheelZoom(event, false);
   }
 
   /**
@@ -2776,13 +2718,9 @@ export class SignalPlane extends HTMLElement {
    */
   wheel(event) {
     if (this.overEditor(event)) return;
-    if (event.composedPath().includes(this.deep) && !this.deep.hidden && this.level() === 'engine') return;
-    // A gesture handed back by the board (`wheelCapture`) goes on zooming here until it pauses.
-    const handed = this.handoff !== undefined && event.timeStamp - this.handoff < GESTURE_GAP_MS;
-    if (!handed && !takesWheel(this, event)) return;
+    if (!takesWheel(this, event)) return;
     event.preventDefault();
-    if (handed) this.handoff = event.timeStamp;
-    this.wheelZoom(event, handed);
+    this.wheelZoom(event, false);
   }
 
   /** The wheel gesture's kind (`WheelKinds`), classified once per event. */
@@ -2825,8 +2763,6 @@ export class SignalPlane extends HTMLElement {
   /** A zoom by `factor` about screen point `at`: coming to a Stack's fit from below focuses it (its width fitted); below the control band the instrument under `at` is the one that opens. Never the selection. */
   zoomBy(factor, at) {
     if (this.layer) {
-      // The board's view is the plane's, zoomed on from there (the bar's −/+ at the Engine layer).
-      if (this.layer === 'engine') this.leaveEngine();
       // The layer is chosen alone: the zoom only scales, about `at` (no focus, no instrument opens, no fit stop).
       const fit = this.fitK() ?? fitScale(this.layout?.bounds ?? { w: 1, h: 1 }, this.viewport);
       const k = Math.min(fit * 64, Math.max(fit * MIN_SCALE, this.view.k * factor));
@@ -2901,17 +2837,14 @@ export class SignalPlane extends HTMLElement {
     const command = keyCommand('plane', event)?.id ?? null;
     if (!command) return;
     const level = this.level();
-    const inDeep = path.includes(this.deep);
-    const inBoard = level === 'engine' && inDeep;
     if (command === 'plane.undo' || command === 'plane.redo') {
-      if ((level === 'wiring' || level === 'control') && !inDeep) {
+      if (level === 'wiring' || level === 'control') {
         event.preventDefault();
         this.writePatch([], '', command === 'plane.redo' ? +1 : -1);
       }
       return;
     }
     if (this.layer && (command === 'plane.out' || command === 'plane.in')) {
-      if (inBoard && command === 'plane.out' && (!this.boardAtTop() || this.schematic.selected?.length || this.schematic.tracing)) return;
       if (command === 'plane.out' && this.selection && (level === 'wiring' || level === 'control')) {
         event.preventDefault();
         this.select(null);
@@ -2925,29 +2858,19 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     if (command === 'plane.out') {
-      if (inBoard) {
-        if (!this.boardAtTop() || this.schematic.selected?.length || this.schematic.tracing) return;
-        event.preventDefault();
-        event.stopPropagation();
-        this.leaveEngine();
-        this.travelTo(CONTROL_BAND[1]);
-        return;
-      }
       if (this.selection && (level === 'wiring' || level === 'control')) {
         event.preventDefault();
         this.select(null);
         return;
       }
       event.preventDefault();
-      if (level === 'engine') {
-        this.leaveEngine();
-        this.travelTo(CONTROL_BAND[1]);
-      } else if (level === 'control') this.travelTo(WIRING_BAND[1]);
+      if (level === 'engine') this.travelTo(CONTROL_BAND[1]);
+      else if (level === 'control') this.travelTo(WIRING_BAND[1]);
       else if (level === 'wiring') this.focusStack(this.focused);
       else if (level === 'stack') this.fitSetup();
       return;
     }
-    if (inBoard || level === 'engine' || this.onControl(event)) return;
+    if (this.onControl(event)) return;
     if (command === 'plane.delete') {
       if ((level === 'wiring' || level === 'control') && this.deleteSelection()) event.preventDefault();
       return;

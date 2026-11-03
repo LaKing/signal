@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CONTROL_BAND, ENGINE_BAND, ENGINE_GAP, FOCUS_BAND, LIFT, MARGIN_PX, depthOf, splitDepth, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, clampScroll, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, opensAt, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout, zoomStep } from './plane-zoom.js';
+import { CONTROL_BAND, ENGINE_BAND, ENGINE_GAP, FOCUS_BAND, LIFT, MARGIN_PX, depthOf, splitDepth, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, clampScroll, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, opensAt, planeFades, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout, zoomStep } from './plane-zoom.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≈ ${b}`);
 
@@ -175,28 +175,6 @@ test('fit all shows the bounds whole, centred', () => {
   assert.ok(r.x >= MARGIN_PX - 1e-9 && r.y >= MARGIN_PX - 1e-9);
   assert.ok(r.x + r.w <= viewport.w - MARGIN_PX + 1e-9 && r.y + r.h <= viewport.h - MARGIN_PX + 1e-9);
   close(r.x + r.w / 2, viewport.w / 2);
-});
-
-test('the Engine’s view lays the board’s frame on the cube, centred, and maps back', () => {
-  const frame = { x: 200, y: -40, w: 600, h: 300 };
-  const view = { k: 6, x: -900, y: -2000 };
-  const cube = { x: 400, y: 500, w: 144, h: 96 };
-  const offset = { x: 0, y: 0 };
-  const onto = screenRect(view, cube);
-  const board = frameOnto(frame, onto, offset);
-  // The frame fits the cube's rectangle on screen, centred on its centre (the zoom point stays put).
-  const fx = (frame.x + frame.w / 2) * board.k + board.x;
-  const fy = (frame.y + frame.h / 2) * board.k + board.y;
-  close(fx, onto.x + onto.w / 2);
-  close(fy, onto.y + onto.h / 2);
-  assert.ok(frame.w * board.k <= onto.w + 1e-9 && frame.h * board.k <= onto.h + 1e-9);
-  const back = planeFromFrame(board, frame, cube, offset);
-  close(back.k, view.k, 1e-9);
-  close(back.x, view.x, 1e-6);
-  close(back.y, view.y, 1e-6);
-  // Zooming the plane zooms the board in proportion: one curve through the hand-off.
-  const twice = frameOnto(frame, screenRect({ k: 12, x: view.x * 2, y: view.y * 2 }, cube), offset);
-  close(twice.k, board.k * 2, 1e-9);
 });
 
 test('the fades are continuous across every band: no step anywhere, the steepest change the smoothstep’s', () => {
