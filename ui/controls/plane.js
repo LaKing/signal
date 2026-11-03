@@ -46,7 +46,13 @@
 //     changes when the layer does. A composite is one card (a chip); zoomed
 //     in, its inside fades in within the card's body, in place and scaled
 //     into it, recursively (`renderInsides`), and the bar names the chips
-//     the view is inside (Layer 1, Layer 2, …).
+//     the view is inside (Layer 1, Layer 2, …). Step 3: a click selects a
+//     card, a pin or a wire (inside a chip revealed enough too, by full
+//     address, ui/lib/plane-engine-edit.js); with the bar's Edit on, a drag
+//     from a pin connects, Delete removes, the menu adds a module (the
+//     schematic's browser) or removes, each a `patch` at its level: the
+//     top level for an instrument, the composite's for a chip's inside
+//     (its definition, every instance of it); Escape steps out one chip.
 // The levels are nested fades of one zoom; no rectangle moves, and zoom
 // never changes the selection.
 // The Stacks are `ui/plane.toml` (served as /project/plane.toml), or one
@@ -80,10 +86,15 @@ import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, de
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { CARD_RX, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
+import { ENGINE_SELECTABLE, addOps, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
-import { addConnection, connectTargets, removeConnection } from '../lib/schematic-patch.js';
+import { addConnection, connectTargets, defaultName, instanceCount, nameError, namesOf, removeConnection } from '../lib/schematic-patch.js';
+import { EXPANDED, browserEntries } from '../lib/module-browser.js';
+import { projectKey } from '../lib/schematic-palette.js';
+import { levelData, loadable } from '../lib/slot.js';
+import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import { formatValue } from '../lib/format.js';
 import { toPosition } from '../lib/taper.js';
 import { HIT_OPACITY, ZOOM_MS, ease, tween } from '../lib/board-zoom.js';
@@ -308,13 +319,35 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-inside .e-card { fill: #1b2028; }
 .e-inside .e-wire, .e-inside .e-card, .e-inside .e-pin { vector-effect: none; }
 .e-inside[data-faint] .e-card, .e-inside[data-faint] .e-pin, .e-inside[data-faint] .e-wire { pointer-events: none; }
-.rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
+/* The Engine's selection (step 3), as Wiring's: a glow, the card's edge and a pin in the focus colour (inside a chip a line keeps its width at scale). */
+.e-wire.selected { stroke-width: 4; filter: drop-shadow(0 0 3px currentColor); }
+.e-card.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
+.e-pin.selected, .e-edge.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
+.stage[data-engine-edit] .e-pin { cursor: crosshair; }
+/* No dashed lines (the owner's rule): the cable being drawn is a plain line. */
+.rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .chooser { position: absolute; z-index: 5; width: min(640px, calc(100% - 16px)); overflow: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 4px; border-radius: 6px; background: var(--signal-panel, #1f232b); border: 1px solid #3a414d; box-shadow: 0 6px 20px #0008; }
 .chooser-title { grid-column: 1 / -1; padding: 2px 6px 4px; color: var(--signal-muted, #8a93a3); }
 .chooser button { text-align: left; background: none; border: none; color: var(--signal-fg, #d6dbe4); padding: 3px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer; }
 .chooser button:hover, .chooser button:focus-visible { background: #2c3340; outline: none; }
 .notes p.said { color: var(--signal-fg, #d6dbe4); }
 @media (prefers-reduced-motion: reduce) { .world { transition: none; } }
+/* The schematic's Add module browser, for Add module… at the Engine (its preview frames plain, no dashed line). */
+${BROWSER_CSS}
+.browser .preview .frame-box { border-style: solid; }
+/* Its schematic preview in the schematic's look, kept apart from the Setup's own .box, .pin and .pin-label. */
+.browser svg.preview-svg .box { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; stroke-dasharray: none; vector-effect: non-scaling-stroke; }
+.browser svg.preview-svg .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
+.browser svg.preview-svg .frame { fill: none; stroke: #5b6474; vector-effect: non-scaling-stroke; }
+.browser svg.preview-svg .pins > .box { fill: none; stroke: #2a2f38; }
+.browser svg.preview-svg .name { fill: var(--signal-fg, #d6dbe4); font-weight: 600; font-size: 12px; }
+.browser svg.preview-svg .module { fill: var(--signal-muted, #8a93a3); font-size: 10px; }
+.browser svg.preview-svg .pin-label { fill: var(--signal-muted, #8a93a3); font-size: 9px; }
+.browser svg.preview-svg .pin { fill: #2a2f38; stroke: var(--signal-muted, #8a93a3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.browser svg.preview-svg .pin.signal { stroke: var(--signal-accent, #4fc3f7); } .browser svg.preview-svg .pin.events { stroke: var(--signal-meter-rms, #3ecf8e); } .browser svg.preview-svg .pin.vector { stroke: var(--signal-effective, #ffb74d); }
+.browser svg.preview-svg .pin.parameter:not(.connected) { stroke: var(--signal-muted, #8a93a3); }
+.browser svg.preview-svg .wire { fill: none; stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.browser svg.preview-svg .wire.events { stroke: var(--signal-meter-rms, #3ecf8e); } .browser svg.preview-svg .wire.vector { stroke: var(--signal-effective, #ffb74d); }
 `;
 
 /** A front panel's shadow root CSS: the panel's cards placed by the plane, the panel's own look otherwise. */
@@ -425,6 +458,10 @@ export class SignalPlane extends HTMLElement {
     this.windowTold = null;
     /** The Edit layout over the plane (`editLayout`), or null. */
     this.editing = null;
+    /** The bar's Edit at the Engine (view state; off when the layer changes). */
+    this.engineEdit = false;
+    /** Instances added from an instrument's Engine, kept in it until a connection or a control joins them to one (`placedOwners`; view state of this page). */
+    this.placed = new Map();
   }
 
   connectedCallback() {
@@ -651,6 +688,12 @@ export class SignalPlane extends HTMLElement {
     this.graphKey = JSON.stringify([graph?.top?.instances?.map((i) => [i.name, i.module, i.ports?.length, i.parameters?.length]), graph?.top?.connections?.map((c) => [c.from, c.to]), Object.entries(graph?.composites ?? {}).map(([k, c]) => [k, c.connections?.map((x) => [x.from, x.to]), c.parameters?.map((x) => [x.name, x.to]), c.instances?.map((x) => [x.name, x.module, x.composite])])]);
     const cleared = this.session.graphSeen(graph);
     if (cleared?.cleared) this.say(cleared.cleared);
+    // The instances kept where they were added are this project's (another one's names are not).
+    const project = graph?.projectId ?? `${graph?.folder ?? ''}\n${graph?.project ?? ''}`;
+    if (project !== this.placedFor) {
+      this.placed.clear();
+      this.placedFor = project;
+    }
     this.readPlane().then(() => this.recompute());
   }
 
@@ -698,7 +741,10 @@ export class SignalPlane extends HTMLElement {
     // The one identity rule (ui/lib/plane-file.js): a card showing a slot with a part is that slot's instrument.
     const cards = withEntries(this.panelCards ?? [], slots);
     this.cards = cards;
-    const owner = assignInstruments({ instances, connections, cards });
+    const assigned = assignInstruments({ instances, connections, cards });
+    // An instance added from an instrument's Engine stays in it until it is joined to one (view state, `placedOwners`).
+    const { owner, forget } = placedOwners(assigned, this.placed, instances, new Set([...cards.map((c) => entryOf(c)), ...slots]));
+    for (const name of forget) this.placed.delete(name);
     // The unstacked warning needs the plane: computed on the plane read (or derived), then checked with it.
     let shown = planeOf(this.planeText, cards, plateWidth, { slots });
     const members = stackMembers(shown.plane, owner, instances);
@@ -1777,6 +1823,8 @@ export class SignalPlane extends HTMLElement {
       });
     });
     s.engines = { key, layouts, ms: performance.now() - t0 };
+    // The hit items of the instruments' level (the revealed chips' insides add theirs, `engineHitItems`).
+    s.engineHit = layouts.flatMap((e) => engineItems(e, { entry: e.entry }));
     this.drawEngines(s, s.engines);
     return s.engines;
   }
@@ -1790,6 +1838,8 @@ export class SignalPlane extends HTMLElement {
     s.engineChips = new Map();
     s.engineTopChips = [];
     s.insidesBuilt = new Set();
+    // The elements a selection marks (`keyed`): the instruments' level's here, each built inside's on its chip.
+    s.engineKeyed = [];
     for (const e of engines.layouts) {
       const g = svg('g', { 'data-entry': e.entry });
       const r = e.rect;
@@ -1802,7 +1852,7 @@ export class SignalPlane extends HTMLElement {
       };
       this.drawLevel(s, g, e, { entry: e.entry, parent: null, add });
       for (const p of e.edges) {
-        const dot = svg('circle', { class: `e-edge ${p.side}`, cx: p.x, cy: p.y, r: 5 });
+        const dot = this.keyed(svg('circle', { class: `e-edge ${p.side}`, cx: p.x, cy: p.y, r: 5 }), p.side === 'in' ? wireKey(p.from, p.address) : wireKey(p.address, p.to), s.engineKeyed);
         dot.append(svg('title', {}, p.side === 'in' ? `${p.from} → ${p.address}: through the instrument’s edge` : `${p.address} → ${p.to}: through the instrument’s edge`));
         g.append(dot);
         add(p.id, dot, { x: p.x, y: p.y });
@@ -1828,16 +1878,12 @@ export class SignalPlane extends HTMLElement {
     // A line's width at this level: the stylesheet's (plane units) at the instrument's level, at scale inside a chip.
     const line = (width) => (parent ? { style: `stroke-width: ${+(width * k).toPrecision(4)}` } : {});
     // An address as the person knows it: inside the chip /synth, `fenv.gate` is /synth/fenv.gate and its input `gate` /synth.gate.
-    const full = (a) => {
-      if (!parent) return a;
-      const text = String(a);
-      if (text.startsWith('@inputs.') || text.startsWith('@outputs.')) return `${prefix}.${text.slice(text.indexOf('.') + 1)}`;
-      return `${prefix}/${text.replace(/^\//, '')}`;
-    };
+    const full = (a) => fullAddress(prefix, a);
+    const keyed = parent ? (parent.keyed = []) : s.engineKeyed;
     const edgeNote = parent ? `, through ${parent.card.name}’s edge` : ', through the instrument’s edge';
     const wires = svg('g', { class: 'e-wires' });
     for (const w of laid.wires) {
-      const path = svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k), ...line(2) });
+      const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k), ...line(2) }), wireKey(full(w.from), full(w.to)), keyed);
       path.append(svg('title', {}, `${full(w.from)} → ${full(w.to)} (${w.kind})${w.edge ? edgeNote : ''}`));
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
@@ -1847,7 +1893,7 @@ export class SignalPlane extends HTMLElement {
     const composites = new Map();
     for (const c of laid.cards) {
       const card = svg('g', { class: `e-node${c.composite ? ' composite' : ''}`, 'data-name': c.name });
-      card.append(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k, ...line(c.composite ? 2 : 1.5) }));
+      card.append(this.keyed(svg('rect', { class: `e-card${c.composite ? ' composite' : ''}`, x: c.x, y: c.y, width: c.w, height: c.h, rx: CARD_RX * k, ...line(c.composite ? 2 : 1.5) }), cardKey(`${prefix}/${c.name}`), keyed));
       // The header band inset by half the card's edge, as the schematic's cards.
       card.append(svg('path', { class: 'e-head', d: headPath({ x: c.head.x + 0.75 * k, y: c.head.y + 0.75 * k, width: c.head.w - 1.5 * k, height: c.head.h - 0.75 * k }, Math.max(0, (CARD_RX - 0.75) * k)) }));
       card.append(svg('text', { class: 'e-name', x: c.x + 8 * k, y: c.y + 14 * k, 'font-size': 12 * k }, c.name));
@@ -1870,7 +1916,7 @@ export class SignalPlane extends HTMLElement {
       add?.(c.id, card, { x: c.x, y: c.y, w: c.w, h: c.h });
     }
     for (const p of laid.pins) {
-      const dot = svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) });
+      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
       dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
       // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
       const chip = composites.get(p.card);
@@ -1881,6 +1927,32 @@ export class SignalPlane extends HTMLElement {
       add?.(p.id, dot, { x: p.x, y: p.y });
     }
     for (const chip of composites.values()) g.append(chip.labels);
+  }
+
+  /** An Engine element marked with `key` (what a selection of it marks, `selectionKeys`), kept in `list`, selected now if it is. */
+  keyed(element, key, list) {
+    element.setAttribute('data-key', key);
+    list.push(element);
+    if (this.selKeys?.has(key)) element.classList.add('selected');
+    return element;
+  }
+
+  /**
+   * The Engine's hit items now (`engineItems`'): the instruments' level's, then each revealed chip's inside (revealed enough
+   * to take the pointer, its chips around it too), outer first: a deeper card lies over the chip's.
+   */
+  engineHitItems(s) {
+    const items = [...(s.engineHit ?? [])];
+    const revealed = new Set();
+    const visit = (chip) => {
+      if (!chip.hit || !chip.laid || !chip.group?.parentNode) return;
+      revealed.add(chip.id);
+      chip.items ??= engineItems(chip.laid, { entry: chip.entry, level: chip.card.module, prefix: chip.address, chip: chip.id });
+      items.push(...chip.items);
+      for (const child of chip.children) visit(child);
+    };
+    for (const chip of s.engineTopChips ?? []) visit(chip);
+    return { items, revealed };
   }
 
   renderEngine(fades) {
@@ -1921,6 +1993,7 @@ export class SignalPlane extends HTMLElement {
       const on = share > 0 && x < this.viewport.w + margin && x + c.w * v.k > -margin && y < this.viewport.h + margin && y + c.h * v.k > -margin;
       opacity(chip.plain, on ? 1 - share : 1);
       opacity(chip.labels, on ? 1 - share : 1);
+      chip.hit = false;
       if (!on || !this.insideFor(chip)) return;
       if (!chip.group) {
         chip.group = svg('g', { class: 'e-inside' });
@@ -1936,6 +2009,8 @@ export class SignalPlane extends HTMLElement {
       // A faint inside takes no pointer: the chip's card under it keeps its hover title and its menu.
       const faint = share < 0.5;
       if (chip.group.hasAttribute('data-faint') !== faint) chip.group.toggleAttribute('data-faint', faint);
+      // Hit-tested (selection, editing) as it takes the pointer: only revealed enough (`engineHitItems`).
+      chip.hit = !faint;
       for (const child of chip.children) visit(child);
     };
     for (const chip of s.engineTopChips) visit(chip);
@@ -1950,6 +2025,8 @@ export class SignalPlane extends HTMLElement {
   /** A chip's inside dropped (built again when next revealed), with the chips inside it; how many built insides that dropped. */
   dropInside(s, chip) {
     let dropped = s.insidesBuilt.delete(chip) ? 1 : 0;
+    chip.keyed = null;
+    chip.items = null;
     for (const child of chip.children) {
       dropped += this.dropInside(s, child);
       s.engineChips.delete(child.id);
@@ -2014,7 +2091,9 @@ export class SignalPlane extends HTMLElement {
   /** The bar: the layers (with, inside chips at the Engine, a Layer N button per chip, `chips` outermost first), the zoom, the lock, Edit. */
   renderBar(level, r, chips = []) {
     const instruments = this.instrumentRects().length > 0;
-    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}|${chips.map((c) => c.id).join(' ')}`;
+    // The Engine's Edit is the Engine's: another layer leaves it.
+    if (this.engineEdit && level !== 'engine') this.leaveEngineEdit();
+    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}|${this.engineEdit}|${chips.map((c) => c.id).join(' ')}`;
     if (key !== this.barKey) {
       this.barKey = key;
       // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
@@ -2052,11 +2131,17 @@ export class SignalPlane extends HTMLElement {
       zoom.append(step('−', 1 / KEY_ZOOM, 'Zoom out'), this.levelText, step('+', KEY_ZOOM, 'Zoom in'));
       // One Edit switch: it edits the shown layer's arrangement (built for the Stack: its front panels' layout).
       const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit' });
-      edit.disabled = level !== 'stack';
-      edit.title = level === 'stack' ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : level === 'engine' ? 'Edit at the Engine layer: comes with step 3' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
-      edit.setAttribute('aria-pressed', String(Boolean(this.editing)));
+      edit.disabled = level !== 'stack' && level !== 'engine';
+      edit.title =
+        level === 'stack'
+          ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)'
+          : level === 'engine'
+            ? 'Edit the Engine: drag from a pin to connect, Delete removes, the menu adds a module; each edit a patch of the project’s files, undoable (again to leave it)'
+            : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
+      edit.setAttribute('aria-pressed', String(level === 'engine' ? Boolean(this.engineEdit) : Boolean(this.editing)));
       edit.addEventListener('click', () => {
-        if (this.editing) this.closeEditLayout();
+        if (level === 'engine') this.toggleEngineEdit();
+        else if (this.editing) this.closeEditLayout();
         else this.editLayout();
       });
       this.editButton = edit;
@@ -2085,6 +2170,15 @@ export class SignalPlane extends HTMLElement {
     this.barKey = null;
     const to = this.viewAround(r, fit * splitDepth(this.engineBandNow()[1]).r);
     this.travel({ ...to, ...clampTop(to, this.focusRect(), this.viewport) }, LIFT);
+  }
+
+  /** Escape inside chips: out one chip level (the parent chip's body fitted, or from the outermost its instrument whole); whether it was inside one. */
+  outOneChip() {
+    const step = outStep(this.chipsNow());
+    if (!step) return false;
+    if (step.chip) this.showChip(step.chip, step.part);
+    else this.outOfChips(step.instrument);
+    return true;
   }
 
   /** A layer button's title: what it shows. */
@@ -2477,20 +2571,37 @@ export class SignalPlane extends HTMLElement {
     }
     // The instrument whose front panel holds the click (on a control of it too).
     const s = this.stacks.get(name);
-    const entry = [...(s?.cards ?? [])].find(([, element]) => path.includes(element))?.[0] ?? null;
+    // At the Engine: what the click is on (a card, a pin, a wire, inside a revealed chip too; else an instrument's or a chip's empty space).
+    const hit = level === 'engine' && name === this.focused ? this.hitAt(this.point(event)) : null;
+    const entry = [...(s?.cards ?? [])].find(([, element]) => path.includes(element))?.[0] ?? hit?.entry ?? null;
     const shows = [];
-    // At the Engine, on a chip's card or anything inside it (the innermost chip under the click): Show Chip first.
-    const node = level === 'engine' && name === this.focused ? path.find((n) => n?.classList?.contains?.('e-node') && n.dataset?.chip) : null;
-    const chip = node?.dataset?.chip ? s?.engineChips?.get(node.dataset.chip) : null;
+    // On a chip's card or anything inside it (the innermost chip under the click): Show Chip first.
+    const chipId = hit?.kind === 'e-card' && hit.chipId ? hit.chipId : (hit?.chip ?? null);
+    const chip = chipId ? s?.engineChips?.get(chipId) : null;
     if (chip) shows.push({ id: 'show-chip', label: 'Show Chip' }, { id: 'separator' });
+    // The Engine's own items: Add module… on empty space, Remove and Copy address on what is under the click (the edits with Edit on).
+    const editing = this.engineEditing();
+    const engine = [];
+    if (editing && hit?.kind === 'e-space') engine.push({ id: 'add-module', label: 'Add module…' });
+    if (editing && ['e-card', 'e-wire', 'e-edge'].includes(hit?.kind)) {
+      const removal = removeOps(hit);
+      engine.push({ id: 'remove', label: hit.kind === 'e-card' ? 'Remove' : 'Remove connection', disabled: Boolean(removal.error), ...(removal.error ? { title: removal.error } : {}) });
+    }
+    if (hit?.kind === 'e-card' || hit?.kind === 'e-pin') engine.push({ id: 'copy-address', label: 'Copy address' });
+    if (engine.length) shows.push(...engine, { id: 'separator' });
     if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
     shows.push({ id: 'show-stack', label: 'Show Stack' });
     const show = (id) => {
       if (id === 'show-chip') return this.showChip(chip), true;
+      if (id === 'add-module') return this.openAddModule(hit), true;
+      if (id === 'remove') return this.writeEngine(removeOps(hit)).then((ok) => ok && this.selection?.kind === 'engine' && this.selection.item.key === hit.key && this.select(null)), true;
+      if (id === 'copy-address') return globalThis.navigator?.clipboard?.writeText(hit.address).catch(() => this.say('Not copied: the clipboard was refused')), true;
       if (id === 'show-instrument') return this.fitOnScreen(name, entry), true;
       if (id === 'show-stack') return this.fitOnScreen(name, null), true;
       return false;
     };
+    // The Show in items' subject (ui/app/lib/show-in.js `subjectOf`): the instance, the pin or the wire under the click.
+    const subject = engineSubject(hit);
     // A control bound to a parameter, or anything with an address (a slot card's port): the app's items first (Reset to default, Copy address, Show in), then these.
     if (path.some((node) => node?.binding?.address || node?.dataset?.address)) return { withControl: true, items: shows, act: show };
     const items = [...shows];
@@ -2499,6 +2610,7 @@ export class SignalPlane extends HTMLElement {
     if (level === 'stack') items.push({ id: 'separator' }, { id: 'edit-layout', label: 'Edit layout…' });
     return {
       items,
+      ...(subject ? { hit: subject } : {}),
       act: (id) => {
         if (show(id)) return;
         if (id === 'edit-layout') return this.editLayout();
@@ -2516,10 +2628,10 @@ export class SignalPlane extends HTMLElement {
     return null;
   }
 
-  /** The drawing the pointer edits at this zoom: `wiring`, `control`, or null (the more opaque one takes the press, ADR 0050 §6). */
+  /** The drawing the pointer edits at this zoom: `wiring`, `control`, `engine`, or null (the more opaque one takes the press, ADR 0050 §6). */
   editedLevel() {
     const fades = this.fadesNow();
-    if (fades.deep >= HIT_OPACITY) return null;
+    if (fades.deep >= HIT_OPACITY) return this.stacks.get(this.focused)?.engines ? 'engine' : null;
     if (fades.sheet >= HIT_OPACITY && this.opened) return 'control';
     if (fades.board >= HIT_OPACITY) return 'wiring';
     return null;
@@ -2531,6 +2643,14 @@ export class SignalPlane extends HTMLElement {
     const s = this.stacks.get(this.focused);
     const rect = this.focusRect();
     if (!which || !s || !rect) return null;
+    if (which === 'engine') {
+      // The Engine: a card, a pin, a wire (inside a revealed chip too), else the empty space of a chip's body or an instrument.
+      const { items, revealed } = this.engineHitItems(s);
+      const p = toPlane(this.view, at);
+      const rects = s.engines.layouts.map((e) => ({ entry: e.entry, ...e.rect }));
+      const hit = engineTarget(items, { x: p.x - rect.x, y: p.y - rect.y }, this.view.k, { revealed, rects });
+      return hit ? { level: 'engine', ...hit } : null;
+    }
     const items = which === 'control' ? s.controlItems : s.wiringItems;
     if (!items) return null;
     const p = toPlane(this.view, at);
@@ -2562,7 +2682,7 @@ export class SignalPlane extends HTMLElement {
     this.closeChooser();
     const at = this.point(event);
     const hit = this.hitAt(at);
-    if (!hit || !DRAG_FROM.has(hit.kind)) return;
+    if (!hit || !(DRAG_FROM.has(hit.kind) || (hit.kind === 'e-pin' && this.engineEditing()))) return;
     this.adopt(hit);
     event.stopPropagation();
     event.preventDefault();
@@ -2594,7 +2714,7 @@ export class SignalPlane extends HTMLElement {
       this.gesture = { hit, id: event.pointerId, start: at, moved: false };
       return;
     }
-    if (this.editedLevel()) this.select(hit && SELECTABLE.has(hit.kind) ? selectionOf(hit) : null);
+    if (this.editedLevel()) this.select(selectionOf(hit));
     this.drag = { start: at, last: at, id: event.pointerId, moved: false };
   }
 
@@ -2644,7 +2764,7 @@ export class SignalPlane extends HTMLElement {
       this.clearRubber();
       const at = this.point(event);
       if (gesture.moved) this.dropCable(gesture.hit, at);
-      else this.select(SELECTABLE.has(gesture.hit.kind) ? selectionOf(gesture.hit) : null);
+      else this.select(selectionOf(gesture.hit));
       return;
     }
     if (!this.drag || event.pointerId !== this.drag.id) return;
@@ -2685,6 +2805,7 @@ export class SignalPlane extends HTMLElement {
    */
   dropCable(from, at) {
     const to = this.hitAt(at);
+    if (from.level === 'engine') return this.dropEngineWire(from, to, at);
     if (from.level === 'wiring') {
       const source = from.kind === 'port' ? from.port : null;
       if (!source) return;
@@ -2714,6 +2835,116 @@ export class SignalPlane extends HTMLElement {
     if (!source) return;
     if (from.kind === 'auto-pin' && from.pin.address.split('/').length > 2) return this.say(`${source} is inside the engine: connect it there, in its Engine`);
     this.writePatch([addConnection(source, bind)], `${source} → ${bind}`);
+  }
+
+  // The Engine's edits (step 3, the owner's request of 2026-11-03), with the bar's Edit on: every one a `patch` at its level,
+  // as the schematic's editor writes them (ui/lib/plane-engine-edit.js): the instrument's level is the project's top level,
+  // a chip's inside its composite's level (the project's composite definition: every instance of it).
+
+  /** Whether the Engine is edited now: the bar's Edit on, at the Engine. */
+  engineEditing() {
+    return Boolean(this.engineEdit) && this.level() === 'engine';
+  }
+
+  /** The bar's Edit at the Engine, on or off. */
+  toggleEngineEdit(on = !this.engineEdit) {
+    if (!on) this.leaveEngineEdit();
+    else {
+      this.engineEdit = true;
+      this.barKey = null;
+      this.stage?.toggleAttribute?.('data-engine-edit', true);
+    }
+    this.say(on ? 'Edit at the Engine: drag from a pin to a pin or a card to connect, Delete removes the selection, the menu adds a module' : '');
+    this.render();
+  }
+
+  /** Edit at the Engine left (the switch, or another layer shown): no chooser or browser of it stays open. */
+  leaveEngineEdit() {
+    this.engineEdit = false;
+    this.barKey = null;
+    this.stage?.toggleAttribute?.('data-engine-edit', false);
+    this.closeChooser();
+    this.addBrowser?.close();
+  }
+
+  /** Writes an Engine edit (`{level, ops, what}` or `{error}`), saying what it reaches inside a chip. */
+  writeEngine(edit) {
+    if (!edit || edit.error) {
+      if (edit?.error) this.say(edit.error);
+      return Promise.resolve(false);
+    }
+    return this.writePatch(edit.ops, edit.what, 0, edit.level);
+  }
+
+  /** The file a level's patch writes, as the person reads it. */
+  levelFile(level) {
+    if (!level) return 'project.toml';
+    const count = instanceCount(this.graph, level);
+    return `composites/${level}.toml: every instance of ${level}, ${count}`;
+  }
+
+  /** A wire from Engine pin `from` dropped on `to` (a pin: connected; a card of its level: a chooser of what fits there). */
+  dropEngineWire(from, to, at) {
+    if (to?.kind === 'e-pin') return this.writeEngine(connectOps(from, to));
+    if (to?.kind === 'e-card' && to.name !== from.card) {
+      if (to.chip !== from.chip) return this.say(`Not connected: ${to.address} is at another level than ${from.address}`);
+      const options = dropTargets(levelData(this.graph, from.patchLevel), from, to);
+      const title = from.side === 'out' ? `Connect ${from.address} to ${to.address}:` : `Into ${from.address} from ${to.address}:`;
+      return this.openChooser(title, options.map((o) => ({ text: o.text, act: () => this.writeEngine({ level: from.patchLevel, ops: [addConnection(o.from, o.to)], what: `${fullAddress(from.prefix, o.from)} → ${fullAddress(from.prefix, o.to)}` }) })), at);
+    }
+    this.say('Not connected: drop the wire on a pin, or on a card of the same level');
+  }
+
+  /** Add module… at an Engine's empty space (`target`: `engineTarget`'s `e-space`): the schematic's Add module browser, then one patch. */
+  openAddModule(target) {
+    if (!this.engineEditing() || target?.kind !== 'e-space') return;
+    if (!this.addBrowser) {
+      this.addBrowser = new ModuleBrowser({
+        add: (module, name) => this.addModule(module, name),
+        closed: () => {
+          this.placing = null;
+          this.focus?.({ preventScroll: true });
+        },
+        graph: () => this.graph,
+        defaultName: (module) => (this.placing ? defaultName(module, this.placing.names) : ''),
+      });
+      this.shadowRoot.append(this.addBrowser.build(EXPANDED));
+    }
+    this.placing = { target, names: namesOf(levelData(this.graph, target.patchLevel)) };
+    const where = target.chip ? `inside ${target.prefix} (${this.levelFile(target.patchLevel)})` : `in ${instrumentTitle(target.entry, this.cards)}`;
+    // The types asked once per state of the project's files (`graph.files`), as the schematic's editor asks them.
+    const key = this.graph?.files ? `${projectKey(this.graph)}\n${JSON.stringify(this.graph.files)}` : null;
+    const known = key !== null && this.modulesKnown?.key === key ? loadable(this.modulesKnown.entries) : null;
+    this.addBrowser.open({ where, entries: known });
+    if (known) return;
+    const placing = this.placing;
+    this.connection?.request?.({ type: 'modules', inside: true }).then(
+      (modules) => {
+        const entries = browserEntries(modules);
+        this.modulesKnown = { key, entries };
+        if (this.placing === placing) this.addBrowser.setEntries(loadable(entries));
+      },
+      (error) => {
+        if (this.placing === placing) this.addBrowser.failed(error.message);
+      },
+    );
+  }
+
+  /** The browser's Add: an error text when the name is refused, else null (written; at an instrument's level kept in it until it is connected). */
+  addModule(module, name) {
+    const placing = this.placing;
+    if (!placing || !module) return null;
+    const error = nameError(name, placing.names);
+    if (error) return error;
+    this.placing = null;
+    this.addBrowser.close();
+    const { target } = placing;
+    // An instance with no control and no connection is in no instrument (`assignInstruments`): this page keeps it in the one it was added to.
+    if (!target.chip) this.placed.set(name, target.entry);
+    this.writeEngine(addOps(target, module, name)).then((ok) => {
+      if (!ok && !target.chip && this.placed.get(name) === target.entry) this.placed.delete(name);
+    });
+    return null;
   }
 
   // Choosers: a small list at the pointer, one patch on a pick.
@@ -2777,8 +3008,8 @@ export class SignalPlane extends HTMLElement {
 
   // Edits: `patch` (connections) and `panel.write` (binds), through the existing paths; undo and redo for the patches.
 
-  writePatch(ops, what, step = 0) {
-    const asked = step === 0 ? this.session.request('', ops) : step < 0 ? this.session.undo() : this.session.redo();
+  writePatch(ops, what, step = 0, level = '') {
+    const asked = step === 0 ? this.session.request(level, ops) : step < 0 ? this.session.undo() : this.session.redo();
     if (!asked) return Promise.resolve(false);
     if (asked.refused) {
       this.say(asked.refused);
@@ -2793,7 +3024,7 @@ export class SignalPlane extends HTMLElement {
     return request.then(
       (reply) => {
         this.session.written(reply, asked.pending);
-        this.say(step < 0 ? 'Undone' : step > 0 ? 'Redone' : `Written: ${what} (project.toml)`);
+        this.say(step < 0 ? 'Undone' : step > 0 ? 'Redone' : `Written: ${what} (${this.levelFile(level)})`);
         return true;
       },
       (error) => {
@@ -2831,6 +3062,11 @@ export class SignalPlane extends HTMLElement {
   deleteSelection() {
     const sel = this.selection;
     if (!sel) return false;
+    if (sel.kind === 'engine') {
+      if (!this.engineEditing()) return false;
+      this.writeEngine(removeOps(sel.item)).then((ok) => ok && this.select(null));
+      return true;
+    }
     if (sel.kind === 'cable') {
       if (sel.edge) {
         this.say('A cable through the Stack’s edge is the Setup level’s: remove it there');
@@ -2861,6 +3097,13 @@ export class SignalPlane extends HTMLElement {
   }
 
   markSelection() {
+    // The Engine's elements by key (an inside built later marks itself as it is drawn, `keyed`).
+    this.selKeys = selectionKeys(this.selection);
+    for (const s of this.stacks.values()) {
+      for (const list of [s.engineKeyed, ...[...(s.insidesBuilt ?? [])].map((chip) => chip.keyed)]) {
+        for (const element of list ?? []) element.classList?.toggle('selected', this.selKeys.has(element.getAttribute('data-key')));
+      }
+    }
     for (const s of this.stacks.values()) {
       for (const elements of [s.wiringElements, s.controlElements]) {
         if (!elements) continue;
@@ -3004,7 +3247,9 @@ export class SignalPlane extends HTMLElement {
    * `plane.whole` shows the whole plane; `plane.zoom_in` and `plane.zoom_out`
    * zoom about the centre; the line and page commands scroll the focused
    * Stack; at Wiring and Control `plane.delete` removes the selected cable
-   * and `plane.undo`, `plane.redo` undo and redo the patches written there.
+   * and `plane.undo`, `plane.redo` undo and redo the patches written there,
+   * at the Engine with Edit on the same for its connections and instances;
+   * inside a chip `plane.out` steps out one chip level.
    * Captured before the plane's parts see them, but nothing else is taken:
    * Space reaches the page's keys (ui/controls/keyboard.js), where it plays
    * and stops the transport (ADR 0039); a field being typed in keeps every
@@ -3021,6 +3266,8 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     const path = event.composedPath?.() ?? [];
+    // The Add module browser keeps its keys (it closes on its own Escape).
+    if (this.addBrowser?.holds(event)) return;
     const target = path[0] ?? event.target;
     if (isTextField(target)) return;
     if (event.key === 'Escape' && this.chooser) {
@@ -3039,18 +3286,24 @@ export class SignalPlane extends HTMLElement {
     if (!command) return;
     const level = this.level();
     if (command === 'plane.undo' || command === 'plane.redo') {
-      if (level === 'wiring' || level === 'control') {
+      if (level === 'wiring' || level === 'control' || this.engineEditing()) {
         event.preventDefault();
         this.writePatch([], '', command === 'plane.redo' ? +1 : -1);
       }
       return;
     }
+    if (command === 'plane.out' && this.selection && (level === 'wiring' || level === 'control' || level === 'engine')) {
+      // A selection is let go first.
+      event.preventDefault();
+      this.select(null);
+      return;
+    }
+    if (command === 'plane.out' && level === 'engine' && this.outOneChip()) {
+      event.preventDefault();
+      event.stopPropagation?.();
+      return;
+    }
     if (this.layer && (command === 'plane.out' || command === 'plane.in')) {
-      if (command === 'plane.out' && this.selection && (level === 'wiring' || level === 'control')) {
-        event.preventDefault();
-        this.select(null);
-        return;
-      }
       const ids = LAYERS.map(([id]) => id);
       const next = ids[ids.indexOf(level) + (command === 'plane.in' ? 1 : -1)];
       event.preventDefault();
@@ -3059,11 +3312,6 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     if (command === 'plane.out') {
-      if (this.selection && (level === 'wiring' || level === 'control')) {
-        event.preventDefault();
-        this.select(null);
-        return;
-      }
       event.preventDefault();
       if (level === 'engine') this.travelTo(CONTROL_BAND[1]);
       else if (level === 'control') this.travelTo(WIRING_BAND[1]);
@@ -3073,7 +3321,7 @@ export class SignalPlane extends HTMLElement {
     }
     if (this.onControl(event)) return;
     if (command === 'plane.delete') {
-      if ((level === 'wiring' || level === 'control') && this.deleteSelection()) event.preventDefault();
+      if ((level === 'wiring' || level === 'control' || level === 'engine') && this.deleteSelection()) event.preventDefault();
       return;
     }
     const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
@@ -3138,10 +3386,12 @@ export class SignalPlane extends HTMLElement {
 
 /** The kinds of item a press drags a cable from, and those a click selects. */
 const DRAG_FROM = new Set(['port', 'via', 'auto-pin', 'external']);
-const SELECTABLE = new Set(['cable', 'auto', 'leg', 'port', 'param', 'via', 'auto-pin', 'external', 'edge', 'box']);
+const SELECTABLE = new Set(['cable', 'auto', 'leg', 'port', 'param', 'via', 'auto-pin', 'external', 'edge', 'box', ...ENGINE_SELECTABLE]);
 
 /** A hit as the selection keeps it: by connection, address or instrument, so every level draws its own representative. */
 function selectionOf(hit) {
+  if (!hit || !SELECTABLE.has(hit.kind)) return null;
+  if (ENGINE_SELECTABLE.has(hit.kind)) return engineSelection(hit);
   if (hit.kind === 'cable') return { kind: 'cable', from: hit.cable.from, to: hit.cable.to, edge: Boolean(hit.cable.a.edge || hit.cable.b.edge) };
   if (hit.kind === 'auto') return { kind: 'auto', from: hit.auto.from, to: hit.auto.to, inner: hit.auto.inner, level: hit.auto.level };
   if (hit.kind === 'leg') return { kind: 'leg', address: hit.leg.address };

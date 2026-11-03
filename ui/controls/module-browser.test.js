@@ -518,8 +518,10 @@ function hostCss() {
   const base = cssIn('./base.js', 'export const BASE_CSS', { ENTRY_CSS });
   const schematic = cssIn('./schematic.js', 'const CSS =', { ENTRY_CSS, EDITOR_CSS, MENU_CSS, BOARD_CSS });
   const slot = cssIn('./slot.js', 'static css =', { BROWSER_CSS, EDITOR_CSS: PANEL_EDITOR_CSS });
+  // The plane hosts the browser too (Add module… at the Engine, step 3 of 2026-11-03).
+  const plane = cssIn('./plane.js', 'const CSS =', { BROWSER_CSS, BAR_CSS: cssIn('./plane.js', 'const BAR_CSS =', {}) });
   const own = (text) => text.replace(BROWSER_CSS, '').replace(SLOT_DIALOG_CSS, '');
-  return { schematic: own(schematic), slot: base + own(slot) };
+  return { schematic: own(schematic), slot: base + own(slot), plane: own(plane) };
 }
 
 /**
@@ -680,5 +682,6 @@ test('no rule of the host roots’ own reaches an element of the slot dialogs (A
   }
   const all = new Set([...seen.values()].flatMap((e) => e.classes));
   for (const c of ['slot-dialog', 'dialog-head', 'dialog-note', 'dialog-foot', 'dialog-buttons', 'why', 'field', 'slot-name', 'port-name', 'small', 'unit', 'optional', 'adds', 'check', 'primary']) assert.ok(all.has(c), `the walk saw .${c}`);
-  for (const [host, text] of Object.entries(hostCss())) assert.deepEqual(reaching(seen, text, SLOT_DIALOG_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of a slot dialog`);
+  // The plane hosts the Add module browser only, no slot dialog.
+  for (const [host, text] of Object.entries(hostCss()).filter(([host]) => host !== 'plane')) assert.deepEqual(reaching(seen, text, SLOT_DIALOG_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of a slot dialog`);
 }));

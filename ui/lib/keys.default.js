@@ -189,7 +189,7 @@ export default {
     { "id": "schematic.scroll", "scope": "schematic", "label": "Pan sideways", "keys": ["Shift+Wheel"], "wheel": true },
 
     { "id": "plane.in", "scope": "plane", "label": "In a level: focus the Stack, then its Wiring, an instrument's Control plane, its Engine", "keys": ["Enter"] },
-    { "id": "plane.out", "scope": "plane", "label": "Out a level (a selection at Wiring or Control is let go first)", "keys": ["Escape"] },
+    { "id": "plane.out", "scope": "plane", "label": "Out a level (a selection at Wiring, Control or the Engine is let go first; inside a chip at the Engine, out one chip level)", "keys": ["Escape"] },
     { "id": "plane.whole", "scope": "plane", "label": "Show the whole project (the Project layer)", "keys": ["0"] },
     { "id": "plane.zoom_in", "scope": "plane", "label": "Zoom in about the centre", "keys": ["=", "+"] },
     { "id": "plane.zoom_out", "scope": "plane", "label": "Zoom out about the centre", "keys": ["-", "_"] },
@@ -197,9 +197,9 @@ export default {
     { "id": "plane.line_up", "scope": "plane", "label": "Scroll the focused Stack up a little", "keys": ["ArrowUp"] },
     { "id": "plane.page_down", "scope": "plane", "label": "Scroll the focused Stack down a page", "keys": ["PageDown"] },
     { "id": "plane.page_up", "scope": "plane", "label": "Scroll the focused Stack up a page", "keys": ["PageUp"] },
-    { "id": "plane.delete", "scope": "plane", "label": "At Wiring and Control: remove the selected cable", "keys": ["Delete", "Backspace"] },
-    { "id": "plane.undo", "scope": "plane", "label": "At Wiring and Control: undo the last patch written there", "keys": ["Cmd+Z"] },
-    { "id": "plane.redo", "scope": "plane", "label": "At Wiring and Control: redo", "keys": ["Shift+Cmd+Z"] },
+    { "id": "plane.delete", "scope": "plane", "label": "At Wiring and Control: remove the selected cable; at the Engine with Edit on: the selected connection or instance", "keys": ["Delete", "Backspace"] },
+    { "id": "plane.undo", "scope": "plane", "label": "At Wiring, Control and the Engine (Edit on): undo the last patch written there", "keys": ["Cmd+Z"] },
+    { "id": "plane.redo", "scope": "plane", "label": "At Wiring, Control and the Engine (Edit on): redo", "keys": ["Shift+Cmd+Z"] },
 
     { "id": "schematic_edit.undo", "scope": "schematic_edit", "label": "Undo the last patch", "keys": ["Cmd+Z"] },
     { "id": "schematic_edit.redo", "scope": "schematic_edit", "label": "Redo", "keys": ["Shift+Cmd+Z"] },
