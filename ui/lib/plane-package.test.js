@@ -3,7 +3,8 @@
 // layers. `packageOf` lays it out once; the Wiring's ports are its signal
 // pins and its cables end on them, the Control layer's cube is it, and the
 // Engine's inside lies in its body with its edges at its pins. It never
-// covers a control (smaller where the room is small), and the same
+// covers a control while any size fits (smaller where the room is small;
+// with no room at all, cut to its instrument at its bottom right), and the same
 // arguments give the same package.
 
 import test from 'node:test';
@@ -142,7 +143,14 @@ test('room for it: as large as the free room allows, smaller where the room is s
   const small = packageOf({ rect: tight, controls, engine: ['a'], ins, outs });
   for (const c of controls) assert.ok(!overlaps(small, c.rect, CLEARANCE - 1e-6), `clear of ${c.id}`);
   assert.ok(small.w < PACKAGE_PU.w * PU, `shrunk to the gap (${small.w})`);
-  assert.ok(small.pitch <= PACKAGE_PU.pin * PU && small.head.h <= small.h / 4 + 1e-9);
+  assert.ok(small.ins[0].y > small.y + small.head.h && small.outs[0].y < small.y + small.h, 'its pins under its title, inside it');
+  // No room at all (a strip shorter than its pins need, a sliver): cut to the instrument, never spilling onto the next one.
+  const many = Array.from({ length: 12 }, (_, i) => ({ id: `port in /a.i${i}`, address: `/a.i${i}`, label: `i${i}`, kind: 'audio' }));
+  for (const strip of [{ x: 0, y: 500, w: 1280, h: 120 }, { x: 0, y: 500, w: 60, h: 30 }]) {
+    const cut = packageOf({ rect: strip, engine: ['a'], ins: many, outs });
+    assert.ok(cut.x >= strip.x && cut.y >= strip.y && cut.x + cut.w <= strip.x + strip.w + 1e-6 && cut.y + cut.h <= strip.y + strip.h + 1e-6, `inside ${JSON.stringify(strip)}: ${JSON.stringify([cut.x, cut.y, cut.w, cut.h])}`);
+    for (const p of cut.ins) assert.ok(p.y >= cut.y && p.y <= cut.y + cut.h, 'its pins on it');
+  }
 });
 
 test('the Wiring’s cables end on the package’s pins, run from them across their box’s edge, and never pass over a package or another box', () => {

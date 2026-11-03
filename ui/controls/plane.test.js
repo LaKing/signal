@@ -673,7 +673,8 @@ domTest('the Engine layer draws every instrument’s engine package at its place
   assert.ok(!drawn.some((n) => /^c-|leg|cube/.test(String(n.getAttribute('class') ?? ''))), 'no Control drawing at the Engine');
   // Zoomed into the synth's package: its inside, the cards and their connections, in its body; the bar says Layer 1.
   const synth = layouts.find((e) => e.cards.some((c) => c.name === 'synth'));
-  p.view = p.viewAround(synth.card.body, (synth.card.reveal[1] + 1) / synth.card.body.w);
+  const inPlane = (r) => ({ ...r, x: r.x + p.focusRect().x, y: r.y + p.focusRect().y });
+  p.view = p.viewAround(inPlane(synth.card.body), (synth.card.reveal[1] + 1) / synth.card.body.w);
   p.drawView();
   drawn = s.engineSvg.all();
   assert.ok(drawn.some((n) => String(n.getAttribute('class')).startsWith('e-wire')), 'the connections drawn');
@@ -710,7 +711,10 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   // Closed, the package holds no hit: a press there is the instrument's empty space.
   assert.equal(p.hitAt({ x: screen(echo).clientX + 1, y: screen(echo).clientY + 1 })?.kind, 'e-space');
   // Into the echo's package (Layer 1): its instances are the project's top level, addresses as they are.
-  p.view = p.viewAround(echoEngine.card.body, (echoEngine.card.reveal[1] + 1) / echoEngine.card.body.w);
+  // The bar's Layer 1 (showChip of the package's body) zooms in past its reveal width: inside it.
+  p.travel = (to) => (p.view = to);
+  p.showChip(s.engineChips.get(echoEngine.card.id), 'body');
+  assert.ok(echoEngine.card.body.w * p.view.k > echoEngine.card.reveal[1], 'whole: Layer 1');
   p.drawView();
   const onEcho = screen({ x: echo.x + echo.w / 2, y: echo.y + 2 });
   const down = (at) => p.pointerDown({ button: 0, pointerId: 1, ...at, composedPath: () => [s.engineSvg, s.element, p.stage, p] });
@@ -735,7 +739,8 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   p.writePatch = write;
   p.select(keep);
   const menu = (at) => p.contextMenu({ ...at, composedPath: () => [s.engineSvg, s.element, p] });
-  assert.deepEqual(menu(onEcho).items.map((i) => i.id), ['copy-address', 'separator', 'show-instrument', 'show-stack']);
+  // Inside the echo's package: Show Chip shows the package (the top-level chip).
+  assert.deepEqual(menu(onEcho).items.map((i) => i.id), ['show-chip', 'separator', 'copy-address', 'separator', 'show-instrument', 'show-stack']);
   assert.deepEqual(menu(onEcho).hit, { kind: 'instance', address: '/echo' });
   // The bar's Edit at the Engine: enabled, pressed when on.
   p.renderBar('engine', 1);
@@ -746,7 +751,7 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   assert.equal(p.engineEdit, true);
   p.renderBar('engine', 1);
   assert.equal(p.bar.querySelector('.edit-layout').getAttribute('aria-pressed'), 'true');
-  assert.deepEqual(menu(onEcho).items.map((i) => i.id), ['remove', 'copy-address', 'separator', 'show-instrument', 'show-stack']);
+  assert.deepEqual(menu(onEcho).items.map((i) => i.id), ['show-chip', 'separator', 'remove', 'copy-address', 'separator', 'show-instrument', 'show-stack']);
   // The instrument's empty space: Add module… there.
   const rect = s.layout.rects.find((r) => r.entry === 'card:echo');
   assert.equal(menu(screen({ x: rect.x + 4, y: rect.y + rect.h - 4 })).items[0].id, 'add-module');

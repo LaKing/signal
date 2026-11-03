@@ -319,7 +319,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-card.composite { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
 .e-head { fill: #212733; pointer-events: none; }
 /* Hover titles: the cards, pins and wires take the pointer (it still reaches the stage: pan, wheel and menu are the Deck's). */
-.e-card, .e-pin, .e-edge { pointer-events: all; }
+.e-card, .e-pin { pointer-events: all; }
 .e-wire { pointer-events: stroke; }
 .e-name { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
 .e-module, .e-pin-label { fill: var(--signal-muted, #8a93a3); }
@@ -328,8 +328,6 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
-.e-edge { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
-.e-edge.in { fill: var(--signal-meter-rms, #3ecf8e); }
 .e-plain { fill: #1d232c; pointer-events: none; }
 .e-pin-label.halo { stroke: #1d232c; stroke-linejoin: round; paint-order: stroke; }
 .e-inside .e-card { fill: #1b2028; }
@@ -338,7 +336,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 /* The Engine's selection (step 3), as Wiring's: a glow, the card's edge and a pin in the focus colour (inside a chip a line keeps its width at scale). */
 .e-wire.selected { stroke-width: 4; filter: drop-shadow(0 0 3px currentColor); }
 .e-card.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
-.e-pin.selected, .e-edge.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
+.e-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .stage[data-engine-edit] .e-pin { cursor: crosshair; }
 /* No dashed lines (the owner's rule): the cable being drawn is a plain line. */
 .rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
@@ -1489,9 +1487,13 @@ export class SignalPlane extends HTMLElement {
     const stack = this.model?.plane.stacks.find((x) => x.name === this.focused);
     const s = this.stacks.get(this.focused);
     if (!stack || !s?.layout || !this.graph) return null;
+    // Once per frame (every layer and hit test asks): the key is built again only when the frame or what it reads changed.
+    const memo = { frame: this.renders ?? 0, model: this.model, graph: this.graph, layout: s.layout, stackKey: s.key, cards: this.cards };
+    if (s.packages && s.packagesMemo && Object.keys(memo).every((name) => s.packagesMemo[name] === memo[name])) return s.packages;
+    s.packagesMemo = memo;
     const wiring = this.wiringModelNow(s, stack);
     const titles = s.layout.rects.map((r) => instrumentTitle(r.entry, this.cards));
-    const key = `${wiring.key}\n${this.panel?.html?.length ?? 0}\n${titles.join('\n')}`;
+    const key = `${wiring.key}\n${titles.join('\n')}`;
     if (s.packages?.key === key) return s.packages;
     const map = new Map();
     const fronts = new Map();
@@ -1501,7 +1503,9 @@ export class SignalPlane extends HTMLElement {
       fronts.set(r.entry, front);
       map.set(r.entry, packageOf({ rect: { x: r.x, y: r.y, w: r.w, h: r.h }, controls: front.controls, blocked: front.blocked, engine: engineOf(r.entry, this.model.owner), autos: front.autos, inner: front.inner, ins: ports.ins, outs: ports.outs, title: titles[i] }));
     });
-    s.packages = { key, map, fronts };
+    // A card not laid out yet (measured null) is measured again on the next frame: its key says so, so nothing is kept for it.
+    const unmeasured = [...fronts].filter(([, f]) => !f.measured).map(([entry]) => entry);
+    s.packages = { key: unmeasured.length ? `${key}\nunmeasured ${unmeasured.join(' ')}` : key, map, fronts };
     return s.packages;
   }
 
@@ -2043,8 +2047,13 @@ export class SignalPlane extends HTMLElement {
 
   /** An Engine element marked with `key` (what a selection of it marks, `selectionKeys`), kept in `list`, selected now if it is. */
   keyed(element, key, list) {
-    element.setAttribute('data-key', key);
-    list.push(element);
+    // One element may stand for several connections (a package's pin of a fan-out): each of its keys marks it.
+    if (element.planeKeys) element.planeKeys.push(key);
+    else {
+      element.planeKeys = [key];
+      element.setAttribute('data-key', key);
+      list.push(element);
+    }
     if (this.selKeys?.has(key)) element.classList.add('selected');
     return element;
   }
@@ -2171,6 +2180,8 @@ export class SignalPlane extends HTMLElement {
     const r = part === 'body' ? chip.card.body : chip.card;
     const target = { x: rect.x + r.x, y: rect.y + r.y, w: r.w, h: r.h };
     let k = fitAll(target, this.viewport).k;
+    // A package's inside is whole only past its reveal width: inside it (Layer 1), never short of it.
+    if (part === 'body' && chip.card.reveal) k = Math.max(k, (chip.card.reveal[1] + 1) / Math.max(1e-9, chip.card.body.w));
     if (!this.layer) {
       // The coupled zoom: the chip's instrument is the opened one, and the view stays at the Engine (never above its band's end).
       if (this.opened !== chip.entry) {
@@ -2701,7 +2712,15 @@ export class SignalPlane extends HTMLElement {
     const shows = [];
     // On a chip's card or anything inside it (the innermost chip under the click): Show Chip first.
     const chipId = hit?.kind === 'e-card' && hit.chipId ? hit.chipId : (hit?.chip ?? null);
-    const chip = chipId ? s?.engineChips?.get(chipId) : null;
+    let chip = chipId ? s?.engineChips?.get(chipId) : null;
+    // Else on an instrument's engine package (closed, or anything of its inside): that package, the top-level chip.
+    if (!chip && hit?.entry) {
+      const pkg = s?.engineChips?.get(`package ${hit.entry}`);
+      const rect = this.focusRect();
+      const at = rect ? toPlane(this.view, this.point(event)) : null;
+      const c = pkg?.card;
+      if (c && at && at.x - rect.x >= c.x && at.x - rect.x <= c.x + c.w && at.y - rect.y >= c.y && at.y - rect.y <= c.y + c.h) chip = pkg;
+    }
     if (chip) shows.push({ id: 'show-chip', label: 'Show Chip' }, { id: 'separator' });
     // The Engine's own items: Add module… on empty space, Remove and Copy address on what is under the click (the edits with Edit on).
     const editing = this.engineEditing();
@@ -3226,7 +3245,7 @@ export class SignalPlane extends HTMLElement {
     this.selKeys = selectionKeys(this.selection);
     for (const s of this.stacks.values()) {
       for (const list of [s.engineKeyed, ...[...(s.insidesBuilt ?? [])].map((chip) => chip.keyed)]) {
-        for (const element of list ?? []) element.classList?.toggle('selected', this.selKeys.has(element.getAttribute('data-key')));
+        for (const element of list ?? []) element.classList?.toggle('selected', (element.planeKeys ?? [element.getAttribute('data-key')]).some((key) => this.selKeys.has(key)));
       }
     }
     for (const s of this.stacks.values()) {

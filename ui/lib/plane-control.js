@@ -34,7 +34,7 @@ import { portIndex, portKind, simplify } from './plane-wiring.js';
 import { BAND_PAD, LANE, PACKAGE_PU, READOUT_H, packageOf } from './plane-package.js';
 
 // The package's placement, its legs' band and the readout's room are ui/lib/plane-package.js's.
-export { LANE, BAND_PAD, READOUT_H, SEARCH_STEP, CLEARANCE, overlaps, placeCube } from './plane-package.js';
+export { LANE, BAND_PAD, READOUT_H, overlaps, placeCube } from './plane-package.js';
 /** Nested composites followed at most, finding an export's targets. */
 export const MAX_DEPTH = 8;
 
@@ -269,7 +269,8 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
         const used = corridorUse.get(key) ?? 0;
         corridorUse.set(key, used + 1);
         x = Math.min(choice.x1 - LANE_GAP, Math.max(choice.x0, pin.x) + LANE_GAP * (used + 1));
-        if (right.includes(choice)) x = Math.min(x, reach - 1);
+        // Short of the control the corridor ends at, each wire of it on its own track.
+        if (right.includes(choice)) x = Math.max(Math.min(choice.x0 + LANE_GAP, reach - 1), Math.min(x, reach - LANE_GAP * (used + 1)));
       } else x = rect.x + rect.w - LANE_GAP * (autoPins.length + 1);
       start = pin;
       // Out of the pin to the corridor, below everything else; a corridor left of the pin is reached under the cube.

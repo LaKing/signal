@@ -110,19 +110,19 @@ export function packageOf({ rect, controls = [], blocked = [], engine = [], auto
   const bandTop = Math.max(rect.y, Math.min(controlsBottom + readoutRoom, rect.y + rect.h - bandH));
   const band = { x: rect.x, y: bandTop, w: rect.w, h: bandH };
   const obstacles = [...controls.map((c) => c.rect), ...blocked, band];
-  const area = { x: rect.x + 2 * PU, y: rect.y + 2 * PU, w: rect.w - 4 * PU, h: rect.h - 4 * PU };
+  const area = { x: rect.x + 2 * PU, y: rect.y + 2 * PU, w: Math.max(1, rect.w - 4 * PU), h: Math.max(1, rect.h - 4 * PU) };
   const towards = (size) =>
     bound.length ? { x: bound.reduce((s, c) => s + c.rect.x + c.rect.w / 2, 0) / bound.length, y: controlsBottom + bandH + size.h / 2 } : { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
   // As large as the free room allows: the widths tried largest first, then the least size; where even that finds no
   // room, smaller and smaller (its pins closer), on a finer grid, then over the legs' band; never over a control while
-  // any of these fits (only an instrument with no room at all for the smallest takes its bottom right corner).
+  // any of these fits (an instrument with no room at all for the smallest takes its bottom right corner, cut to fit).
   const sizes = [];
   for (const wpu of PACKAGE_WIDTHS) {
     const w = Math.max(least.w, wpu * PU);
     if (!sizes.some((s) => s.w === w)) sizes.push({ w, h: Math.max(least.h, Math.round((w * PACKAGE_ASPECT) / PU) * PU) });
   }
   sizes.push(least);
-  const shrunk = PACKAGE_SHRINK.map((f) => ({ w: Math.max(PACKAGE_MIN, Math.round(least.w * f)), h: Math.max(PACKAGE_MIN, Math.round(least.h * f)) }));
+  const shrunk = PACKAGE_SHRINK.map((f) => ({ w: Math.min(area.w, Math.max(PACKAGE_MIN, Math.round(least.w * f))), h: Math.min(area.h, Math.max(PACKAGE_MIN, Math.round(least.h * f))) }));
   // With automation sources, room on its right for their wires to turn up between the controls (the Control layer's corridors).
   const room = sources.length ? AUTO_ROOM : 0;
   const spot = (size, among, step) => {
@@ -134,7 +134,12 @@ export function packageOf({ rect, controls = [], blocked = [], engine = [], auto
   for (const size of r ? [] : shrunk) if ((r = spot(size, obstacles, SEARCH_STEP / 2))) break;
   const walls = obstacles.filter((o) => o !== band);
   for (const size of r ? [] : shrunk) if ((r = spot(size, walls, SEARCH_STEP / 2))) break;
-  r ??= placeCube(least, area, obstacles, towards(least));
+  // No room at all: the least size cut to the area, at its bottom right (always inside the instrument).
+  if (!r) {
+    const w = Math.min(least.w, area.w);
+    const h = Math.min(least.h, area.h);
+    r = { x: area.x + area.w - w, y: area.y + area.h - h, w, h };
+  }
   const below = r.y >= band.y + band.h - 1e-6;
   // A shrunk package keeps its parts in proportion: its title band, its pad and its pins' pitch at most their sizes.
   const head = Math.min(PACKAGE_PU.title * PU, r.h / 4);
