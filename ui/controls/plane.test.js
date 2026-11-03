@@ -61,6 +61,9 @@ class Node {
   get offsetWidth() {
     return 160;
   }
+  get parentNode() {
+    return this.parentElement;
+  }
   setAttribute(k, v) {
     this.attributes.set(k, String(v));
   }
@@ -631,7 +634,7 @@ domTest('the layer chosen alone: Enter and Escape step through the layers, the v
 
 // The Engine layer (the owner's decision of 2026-11-03): a drawing of the plane like the others, never the embedded board.
 
-domTest('the Engine layer draws every instrument’s inside in its own rectangle, in the Stack’s coordinates; the view stays, the Wiring and Control are out', async () => {
+domTest('the Engine layer draws every instrument’s engine package at its place, its inside revealed by zoom, in the Stack’s coordinates; the view stays, the Wiring and Control are out', async () => {
   const p = await shown(plane());
   p.bar = new Node('nav');
   p.stage = new Node('div');
@@ -654,19 +657,35 @@ domTest('the Engine layer draws every instrument’s inside in its own rectangle
   assert.equal(p.stage.querySelector('signal-schematic'), null, 'no embedded board');
   const layouts = s.engines.layouts;
   assert.deepEqual(layouts.map((e) => e.entry), s.layout.rects.map((r) => r.entry), 'one engine per instrument, all at once');
-  for (const e of layouts) for (const c of e.cards) {
+  const inside = (c, r) => c.x >= r.x - 1e-6 && c.y >= r.y - 1e-6 && c.x + c.w <= r.x + r.w + 1e-6 && c.y + c.h <= r.y + r.h + 1e-6;
+  for (const e of layouts) {
     const r = s.layout.rects.find((x) => x.entry === e.entry);
-    assert.ok(c.x >= r.x && c.y >= r.y && c.x + c.w <= r.x + r.w && c.y + c.h <= r.y + r.h, `${c.name} inside ${e.entry}`);
+    assert.ok(inside(e.frame, r), `${e.entry}: its package inside its rectangle`);
+    // The package is the one the Wiring and Control draw: the same rectangle.
+    assert.deepEqual(e.frame, (({ x, y, w, h }) => ({ x, y, w, h }))(p.packagesNow().map.get(e.entry)));
+    for (const c of e.cards) assert.ok(inside(c, e.area), `${c.name} inside ${e.entry}’s package body`);
   }
   assert.deepEqual(layouts.flatMap((e) => e.cards.map((c) => c.name)).sort(), ['echo', 'melody', 'synth']);
-  const drawn = s.engineSvg.all();
+  let drawn = s.engineSvg.all();
   assert.equal(drawn.filter((n) => n.getAttribute('class') === 'e-frame').length, layouts.length, 'each rectangle a faint frame');
-  assert.ok(drawn.some((n) => String(n.getAttribute('class')).startsWith('e-wire')), 'the connections drawn');
+  assert.equal(drawn.filter((n) => n.getAttribute('class') === 'pkg pkg-engine').length, layouts.length, 'each instrument its package');
+  assert.ok(!drawn.some((n) => String(n.getAttribute('class')).startsWith('e-wire')), 'closed at this zoom: no inside yet');
   assert.ok(!drawn.some((n) => /^c-|leg|cube/.test(String(n.getAttribute('class') ?? ''))), 'no Control drawing at the Engine');
+  // Zoomed into the synth's package: its inside, the cards and their connections, in its body; the bar says Layer 1.
+  const synth = layouts.find((e) => e.cards.some((c) => c.name === 'synth'));
+  p.view = p.viewAround(synth.card.body, (synth.card.reveal[1] + 1) / synth.card.body.w);
+  p.drawView();
+  drawn = s.engineSvg.all();
+  assert.ok(drawn.some((n) => String(n.getAttribute('class')).startsWith('e-wire')), 'the connections drawn');
+  assert.deepEqual(p.chipsNow().map((c) => c.id), [synth.card.id], 'inside the package: Layer 1');
+  p.view = { k: 0.5, x: 10, y: -40 };
+  p.drawView();
   // Laid out once: drawn again only when what it depends on changes.
   const before = s.engines;
   p.drawView();
   assert.equal(s.engines, before);
+  // The zoom's rescale event waits for no document after the test.
+  clearTimeout(p.settleTimer);
 });
 
 domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit enables the edits, Delete writes the patch, the menu adds, removes and shows in; Escape lets the selection go first', async () => {
@@ -686,7 +705,13 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   p.layer = 'engine';
   p.drawView();
   const screen = (q) => ({ clientX: q.x * p.view.k + p.view.x, clientY: q.y * p.view.k + p.view.y });
-  const echo = s.engines.layouts.flatMap((e) => e.cards).find((c) => c.name === 'echo');
+  const echoEngine = s.engines.layouts.find((e) => e.cards.some((c) => c.name === 'echo'));
+  const echo = echoEngine.cards.find((c) => c.name === 'echo');
+  // Closed, the package holds no hit: a press there is the instrument's empty space.
+  assert.equal(p.hitAt({ x: screen(echo).clientX + 1, y: screen(echo).clientY + 1 })?.kind, 'e-space');
+  // Into the echo's package (Layer 1): its instances are the project's top level, addresses as they are.
+  p.view = p.viewAround(echoEngine.card.body, (echoEngine.card.reveal[1] + 1) / echoEngine.card.body.w);
+  p.drawView();
   const onEcho = screen({ x: echo.x + echo.w / 2, y: echo.y + 2 });
   const down = (at) => p.pointerDown({ button: 0, pointerId: 1, ...at, composedPath: () => [s.engineSvg, s.element, p.stage, p] });
   // Edit off: a click selects (the main action), marking the card's drawing.
@@ -729,15 +754,16 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   const sent = [];
   p.connection = { request: (message) => (sent.push(message), Promise.resolve({ level: '', base: 'b1', inverse: [{ op: 'connection.add', from: 'synth.out', to: 'echo.in' }] })) };
   p.session.graphSeen({ files: { '': 'b0' } });
-  const wire = s.engineHit.find((i) => i.kind === 'e-wire' && i.key === 'wire /synth.out /echo.in');
+  const wire = p.engineHitItems(s).items.find((i) => i.kind === 'e-wire' && i.key === 'wire /synth.out /echo.in');
   p.select({ kind: 'engine', what: 'e-wire', keys: [wire.key], item: wire });
   assert.ok(marked().includes('wire /synth.out /echo.in'));
   press(p, page, 'Delete', [p]);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(sent.map((m) => [m.type, m.level, m.base, m.ops]), [['patch', '', 'b0', [{ op: 'connection.remove', from: 'synth.out', to: 'echo.in' }]]]);
   assert.equal(p.selection, null);
-  // Escape: a selection is let go first, the layer stays.
+  // Escape: a selection is let go first, the layer stays (out of the package, so not inside a chip).
   down(onEcho);
+  p.view = { k: 0.5, x: 10, y: -40 };
   const chosen = [];
   p.chooseLayer = (level) => chosen.push(level);
   press(p, page, 'Escape', [p]);
@@ -748,4 +774,5 @@ domTest('the Engine’s step 3: a click selects a card or a wire (marked), Edit 
   // Another layer leaves the Engine's Edit.
   p.renderBar('control', 1);
   assert.equal(p.engineEdit, false);
+  clearTimeout(p.settleTimer);
 });

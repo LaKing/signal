@@ -3,7 +3,9 @@
 // panel has them (the panel's live elements, measured); its engine (the
 // instances the instrument holds) is one package, "the cube", placed in the
 // panel's free area nearest the controls it serves, derived and never
-// stored, never dragged; and on it:
+// stored, never dragged: the one engine package of ui/lib/plane-package.js
+// (`packageOf`), at the same place with the same signal pins as the Wiring
+// and Engine layers draw it; and on it:
 //   - **binding legs** (the "factory routing"): each bound control to its
 //     parameter's pin on the cube's connector, the legs run as a ribbon in
 //     a band under the controls, nested so that no two cross (ADR 0047
@@ -29,17 +31,10 @@
 import { PU } from './plate.js';
 import { instanceOf } from './plane-instruments.js';
 import { portIndex, portKind, simplify } from './plane-wiring.js';
+import { BAND_PAD, LANE, PACKAGE_PU, READOUT_H, packageOf } from './plane-package.js';
 
-/** The cube: its least width, its title band, a connector pin's pitch, an automation pin's pitch, in pu. */
-export const CUBE_PU = Object.freeze({ w: 18, title: 4, pin: 1, auto: 3, pad: 1.5 });
-/** A leg's lane pitch in the band under the controls, the band's pad, in plane units. */
-export const LANE = 4;
-export const BAND_PAD = 6;
-/** The inner value's readout under a control, in plane units. */
-export const READOUT_H = 18;
-/** The cube's search grid and its clearance from the controls, in plane units. */
-export const SEARCH_STEP = 16;
-export const CLEARANCE = 8;
+// The package's placement, its legs' band and the readout's room are ui/lib/plane-package.js's.
+export { LANE, BAND_PAD, READOUT_H, SEARCH_STEP, CLEARANCE, overlaps, placeCube } from './plane-package.js';
 /** Nested composites followed at most, finding an export's targets. */
 export const MAX_DEPTH = 8;
 
@@ -168,30 +163,6 @@ export function corridors(obstacles, rect, y0, y1) {
   return out;
 }
 
-/** Whether two rectangles overlap (with `gap`). */
-export function overlaps(a, b, gap = 0) {
-  return a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
-}
-
-/**
- * The cube's place (plane units): the free spot of `area` (the instrument's
- * rectangle less a margin) nearest `towards`, on a SEARCH_STEP grid, never
- * over an obstacle; ties by y, then x. Without one, the area's bottom
- * right. A function of its arguments only.
- */
-export function placeCube(size, area, obstacles, towards) {
-  let best = null;
-  for (let y = area.y; y + size.h <= area.y + area.h + 1e-9; y += SEARCH_STEP) {
-    for (let x = area.x; x + size.w <= area.x + area.w + 1e-9; x += SEARCH_STEP) {
-      const r = { x, y, w: size.w, h: size.h };
-      if (obstacles.some((o) => overlaps(r, o, CLEARANCE))) continue;
-      const d = Math.hypot(x + size.w / 2 - towards.x, y + size.h / 2 - towards.y);
-      if (!best || d < best.d - 1e-9) best = { d, r };
-    }
-  }
-  return best?.r ?? { x: area.x + Math.max(0, area.w - size.w), y: area.y + Math.max(0, area.h - size.h), w: size.w, h: size.h };
-}
-
 /**
  * Lanes for legs from controls at `c` to pins at `p` (x each) in a band:
  * the legs going right nest with the leftmost deepest, those going left
@@ -215,42 +186,24 @@ export function legLanes(legs) {
  * grid is no obstacle, the cube may lie over it), `engine`
  * (`engineOf`'s names), `autos` (`automations`'), `edgeYs` (`Map(address →
  * y)`: the Wiring level's input ports, where a cable from outside enters),
- * `inner` (`Map(bind → inner address)`). Returns `{rect, cube, pins, autoPins,
- * edgePins, legs, wires, readouts, band, bounds}`.
+ * `inner` (`Map(bind → inner address)`), `pkg` (the instrument's engine
+ * package, `packageOf`'s with the Wiring's ports, as every layer draws it;
+ * without one it is laid out here, with no signal pins). Returns `{rect,
+ * cube, pins, autoPins, edgePins, legs, wires, readouts, band, bounds}`:
+ * `cube` the package.
  */
-export function controlLayout({ rect, controls = [], blocked = [], engine = [], autos = [], edgeYs = new Map(), inner = new Map(), title = '' }) {
+export function controlLayout({ rect, controls = [], blocked = [], engine = [], autos = [], edgeYs = new Map(), inner = new Map(), title = '', pkg = null }) {
   const names = new Set(engine);
   const bound = controls.filter((c) => c.binds.length);
-  // The parameters on the cube's connector: each bound address in the engine, in the controls' x order.
   const inEngine = (address) => names.has(instanceOf(address));
-  const params = [];
-  for (const c of [...bound].sort((a, b) => a.rect.x - b.rect.x || a.rect.y - b.rect.y)) {
-    for (const address of c.binds) if (inEngine(address) && !params.includes(address)) params.push(address);
-  }
-  const engineAutos = autos.filter((a) => a.source === 'engine');
-  const pinPitch = CUBE_PU.pin * PU;
-  const size = {
-    w: Math.max(CUBE_PU.w * PU, (params.length + 1) * pinPitch),
-    h: Math.max(10 * PU, (CUBE_PU.title + CUBE_PU.pad * 2) * PU + new Set(engineAutos.map((a) => a.from)).size * CUBE_PU.auto * PU),
-  };
-  const controlsBottom = bound.length ? Math.max(...bound.map((c) => c.rect.y + c.rect.h)) : rect.y + rect.h / 2;
+  // The package: its place, its connector's pins (each bound parameter in the engine) and the legs' band are the one package's.
+  const cube = pkg ?? packageOf({ rect, controls, blocked, engine, autos, inner, title });
+  const band = cube.band;
   // The inner value is shown where the engine's own modulation acts on a bound parameter (elsewhere it equals the effective value, ADR 0050 §11).
   const automated = new Set(autos.map((a) => a.bind));
   const readable = (b) => inner.has(b) && automated.has(b);
-  const readoutRoom = bound.some((c) => c.binds.some(readable)) ? READOUT_H : 0;
   const legCount = bound.length;
-  const bandH = BAND_PAD * 2 + Math.max(1, legCount) * LANE;
-  const bandTop = Math.max(rect.y, Math.min(controlsBottom + readoutRoom, rect.y + rect.h - bandH));
-  const band = { x: rect.x, y: bandTop, w: rect.w, h: bandH };
-  const obstacles = [...controls.map((c) => c.rect), ...blocked, band];
-  const towards = bound.length
-    ? { x: bound.reduce((s, c) => s + c.rect.x + c.rect.w / 2, 0) / bound.length, y: controlsBottom + bandH + size.h / 2 }
-    : { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-  const area = { x: rect.x + 2 * PU, y: rect.y + 2 * PU, w: rect.w - 4 * PU, h: rect.h - 4 * PU };
-  const cube = { ...placeCube(size, area, obstacles, towards), title, names: [...engine] };
-  const below = cube.y >= band.y + band.h - 1e-6;
-  const connectorY = below ? cube.y : cube.y + cube.h;
-  const pins = params.map((address, i) => ({ id: `pin ${address}`, kind: 'param', address, x: cube.x + (i + 1) * (cube.w / (params.length + 1)), y: connectorY, side: below ? 'top' : 'bottom' }));
+  const pins = cube.params.map((p) => ({ ...p, kind: 'param' }));
   const pinOf = new Map(pins.map((p) => [p.address, p]));
   // A bind outside the engine leaves the instrument at its right edge, one pin per address.
   const outside = [];
@@ -300,11 +253,15 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
       // One pin per source on the cube's edge; each of its connections its own wire.
       let pin = autoPins.find((q) => q.address === a.from);
       if (!pin) {
-        pin = { id: `auto-pin ${a.from}`, kind: 'auto', auto: a.id, address: a.from, x: cube.x + cube.w, y: cube.y + (CUBE_PU.title + CUBE_PU.pad + (autoPins.length + 0.5) * CUBE_PU.auto) * PU };
+        // The package's pin of this source (its right edge, under the signal outputs).
+        const at = cube.autos.find((q) => q.address === a.from);
+        pin = { id: `auto-pin ${a.from}`, kind: 'auto', auto: a.id, address: a.from, x: at?.x ?? cube.x + cube.w, y: at?.y ?? cube.y + cube.h / 2 };
         autoPins.push(pin);
       }
       const gaps = corridors(walls, rect, lane, pin.y).filter((g) => g.x1 - g.x0 >= 2 * LANE_GAP);
-      const right = gaps.filter((g) => g.x1 > pin.x);
+      // Reached from the pin along its row without crossing a control: up to the first one standing right of it there.
+      const reach = Math.min(Infinity, ...walls.filter((o) => o !== cube && o.x >= pin.x && o.y - 2 < pin.y && o.y + o.h + 2 > pin.y).map((o) => o.x - 2));
+      const right = gaps.filter((g) => g.x1 > pin.x && g.x0 + LANE_GAP < reach);
       const choice = (right.length ? right : gaps).sort((g, h) => Math.abs((g.x0 + g.x1) / 2 - land.x) - Math.abs((h.x0 + h.x1) / 2 - land.x) || g.x0 - h.x0)[0];
       let x;
       if (choice) {
@@ -312,13 +269,14 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
         const used = corridorUse.get(key) ?? 0;
         corridorUse.set(key, used + 1);
         x = Math.min(choice.x1 - LANE_GAP, Math.max(choice.x0, pin.x) + LANE_GAP * (used + 1));
+        if (right.includes(choice)) x = Math.min(x, reach - 1);
       } else x = rect.x + rect.w - LANE_GAP * (autoPins.length + 1);
       start = pin;
       // Out of the pin to the corridor, below everything else; a corridor left of the pin is reached under the cube.
       const under = cube.y + cube.h + LANE_GAP * (corridorUse.size + 1);
       pts = x >= pin.x ? [pin, { x, y: pin.y }, { x, y: lane }, { x: land.x, y: lane }, land] : [pin, { x: pin.x + LANE_GAP, y: pin.y }, { x: pin.x + LANE_GAP, y: under }, { x, y: under }, { x, y: lane }, { x: land.x, y: lane }, land];
     } else {
-      const y = edgeYs.get(a.to) ?? edgeYs.get(a.bind) ?? rect.y + (CUBE_PU.title + externalIndex * 3) * PU;
+      const y = edgeYs.get(a.to) ?? edgeYs.get(a.bind) ?? rect.y + (PACKAGE_PU.title + externalIndex * 3) * PU;
       const pin = { id: `ext-pin ${a.id}`, kind: 'external', auto: a.id, address: a.to, from: a.from, x: rect.x, y };
       externalPins.push(pin);
       // Along the instrument's left edge, in its margin, then along the row's lane.

@@ -85,6 +85,7 @@ import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-contr
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
+import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
 import { ENGINE_SELECTABLE, addOps, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { headPath } from '../lib/schematic-draw.js';
@@ -267,7 +268,17 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 /* ADR 0051 phase 2: the Wiring level (the back of the rack) and the Control plane (the sheet under a front panel), each Stack's, in its coordinates. */
 svg.wiring, svg.control, svg.engine, svg.drag { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-.w-box { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.w-box { fill: #13161b; stroke: #2e343e; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+/* The engine package (2026-11-03): one drawing at the Wiring, Control and Engine layers, the same place and pins. */
+.pkg-body { fill: #232832; stroke: #7a8496; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pkg-top { fill: #2d3440; pointer-events: none; }
+.pkg-title { fill: var(--signal-fg, #d6dbe4); font-weight: 600; letter-spacing: 0.08em; pointer-events: none; }
+.pkg-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
+/* Hover titles where nothing lies under it: at the Engine its body and pins, at the Wiring its pins (at Control a front panel's piano roll may lie under it). */
+.pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin { pointer-events: all; }
+.pkg-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 4; }
+.pkg-pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--w-port, 12px); pointer-events: none; }
+.pkg-control .pkg-pin-label { font-size: 9px; fill: var(--signal-muted, #8a93a3); }
 .w-box.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2.5; }
 .w-title { fill: var(--signal-muted, #8a93a3); font-size: var(--w-title, 16px); letter-spacing: 0.16em; font-weight: 600; }
 .w-port { fill: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
@@ -293,9 +304,6 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .c-via.selected, .c-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .c-auto { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .c-auto.inner { stroke-width: 1.75; opacity: 0.85; }
-.c-cube-body { fill: #232832; stroke: #7a8496; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.c-cube-top { fill: #2d3440; }
-.c-cube-title { fill: var(--signal-fg, #d6dbe4); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; }
 .c-pin { fill: var(--signal-effective, #ffb74d); }
 .c-auto-pin { fill: #b39ddb; stroke: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .c-auto-label { fill: var(--signal-muted, #8a93a3); font-size: 9px; }
@@ -1457,26 +1465,105 @@ export class SignalPlane extends HTMLElement {
 
   // The Wiring level: the focused Stack from behind (ui/lib/plane-wiring.js), laid out when it first shows, kept per graph and layout.
 
-  /** The focused Stack's Wiring drawing, or null (laid out and drawn once per graph and Stack layout). */
-  wiringNow() {
+  /** The focused Stack's Wiring model (`wiringModel`: each instrument's ports and the cables between them), once per graph, Stack layout and ownership. */
+  wiringModelNow(s, stack) {
+    const pins = this.model.pins.get(stack.name) ?? [];
+    // What it depends on: the structure, the Stack's layout, and who holds what (the panel's binds, the Stacks).
+    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${JSON.stringify([[...this.model.owner], [...this.model.stackOf], pins])}`;
+    if (s.wiringModel?.key === key) return s.wiringModel;
+    // Only the instruments laid out (measured): an entry without a rectangle has no ports to draw.
+    const laid = { ...stack, instruments: s.layout.rects.map((r) => r.entry) };
+    const model = wiringModel(laid, this.model.owner, this.model.stackOf, this.graph?.top?.instances ?? [], this.graph?.top?.connections ?? [], pins);
+    s.wiringModel = { key, model, pins };
+    return s.wiringModel;
+  }
+
+  /**
+   * The focused Stack's engine packages (ui/lib/plane-package.js, the owner's decision of 2026-11-03): each instrument's
+   * audio engine as one package, at the same place with the same pins on the Wiring, Control and Engine layers, which all
+   * draw these. Laid out once per graph, Stack layout, ownership, panel and titles (the controls measured then, once:
+   * a layout read only when the key changes, never per frame); `{key, map: Map(entry → package), fronts: Map(entry →
+   * {controls, blocked, autos, inner, measured})}`, or null.
+   */
+  packagesNow() {
     const stack = this.model?.plane.stacks.find((x) => x.name === this.focused);
     const s = this.stacks.get(this.focused);
     if (!stack || !s?.layout || !this.graph) return null;
-    const pins = this.model.pins.get(stack.name) ?? [];
-    // What the Wiring depends on: the structure, the Stack's layout, and who holds what (the panel's binds, the Stacks).
-    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${JSON.stringify([[...this.model.owner], [...this.model.stackOf], pins])}`;
-    if (s.wiring?.key === key) return s.wiring;
+    const wiring = this.wiringModelNow(s, stack);
+    const titles = s.layout.rects.map((r) => instrumentTitle(r.entry, this.cards));
+    const key = `${wiring.key}\n${this.panel?.html?.length ?? 0}\n${titles.join('\n')}`;
+    if (s.packages?.key === key) return s.packages;
+    const map = new Map();
+    const fronts = new Map();
+    s.layout.rects.forEach((r, i) => {
+      const front = this.measureFront(s.cards.get(r.entry), r, r.entry);
+      const ports = wiring.model.ports.get(r.entry) ?? { ins: [], outs: [] };
+      fronts.set(r.entry, front);
+      map.set(r.entry, packageOf({ rect: { x: r.x, y: r.y, w: r.w, h: r.h }, controls: front.controls, blocked: front.blocked, engine: engineOf(r.entry, this.model.owner), autos: front.autos, inner: front.inner, ins: ports.ins, outs: ports.outs, title: titles[i] }));
+    });
+    s.packages = { key, map, fronts };
+    return s.packages;
+  }
+
+  /** An instrument's front panel as its package and its Control plane need it: its controls measured, their automation and inner values. */
+  measureFront(card, r, entry) {
+    const measured = card ? this.measureControls(card, r) : null;
+    const controls = measured?.controls ?? [];
+    const binds = controls.filter((c) => c.writes).flatMap((c) => c.binds);
+    const inner = new Map();
+    for (const b of binds) {
+      const a = innerAddress(b, this.graph);
+      if (a) inner.set(b, a);
+    }
+    return { measured: Boolean(measured), controls, blocked: measured?.blocked ?? [], autos: automations({ entry, binds, owner: this.model.owner, graph: this.graph }), inner };
+  }
+
+  /** The focused Stack's Wiring drawing, or null (laid out and drawn once per graph, Stack layout and packages). */
+  wiringNow() {
+    const s = this.stacks.get(this.focused);
+    const packages = this.packagesNow();
+    if (!packages || !s?.wiringModel) return null;
+    if (s.wiring?.key === packages.key) return s.wiring;
     const t0 = performance.now();
-    const instances = this.graph?.top?.instances ?? [];
-    const connections = this.graph?.top?.connections ?? [];
-    // Only the instruments laid out (measured): an entry without a rectangle has no ports to draw.
-    const laid = { ...stack, instruments: s.layout.rects.map((r) => r.entry) };
-    const model = wiringModel(laid, this.model.owner, this.model.stackOf, instances, connections, pins);
-    const pinYs = new Map(pinPlaces(pins, s.layout.rects).map((p) => [`${p.side} ${p.address}`, p.y]));
-    const layout = wiringLayout(model, s.layout, pinYs);
-    s.wiring = { key, layout, pins: pinPlaces(pins, s.layout.rects), ms: performance.now() - t0 };
+    const { model, pins } = s.wiringModel;
+    const places = pinPlaces(pins, s.layout.rects);
+    const pinYs = new Map(places.map((p) => [`${p.side} ${p.address}`, p.y]));
+    const layout = wiringLayout(model, s.layout, pinYs, packages.map);
+    s.wiring = { key: packages.key, layout, pins: places, packages: packages.map, ms: performance.now() - t0 };
     this.drawWiring(s, s.wiring);
     return s.wiring;
+  }
+
+  /**
+   * An engine package drawn (ui/lib/plane-package.js `packageOf`'s, plane units), the same at every layer (`layer` its
+   * class): its body, its title band, its signal pins and their labels, each with a hover title (`note` the body's).
+   * `{g, pins: Map(id → element), labels, pinsGroup}`: an inside drawn in it goes before `labels` (under the pins).
+   */
+  drawPackage(pkg, layer, note) {
+    const g = svg('g', { class: `pkg pkg-${layer}` });
+    const body = svg('rect', { class: 'pkg-body', x: pkg.x, y: pkg.y, width: pkg.w, height: pkg.h, rx: 6 });
+    body.append(svg('title', {}, note));
+    g.append(body);
+    // The title band and its text in proportion to a shrunk package's (11 plane units in a full one).
+    const inset = Math.min(4, pkg.head.h / 6);
+    const size = Math.min(11, pkg.head.h * 0.45);
+    g.append(svg('rect', { class: 'pkg-top', x: pkg.x + inset, y: pkg.y + inset, width: Math.max(0, pkg.w - 2 * inset), height: Math.max(0, pkg.head.h - 2 * inset), rx: 3 }));
+    g.append(svg('text', { class: 'pkg-title', x: pkg.x + 3 * inset, y: pkg.y + pkg.head.h / 2 + size * 0.36, 'font-size': size.toFixed(2) }, fitText(`ENGINE · ${pkg.names.join(', ') || 'no instances'}`, Math.max(4, Math.floor((pkg.w - 6 * inset) / (size * 0.64))))));
+    const labels = svg('g', { class: 'pkg-labels' });
+    const pinsGroup = svg('g', { class: 'pkg-pins' });
+    const pins = new Map();
+    // A shrunk package's pins closer: their dots and labels in proportion (a full one's pitch is 24).
+    const radius = Math.min(5, pkg.pitch * 0.38);
+    const small = pkg.pitch < 20 ? { style: `font-size: ${(pkg.pitch * 0.7).toFixed(2)}px` } : {};
+    for (const p of [...pkg.ins, ...pkg.outs]) {
+      const dot = svg('circle', { class: `pkg-pin k-${p.kind}`, cx: p.x, cy: p.y, r: +radius.toFixed(2), 'data-id': p.id });
+      dot.append(svg('title', {}, `${p.address} (${p.kind} ${p.side === 'in' ? 'input' : 'output'}): a pin of ${pkg.title}’s engine`));
+      pinsGroup.append(dot);
+      pins.set(p.id, dot);
+      labels.append(svg('text', { class: 'pkg-pin-label', x: p.side === 'in' ? p.x + 2 * radius : p.x - 2 * radius, y: p.y + 4, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...small }, p.label));
+    }
+    g.append(labels, pinsGroup);
+    return { g, pins, labels, pinsGroup };
   }
 
   drawWiring(s, wiring) {
@@ -1486,12 +1573,25 @@ export class SignalPlane extends HTMLElement {
     const elements = new Map();
     const items = [];
     s.wiringGroups = new Map();
+    // Bottom up: the instruments' faint boxes, the cables (a cable runs into its box to its pin), the packages over them.
+    const boxes = svg('g', { class: 'w-boxes' });
+    const packages = svg('g', { class: 'w-packages' });
+    // The packages' pins by port id: a port is its package's pin (the same at Control and the Engine).
+    const pinElements = new Map();
     for (const b of layout.boxes) {
       const g = svg('g', { 'data-entry': b.entry });
+      const front = svg('g', { 'data-entry': b.entry });
       const rect = svg('rect', { class: 'w-box', x: b.x, y: b.y, width: b.w, height: b.h, rx: 6 });
       g.append(rect, svg('text', { class: 'w-title', x: b.x + 16, y: b.y + 26 }, instrumentTitle(b.entry, this.cards).toUpperCase()));
-      s.wiringGroups.set(b.entry, g);
-      root.append(g);
+      const pkg = wiring.packages.get(b.entry);
+      if (pkg) {
+        const drawn = this.drawPackage(pkg, 'wiring', `${pkg.title}’s audio engine: its cables end on its pins (the same at Control and the Engine; zoom in at the Engine to see its inside)`);
+        front.append(drawn.g);
+        for (const [id, element] of drawn.pins) pinElements.set(id, element);
+      }
+      s.wiringGroups.set(b.entry, [g, front]);
+      boxes.append(g);
+      packages.append(front);
       const id = `box ${b.entry}`;
       elements.set(id, rect);
       items.push({ kind: 'box', id, entry: b.entry, x: b.x, y: b.y, w: b.w, h: b.h });
@@ -1504,13 +1604,16 @@ export class SignalPlane extends HTMLElement {
       elements.set(c.id, path);
       items.push({ kind: 'cable', id: c.id, cable: c, points: c.points });
     }
-    root.prepend(cables);
+    root.append(boxes, cables, packages);
     for (const p of layout.ports) {
-      const g = s.wiringGroups.get(p.entry) ?? root;
-      const dot = svg('circle', { class: `w-port k-${p.kind}`, cx: p.x, cy: p.y, r: 5, 'data-id': p.id });
-      dot.append(svg('title', {}, `${p.address} (${p.kind} ${p.side === 'in' ? 'input' : 'output'})`));
-      const label = svg('text', { class: 'w-port-label', x: p.side === 'in' ? p.x + 10 : p.x - 10, y: p.y + 4, 'text-anchor': p.side === 'in' ? 'start' : 'end' }, p.label);
-      g.append(dot, label);
+      let dot = pinElements.get(p.id);
+      if (!dot) {
+        // No package pin for it (an instrument whose package is not laid out): a port on the box's edge.
+        const g = s.wiringGroups.get(p.entry)?.[1] ?? root;
+        dot = svg('circle', { class: `w-port k-${p.kind}`, cx: p.x, cy: p.y, r: 5, 'data-id': p.id });
+        dot.append(svg('title', {}, `${p.address} (${p.kind} ${p.side === 'in' ? 'input' : 'output'})`));
+        g.append(dot, svg('text', { class: 'w-port-label', x: p.side === 'in' ? p.x + 10 : p.x - 10, y: p.y + 4, 'text-anchor': p.side === 'in' ? 'start' : 'end' }, p.label));
+      }
       elements.set(p.id, dot);
       items.push({ kind: 'port', id: p.id, port: p, x: p.x, y: p.y });
     }
@@ -1538,7 +1641,7 @@ export class SignalPlane extends HTMLElement {
     const wiring = this.wiringNow();
     if (!wiring) return hide(s.wiringSvg);
     show(s.wiringSvg);
-    for (const [entry, g] of s.wiringGroups) opacity(g, entry === this.opened ? fades.openWiring : fades.board);
+    for (const [entry, groups] of s.wiringGroups) for (const g of groups) opacity(g, entry === this.opened ? fades.openWiring : fades.board);
     opacity(s.wiringSvg.querySelector('.w-cables'), fades.board);
     this.cull(s, s.wiringItems, s.wiringElements, 'wiringShown');
   }
@@ -1583,29 +1686,23 @@ export class SignalPlane extends HTMLElement {
   /** Instrument `entry`'s Control plane, or null (laid out once per graph, panel, Stack layout and instrument). */
   controlFor(entry) {
     const s = this.stacks.get(this.focused);
-    const card = s?.cards.get(entry);
     const r = s?.layout?.rects.find((x) => x.entry === entry);
-    if (!entry || !card || !r || !this.graph) return null;
+    if (!entry || !r || !s.cards.get(entry)) return null;
+    const packages = this.packagesNow();
+    const pkg = packages?.map.get(entry);
+    const front = packages?.fronts.get(entry);
+    if (!pkg || !front?.measured) return null;
     s.controls ??= new Map();
     const known = s.controls.get(entry);
-    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${entry}\n${this.panel?.html?.length ?? 0}:${s.key}`;
+    const key = `${packages.key}\n${entry}`;
     if (known?.key === key) return known;
-    const measured = this.measureControls(card, r);
-    if (!measured) return known ?? null;
     const t0 = performance.now();
     const wiring = this.wiringNow();
-    const engine = engineOf(entry, this.model.owner);
-    const binds = measured.controls.filter((c) => c.writes).flatMap((c) => c.binds);
-    const autos = automations({ entry, binds, owner: this.model.owner, graph: this.graph });
-    const inner = new Map();
-    for (const b of binds) {
-      const a = innerAddress(b, this.graph);
-      if (a) inner.set(b, a);
-    }
-    // A cable from outside enters where the Wiring level's port of the same connection is.
+    // A cable from outside enters level with the Wiring level's port of the same connection (its package's pin).
     const edgeYs = new Map((wiring?.layout.ports ?? []).filter((p) => p.entry === entry && p.side === 'in').map((p) => [p.address, p.y]));
-    const layout = controlLayout({ rect: { x: r.x, y: r.y, w: r.w, h: r.h }, controls: measured.controls, blocked: measured.blocked, engine, autos, edgeYs, inner, title: instrumentTitle(entry, this.cards) });
-    const control = { key, entry, layout, controls: measured.controls, autos, ms: performance.now() - t0 };
+    // The package is the one the Wiring and the Engine draw: the same place, the same pins.
+    const layout = controlLayout({ rect: { x: r.x, y: r.y, w: r.w, h: r.h }, controls: front.controls, blocked: front.blocked, engine: pkg.names, autos: front.autos, edgeYs, inner: front.inner, title: pkg.title, pkg });
+    const control = { key, entry, layout, controls: front.controls, autos: front.autos, ms: performance.now() - t0 };
     s.controls.set(entry, control);
     return control;
   }
@@ -1632,7 +1729,17 @@ export class SignalPlane extends HTMLElement {
       if (!binds.length) continue;
       controls.push({ id: `control ${controls.length}`, element: e, tag: e.localName, type, binds, writes: !READERS.has(type), label: e.getAttribute('label') ?? '', rect: at(e) });
     }
-    const blocked = [...card.querySelectorAll(':scope > h1, :scope > h2')].map(at);
+    // A heading blocks its text, not the whole width its block takes (the engine package may stand beside it), and room
+    // after it for the Wiring's and the Engine's instrument titles, drawn there a little further right.
+    const heading = (h) => {
+      const range = document.createRange?.();
+      range?.selectNodeContents(h);
+      const tr = range?.getBoundingClientRect?.();
+      if (!(tr?.width > 0)) return at(h);
+      const box = at(h);
+      return { x: box.x, y: box.y, w: Math.min(box.w, (tr.right - cr.left) / k + r.panel.x - box.x + 8 * PU), h: box.h };
+    };
+    const blocked = [...card.querySelectorAll(':scope > h1, :scope > h2')].map(heading);
     return { controls, blocked };
   }
 
@@ -1703,12 +1810,9 @@ export class SignalPlane extends HTMLElement {
       elements.set(w.id, path);
       items.push({ kind: 'auto', id: w.id, auto: w.auto, points: w.points });
     }
+    // The engine package: the one the Wiring and the Engine draw, at the same place with the same signal pins.
     const c = layout.cube;
-    const cube = svg('g', { class: 'c-cube' });
-    cube.append(svg('rect', { class: 'c-cube-body', x: c.x, y: c.y, width: c.w, height: c.h, rx: 6 }));
-    cube.append(svg('rect', { class: 'c-cube-top', x: c.x + 4, y: c.y + 4, width: c.w - 8, height: 24, rx: 3 }));
-    cube.append(svg('text', { class: 'c-cube-title', x: c.x + 12, y: c.y + 21 }, fitText(`ENGINE · ${c.names.join(', ')}`, Math.max(4, Math.floor((c.w - 24) / 7)))));
-    cube.append(svg('title', {}, `${layout.cube.title}'s engine: ${c.names.join(', ') || 'no instances'}. Zoom in to open it.`));
+    const cube = this.drawPackage(c, 'control', `${c.title}’s engine: ${c.names.join(', ') || 'no instances'}. Its inside is the Engine layer’s.`).g;
     root.append(cube);
     elements.set('cube', cube);
     items.push({ kind: 'cube', id: 'cube', x: c.x, y: c.y, w: c.w, h: c.h });
@@ -1813,59 +1917,57 @@ export class SignalPlane extends HTMLElement {
   enginesNow() {
     const s = this.stacks.get(this.focused);
     if (!s?.layout || !this.graph || !this.model) return null;
-    const wiring = this.wiringNow();
-    // What the Engine depends on: the Wiring's key (the structure, the Stack's layout, who holds what, where the edge is crossed) and the titles.
-    const titles = s.layout.rects.map((r) => instrumentTitle(r.entry, this.cards)).join('\n');
-    const key = `${wiring?.key ?? `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${JSON.stringify([...this.model.owner])}`}\n${titles}`;
-    if (s.engines?.key === key) return s.engines;
+    // What the Engine depends on: the packages' key (the structure, the Stack's layout, who holds what, the panel, the titles).
+    const packages = this.packagesNow();
+    if (!packages) return null;
+    if (s.engines?.key === packages.key) return s.engines;
     const t0 = performance.now();
-    const ports = wiring?.layout.ports ?? [];
     const layouts = s.layout.rects.map((r) => {
-      const mine = ports.filter((p) => p.entry === r.entry);
-      return engineLayout({
-        entry: r.entry,
-        rect: { x: r.x, y: r.y, w: r.w, h: r.h },
-        names: engineOf(r.entry, this.model.owner),
-        graph: this.graph,
-        edgeIns: new Map(mine.filter((p) => p.side === 'in').map((p) => [p.address, p.y])),
-        edgeOuts: new Map(mine.filter((p) => p.side === 'out').map((p) => [p.address, p.y])),
-        title: instrumentTitle(r.entry, this.cards),
-      });
+      const pkg = packages.map.get(r.entry) ?? null;
+      return engineLayout({ entry: r.entry, rect: { x: r.x, y: r.y, w: r.w, h: r.h }, pkg, names: pkg?.names ?? engineOf(r.entry, this.model.owner), graph: this.graph, title: instrumentTitle(r.entry, this.cards) });
     });
-    s.engines = { key, layouts, ms: performance.now() - t0 };
-    // The hit items of the instruments' level (the revealed chips' insides add theirs, `engineHitItems`).
-    s.engineHit = layouts.flatMap((e) => engineItems(e, { entry: e.entry }));
+    s.engines = { key: packages.key, layouts, ms: performance.now() - t0 };
     this.drawEngines(s, s.engines);
     return s.engines;
   }
 
-  /** The Stack's Engine drawing: per instrument its faint frame and title, its wires, its cards and their pins, each with a hover title. */
+  /**
+   * The Stack's Engine drawing: per instrument its faint frame and title and its engine package, closed (the package the
+   * Wiring and Control draw, at the same place with the same pins), each with a hover title. A package is the top-level
+   * chip (`s.engineChips`, `package: true`): its inside, the instrument's instances and their connections, is drawn when
+   * first revealed by zoom (`renderInsides`), in its body, and fades in over it; the composites in it open the same way.
+   */
   drawEngines(s, engines) {
     const root = svg('g', { transform: 'translate(-2 -2)' });
     const items = [];
     const elements = new Map();
-    // The chips (composite cards) by id, the top level's in order, and the insides built (`renderInsides`).
+    // The chips (the packages, then the composite cards in them) by id, the packages in order, and the insides built (`renderInsides`).
     s.engineChips = new Map();
     s.engineTopChips = [];
     s.insidesBuilt = new Set();
-    // The elements a selection marks (`keyed`): the instruments' level's here, each built inside's on its chip.
+    // The elements a selection marks (`keyed`): the packages' pins here, each built inside's on its chip.
     s.engineKeyed = [];
     for (const e of engines.layouts) {
       const g = svg('g', { 'data-entry': e.entry });
       const r = e.rect;
       g.append(svg('rect', { class: 'e-frame', x: r.x + 2, y: r.y + 2, width: r.w - 4, height: r.h - 4, rx: 6 }));
       g.append(svg('text', { class: 'e-title', x: r.x + 16, y: r.y + 18 }, `${String(e.title).toUpperCase()}${e.cards.length ? '' : ' · NO ENGINE'}`));
-      const add = (id, element, item) => {
-        const key = `${e.entry}|${id}`;
-        elements.set(key, element);
-        items.push({ id: key, ...item });
-      };
-      this.drawLevel(s, g, e, { entry: e.entry, parent: null, add });
-      for (const p of e.edges) {
-        const dot = this.keyed(svg('circle', { class: `e-edge ${p.side}`, cx: p.x, cy: p.y, r: 5 }), p.side === 'in' ? wireKey(p.from, p.address) : wireKey(p.address, p.to), s.engineKeyed);
-        dot.append(svg('title', {}, p.side === 'in' ? `${p.from} → ${p.address}: through the instrument’s edge` : `${p.address} → ${p.to}: through the instrument’s edge`));
-        g.append(dot);
-        add(p.id, dot, { x: p.x, y: p.y });
+      if (e.pkg) {
+        const drawn = this.drawPackage(e.pkg, 'engine', `${e.title}’s audio engine${e.cards.length ? `: ${e.cards.length} instance${e.cards.length === 1 ? '' : 's'}; zoom in to see its inside` : ': no instances'}`);
+        // The plain body, where the inside will show, fading out as it comes in.
+        const plain = svg('rect', { class: 'e-plain', x: e.area.x, y: e.area.y, width: e.area.w, height: e.area.h, rx: 3 });
+        drawn.g.insertBefore(plain, drawn.labels);
+        // A pin marks the connection crossing the instrument's edge there (the inside's edge, `engineItems`' e-edge).
+        for (const p of e.edges) {
+          const pin = drawn.pins.get(`port ${p.side} ${p.address}`);
+          if (pin) this.keyed(pin, p.side === 'in' ? wireKey(p.from, p.address) : wireKey(p.address, p.to), s.engineKeyed);
+        }
+        const chip = { id: e.card.id, entry: e.entry, card: e.card, pins: [], scale: e.scale, address: '', element: drawn.g, before: drawn.labels, plain, labels: drawn.labels, parent: null, children: [], laid: e, group: null, package: true };
+        s.engineChips.set(chip.id, chip);
+        s.engineTopChips.push(chip);
+        g.append(drawn.g);
+        elements.set(`${e.entry}|${e.card.id}`, drawn.g);
+        items.push({ id: `${e.entry}|${e.card.id}`, ...e.frame });
       }
       root.append(g);
     }
@@ -1877,27 +1979,29 @@ export class SignalPlane extends HTMLElement {
 
   /**
    * One level of an Engine drawn into `g` (`layLevel`'s, plane units): its wires, its cards and their pins, each with a hover
-   * title. `parent`: the chip it is the inside of (null at the instrument's own level); `add(id, element, item)`: the culling's
-   * registration (the instrument's level only). Each composite card is registered as a chip (`s.engineChips`): its plain body
-   * shows until its inside, laid out and drawn when first revealed (`renderInsides`), fades in over it. Inside a chip the lines
-   * are drawn at the level's scale (no `non-scaling-stroke` there: the same width in every engine, whatever it makes of the stage's CSS transform).
+   * title. `parent`: the chip it is the inside of (an instrument's package: the project's top level, its addresses as they
+   * are; a composite card: its composite's level). Each composite card is registered as a chip (`s.engineChips`): its plain
+   * body shows until its inside, laid out and drawn when first revealed (`renderInsides`), fades in over it. The lines are
+   * drawn at the level's scale (no `non-scaling-stroke` inside a chip: the same width in every engine, whatever it makes of
+   * the stage's CSS transform).
    */
-  drawLevel(s, g, laid, { entry, parent, add = null }) {
+  drawLevel(s, g, laid, { entry, parent }) {
     const k = laid.scale;
-    const prefix = parent?.address ?? '';
-    // A line's width at this level: the stylesheet's (plane units) at the instrument's level, at scale inside a chip.
-    const line = (width) => (parent ? { style: `stroke-width: ${+(width * k).toPrecision(4)}` } : {});
+    // Inside a package: the instrument's instances, top-level instances; inside a composite card: its composite's.
+    const top = Boolean(parent.package);
+    const prefix = top ? '' : parent.address;
+    // A line's width at this level: at its scale.
+    const line = (width) => ({ style: `stroke-width: ${+(width * k).toPrecision(4)}` });
     // An address as the person knows it: inside the chip /synth, `fenv.gate` is /synth/fenv.gate and its input `gate` /synth.gate.
     const full = (a) => fullAddress(prefix, a);
-    const keyed = parent ? (parent.keyed = []) : s.engineKeyed;
-    const edgeNote = parent ? `, through ${parent.card.name}’s edge` : ', through the instrument’s edge';
+    const keyed = (parent.keyed = []);
+    const edgeNote = top ? ', through the instrument’s edge' : `, through ${parent.card.name}’s edge`;
     const wires = svg('g', { class: 'e-wires' });
     for (const w of laid.wires) {
       const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k, CORNERS), ...line(2) }), wireKey(full(w.from), full(w.to)), keyed);
       path.append(svg('title', {}, `${full(w.from)} → ${full(w.to)} (${w.kind})${w.edge ? edgeNote : ''}`));
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
-      add?.(w.id, path, { points: w.points });
     }
     g.append(wires);
     const composites = new Map();
@@ -1915,15 +2019,14 @@ export class SignalPlane extends HTMLElement {
         // The plain body: a faint panel where the inside will show, fading out as it comes in.
         const plain = svg('rect', { class: 'e-plain', x: c.body.x, y: c.body.y, width: c.body.w, height: c.body.h, rx: 3 * k });
         card.append(plain);
-        const id = parent ? `${parent.id}/${c.id}` : c.id;
+        const id = top ? c.id : `${parent.id}/${c.id}`;
         card.dataset.chip = id;
         const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
         composites.set(c.id, chip);
         s.engineChips.set(id, chip);
-        (parent ? parent.children : s.engineTopChips).push(chip);
+        parent.children.push(chip);
       }
       g.append(card);
-      add?.(c.id, card, { x: c.x, y: c.y, w: c.w, h: c.h });
     }
     for (const p of laid.pins) {
       const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
@@ -1934,7 +2037,6 @@ export class SignalPlane extends HTMLElement {
       g.append(dot);
       if (chip) chip.labels.append(label);
       else g.append(label);
-      add?.(p.id, dot, { x: p.x, y: p.y });
     }
     for (const chip of composites.values()) g.append(chip.labels);
   }
@@ -1948,16 +2050,17 @@ export class SignalPlane extends HTMLElement {
   }
 
   /**
-   * The Engine's hit items now (`engineItems`'): the instruments' level's, then each revealed chip's inside (revealed enough
-   * to take the pointer, its chips around it too), outer first: a deeper card lies over the chip's.
+   * The Engine's hit items now (`engineItems`'): each revealed chip's inside (revealed enough to take the pointer, its chips
+   * around it too), outer first (a package's, the instrument's instances at the project's top level, then the composites in
+   * it): a deeper card lies over the chip's. A closed package has none: the press is its instrument's empty space.
    */
   engineHitItems(s) {
-    const items = [...(s.engineHit ?? [])];
+    const items = [];
     const revealed = new Set();
     const visit = (chip) => {
       if (!chip.hit || !chip.laid || !chip.group?.parentNode) return;
       revealed.add(chip.id);
-      chip.items ??= engineItems(chip.laid, { entry: chip.entry, level: chip.card.module, prefix: chip.address, chip: chip.id });
+      chip.items ??= chip.package ? engineItems(chip.laid, { entry: chip.entry }) : engineItems(chip.laid, { entry: chip.entry, level: chip.card.module, prefix: chip.address, chip: chip.id });
       items.push(...chip.items);
       for (const child of chip.children) visit(child);
     };
@@ -1997,7 +2100,7 @@ export class SignalPlane extends HTMLElement {
     const wanted = new Set();
     const visit = (chip) => {
       const c = chip.card;
-      const share = revealShare(c.body.w * v.k);
+      const share = revealShare(c.body.w * v.k, c.reveal);
       const x = (rect.x + c.x) * v.k + v.x;
       const y = (rect.y + c.y) * v.k + v.y;
       const on = share > 0 && x < this.viewport.w + margin && x + c.w * v.k > -margin && y < this.viewport.h + margin && y + c.h * v.k > -margin;
@@ -2013,8 +2116,8 @@ export class SignalPlane extends HTMLElement {
       s.insidesBuilt.delete(chip);
       s.insidesBuilt.add(chip);
       wanted.add(chip);
-      // Under the card's own pins and labels (drawn after the cards), over its body.
-      if (chip.group.parentNode !== chip.element) chip.element.append(chip.group);
+      // Under the card's own pins and labels (drawn after the cards; a package's in its group, `before`), over its body.
+      if (chip.group.parentNode !== chip.element) chip.element.insertBefore(chip.group, chip.before ?? null);
       opacity(chip.group, share);
       // A faint inside takes no pointer: the chip's card under it keeps its hover title and its menu.
       const faint = share < 0.5;
@@ -2046,13 +2149,13 @@ export class SignalPlane extends HTMLElement {
     return dropped;
   }
 
-  /** The chips the view is inside (`chipPath`, from the laid-out cards, no DOM): the stage's centre in a fully revealed chip's body, deeper and deeper. */
+  /** The chips the view is inside (`chipPath`, from the laid-out packages and cards, no DOM): the stage's centre in a fully revealed chip's body, deeper and deeper; a package first. */
   chipsNow() {
     const s = this.stacks.get(this.focused);
     const rect = this.focusRect();
     if (this.level() !== 'engine' || !s?.engines || !s.engineChips || !rect || !this.viewport.w) return [];
     const p = toPlane(this.view, { x: this.viewport.w / 2, y: this.viewport.h / 2 });
-    const cards = s.engines.layouts.flatMap((e) => e.cards);
+    const cards = s.engines.layouts.map((e) => e.card);
     const path = chipPath(cards, { x: p.x - rect.x, y: p.y - rect.y }, this.view.k, (card, id) => {
       const chip = s.engineChips.get(id);
       return chip ? this.insideFor(chip) : null;
@@ -2114,7 +2217,7 @@ export class SignalPlane extends HTMLElement {
         const here = (id === level && !deeper) || (id === 'stack' && level === 'setup');
         b.setAttribute('aria-current', String(here));
         b.disabled = id !== 'stack' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
-        // Inside a chip, Engine travels back out to the instrument whole.
+        // Inside a package, Engine travels back out to the instrument whole.
         if (deeper) {
           const outer = chips[0].id;
           b.addEventListener('click', () => this.outOfChips(this.chipById(outer)));
@@ -2122,10 +2225,12 @@ export class SignalPlane extends HTMLElement {
         else if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
         layers.append(b);
       }
-      // Inside chips (derived from the view): Layer 1 the outermost, the deepest marked; a click fits that chip's body on the stage.
+      // Inside chips (derived from the view): Layer 1 inside an instrument's engine package, Layer 2 inside a composite in it, …;
+      // the deepest marked; a click fits that chip's body on the stage.
       chips.forEach((chip, i) => {
         const deepest = i === chips.length - 1;
-        const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${chip.card.name} (${chip.address})` });
+        const inside = chip.package ? `${chip.card.name}’s engine package` : `${chip.card.name} (${chip.address})`;
+        const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${inside}` });
         b.setAttribute('aria-current', String(deepest));
         const id = chip.id;
         b.addEventListener('click', () => this.showChip(this.chipById(id), 'body'));
@@ -2188,7 +2293,8 @@ export class SignalPlane extends HTMLElement {
     const step = outStep(chips);
     if (!step) return false;
     // Never so close that the chip left is still entered (its body under the full reveal's width), or Escape would repeat itself.
-    const cap = (REVEAL[1] - 1) / Math.max(1e-9, chips.at(-1).card.body.w);
+    const left = chips.at(-1).card;
+    const cap = ((left.reveal?.[1] ?? REVEAL[1]) - 1) / Math.max(1e-9, left.body.w);
     if (step.chip) return this.showChip(step.chip, step.part, cap), true;
     const r = this.instrumentRects().find((x) => x.entry === step.instrument.entry);
     if (this.layer && r && fitAll(r, this.viewport).k > cap) {
@@ -2205,7 +2311,7 @@ export class SignalPlane extends HTMLElement {
     if (id === 'stack') return this.focused ? `Stack ${this.focused}: its instruments' front panels` : 'Stack: the whole project, its Stacks and devices';
     if (id === 'wiring') return 'Wiring: the cables between the instruments';
     const name = this.opened ? instrumentTitle(this.opened, this.cards) : 'the instrument in the middle';
-    return id === 'control' ? `Control: ${name}'s bindings and automation` : 'Engine: every instrument’s inside, in its place';
+    return id === 'control' ? `Control: ${name}'s bindings and automation` : 'Engine: every instrument’s engine package, in its place; zoom into one to see its inside (Layer 1), into a composite in it (Layer 2), …';
   }
 
   /** Goes to a layer from wherever the view is (a layer button). */

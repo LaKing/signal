@@ -1,8 +1,11 @@
 // The Engine layer of the Signal Project plane (ADR 0051 §1, §8; the
-// owner's decision of 2026-11-03): every instrument of the focused Stack
-// shows its inside **in its own rectangle**, in place, in the same
-// Stack-relative plane units as the Wiring and Control layers, so the view
-// never moves when the layer changes. Inside the rectangle:
+// owner's decisions of 2026-11-03): every instrument of the focused Stack
+// shows its audio engine as **its package** (ui/lib/plane-package.js), at
+// the place and with the pins the Wiring and Control layers draw it, in the
+// same Stack-relative plane units, so the view never moves when the layer
+// changes. The package is the top-level chip: zooming in reveals its inside
+// in its body (`engineLayout`, `packageReveal`), as a composite's inside is
+// revealed in its card (below). Inside the package:
 //   - the instrument's instances (its engine, `engineOf`) as cards in the
 //     Deck's look, in columns by signal flow (the schematic's layering,
 //     ui/lib/schematic-layout.js `layout`), scaled as one to fit;
@@ -17,7 +20,7 @@
 //     along a lane below them (lanes as ui/lib/plane-wiring.js
 //     `assignTracks` gives tracks); and the
 //     connections that cross the instrument's edge, entering and leaving at
-//     the height of the Wiring layer's port of the same connection.
+//     the package's pin of the same connection (the Wiring layer's port).
 // Composites are one card each; zooming in reveals a composite's inside in
 // place (`insideOf`): `layLevel` lays out any level (`{instances,
 // connections}`) in any area, so the inside (`graph.composites[module]`) is
@@ -434,30 +437,54 @@ function kindOf(c, portAt) {
 }
 
 /**
- * Instrument `entry`'s Engine laid out in its rectangle (plane units,
- * Stack-relative): `rect` (`s.layout.rects`' entry), `names` (its engine,
- * `engineOf`'s), `graph`, `edgeIns` / `edgeOuts` (`Map(address → y)`, the
- * Wiring layer's input and output ports of this instrument), `title`.
- * Returns `layLevel`'s with `{entry, rect, area, title}`.
+ * Instrument `entry`'s Engine laid out in its engine package (plane units,
+ * Stack-relative; the owner's decision of 2026-11-03): `rect`
+ * (`s.layout.rects`' entry), `pkg` (its package, ui/lib/plane-package.js
+ * `packageOf`'s: the same rectangle and signal pins as the Wiring and Control
+ * layers draw), `names` (its engine, `engineOf`'s), `graph`, `title`. The
+ * inside is `layLevel`'s in the package's body, its connections across the
+ * instrument's edge entering and leaving at the package's pins (a connection
+ * the package has no pin for, spread down its edge). Without a package, the
+ * instrument's rectangle is the frame. Returns `layLevel`'s with `{entry,
+ * rect, pkg, frame, area, title, card}`: `card` the package as the top-level
+ * chip (`chipPath`, `revealShare`): `{id: 'package ' + entry, package: true,
+ * composite: true, name, x, y, w, h, body, reveal}`.
  */
-export function engineLayout({ entry, rect, names = [], graph, edgeIns = new Map(), edgeOuts = new Map(), title = '' }) {
-  const area = { x: rect.x + INSET, y: rect.y + TITLE, w: Math.max(1, rect.w - 2 * INSET), h: Math.max(1, rect.h - TITLE - INSET) };
+export function engineLayout({ entry, rect, pkg = null, names = [], graph, title = '' }) {
+  const frame = pkg ? { x: pkg.x, y: pkg.y, w: pkg.w, h: pkg.h } : { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+  const area = pkg ? pkg.body : { x: rect.x + INSET, y: rect.y + TITLE, w: Math.max(1, rect.w - 2 * INSET), h: Math.max(1, rect.h - TITLE - INSET) };
+  const edgeIns = new Map((pkg?.ins ?? []).map((p) => [p.address, p.y]));
+  const edgeOuts = new Map((pkg?.outs ?? []).map((p) => [p.address, p.y]));
   const level = graph?.top ?? { instances: [], connections: [] };
-  const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, frame: rect }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0 } };
-  return { entry, rect, area, title, ...laid };
+  const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, frame }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0 } };
+  const card = { id: `package ${entry}`, package: true, composite: true, name: title, module: null, ...frame, body: area, reveal: packageReveal(area, laid.scale) };
+  return { entry, rect, pkg, frame, area, title, card, ...laid };
 }
 
 /** A composite's inside fades in as its card's body grows on screen: from the first width to the second (screen px). */
 export const REVEAL = Object.freeze([240, 480]);
+/**
+ * A package's inside fades in by the scale its cards are seen at (their
+ * units per screen px, from the first to the second), and never before its
+ * body is twice a composite's widths on screen: closed at the Stack's fit,
+ * the detail comes by zoom.
+ */
+export const PACKAGE_REVEAL = Object.freeze([0.5, 1]);
+
+/** A package's reveal widths (screen px of its `body`) for its inside laid out at `scale`. */
+export function packageReveal(body, scale) {
+  const natural = body.w / Math.max(1e-9, scale);
+  return [Math.max(2 * REVEAL[0], PACKAGE_REVEAL[0] * natural), Math.max(2 * REVEAL[1], PACKAGE_REVEAL[1] * natural)];
+}
 /** How deep `chipPath` looks (a guard: a graph never nests itself). */
 const CHIP_DEPTH = 16;
 /** A pin label's width by its name's length, in the cards' units (the 9 px label at the pin ± 6). */
 const LABEL_CHAR = 5.2;
 const LABEL_PAD = 8;
 
-/** How far a composite's inside is revealed when its card's body is `px` wide on screen: 0 to 1 over REVEAL, a smoothstep. */
-export function revealShare(px) {
-  const [a, b] = REVEAL;
+/** How far a composite's inside is revealed when its card's body is `px` wide on screen: 0 to 1 over `range` (REVEAL, a package's `reveal`), a smoothstep. */
+export function revealShare(px, range = REVEAL) {
+  const [a, b] = range;
   if (!(px > a)) return 0;
   if (px >= b) return 1;
   const t = (px - a) / (b - a);
@@ -510,20 +537,23 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
 }
 
 /**
- * The composites the view is inside (the bar's Layer N; derived from the
- * view, no state of its own): of `cards` (a level's, plane units) the
- * composite whose body holds plane point `p` and is at least `full` screen
- * px wide at scale `k` (fully revealed), then of its inside
+ * The chips the view is inside (the bar's Layer N; derived from the view,
+ * no state of its own): of `cards` (a level's, plane units; at the top the
+ * instruments' packages, `engineLayout`'s `card`) the chip whose body holds
+ * plane point `p` and is fully revealed at scale `k` (at least its
+ * `reveal[1]`, else `full`, screen px wide), then of its inside
  * (`insideFor(card, id)`: the laid inside, or null) the same, deeper.
- * `[{id, card, laid}]`, outermost first; `id` the cards' ids joined by `/`.
+ * `[{id, card, laid}]`, outermost first; `id` the cards' ids joined by `/`,
+ * a package's own leaving its inside's as they are (the instrument's
+ * instances are the project's top level).
  */
 export function chipPath(cards, p, k, insideFor, full = REVEAL[1]) {
   const path = [];
   let level = cards;
   while (level && path.length < CHIP_DEPTH) {
-    const card = level.find((c) => c.composite && c.body && c.body.w * k >= full && p.x >= c.body.x && p.x <= c.body.x + c.body.w && p.y >= c.body.y && p.y <= c.body.y + c.body.h);
+    const card = level.find((c) => c.composite && c.body && c.body.w * k >= (c.reveal?.[1] ?? full) && p.x >= c.body.x && p.x <= c.body.x + c.body.w && p.y >= c.body.y && p.y <= c.body.y + c.body.h);
     if (!card) break;
-    const id = path.length ? `${path.at(-1).id}/${card.id}` : card.id;
+    const id = path.length && !path.at(-1).card.package ? `${path.at(-1).id}/${card.id}` : card.id;
     const laid = insideFor(card, id);
     if (!laid) break;
     path.push({ id, card, laid });

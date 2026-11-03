@@ -1,10 +1,14 @@
 // The Wiring level of the Signal Project plane (ADR 0051 §1, §4, §7, §8;
 // phase 2): one Stack from behind, the back of the rack. Each instrument
 // keeps its rectangle (no rectangle moves between Stack and Wiring) and is
-// drawn as a box inset in it; its ports are **derived, never written**:
-// one per instrument port that a connection joins to another instrument
-// of the Stack or to the Stack's edge, inputs on the box's left edge,
-// outputs on its right, in connection order. Only the cables between
+// drawn as a faint box inset in it, its audio engine as one package in it
+// (ui/lib/plane-package.js: the same package, at the same place with the
+// same pins, as the Control and Engine layers draw); its ports are
+// **derived, never written**: one per instrument port that a connection
+// joins to another instrument of the Stack or to the Stack's edge, the
+// package's signal pins, inputs on its left edge, outputs on its right, in
+// connection order; a cable runs from a pin level across the box's edge
+// into the channels (the owner's decision of 2026-11-03). Only the cables between
 // instruments are drawn, of every kind (audio, control, events, vector),
 // and each cable to the Stack's edge continues the Setup level's edge pin
 // (`edgePins`, `pinPlaces`): the pins derive from the one connection, at
@@ -19,6 +23,7 @@
 import { PU } from './plate.js';
 import { RAIL_PU } from './plane-file.js';
 import { instanceOf, portOf } from './plane-instruments.js';
+import { pinOf } from './plane-package.js';
 
 /** A channel's track pitch, its inner pad, and its least and largest width (a share of the Stack's), in pu / plane units. */
 export const TRACK_PU = 1;
@@ -162,27 +167,37 @@ function portYs(rect, n) {
 /**
  * The Wiring level laid out (plane units, Stack-relative): `model`
  * (`wiringModel`'s), `layout` (`stackLayout`'s: `{w, rects}`), `pinYs`
- * (`Map(side + ' ' + address → y)` of the Stack's edge pins, `pinPlaces`').
- * Returns `{channel, boxes: [{entry, x, y, w, h}], ports: [{...port, x, y}],
- * cables: [{...cable, points: [{x, y}], junctions: [{x, y}]}], rails, bounds}`.
- * Each output leaves its box to the right into the right channel, its
- * net's track there, then along the rail next to its target (above it for
- * a target below, below it for one above) across to the left channel, its
- * target's track there, and into the input from the left.
+ * (`Map(side + ' ' + address → y)` of the Stack's edge pins, `pinPlaces`'),
+ * `packages` (`Map(entry → package)`, ui/lib/plane-package.js `packageOf`'s
+ * with these ports: the audio engine each instrument holds, the one the
+ * Control and Engine layers draw at the same place). Returns `{channel,
+ * boxes: [{entry, x, y, w, h}], ports: [{...port, x, y, edge}], cables:
+ * [{...cable, points: [{x, y}], junctions: [{x, y}]}], bounds}`. A port is
+ * its package's signal pin (`edge` where its cable crosses the box's edge,
+ * level with it); without a package, a place on the box's edge. Each output
+ * leaves its pin to the right, across the box's edge into the right
+ * channel, its net's track there, then along the rail next to its target
+ * (above it for a target below, below it for one above) across to the left
+ * channel, its target's track there, and into the input's pin from the left.
  */
-export function wiringLayout(model, layout, pinYs = new Map()) {
+export function wiringLayout(model, layout, pinYs = new Map(), packages = new Map()) {
   const w = layout.w;
   const rects = layout.rects;
   const rectOf = new Map(rects.map((r, i) => [r.entry, { ...r, i }]));
   const rail = RAIL_PU * PU;
-  // The ports' places first (they decide the channels' intervals); x is set once the channel's width is known.
+  // The ports' places first (they decide the channels' intervals): the package's pins, else the box's edge (x set once the channel's width is known).
   const placed = new Map();
   for (const r of rects) {
     const p = model.ports.get(r.entry) ?? { ins: [], outs: [] };
+    const pkg = packages.get(r.entry) ?? null;
     const yi = portYs(r, p.ins.length);
     const yo = portYs(r, p.outs.length);
-    p.ins.forEach((q, i) => placed.set(q.id, { ...q, y: yi[i] }));
-    p.outs.forEach((q, i) => placed.set(q.id, { ...q, y: yo[i] }));
+    const at = (q, side, y) => {
+      const pin = pinOf(pkg, side, q.address);
+      return pin ? { ...q, y: pin.y, pinX: pin.x } : { ...q, y };
+    };
+    p.ins.forEach((q, i) => placed.set(q.id, at(q, 'in', yi[i])));
+    p.outs.forEach((q, i) => placed.set(q.id, at(q, 'out', yo[i])));
   }
   const portAt = (side, address) => placed.get(`port ${side} ${address}`);
   // Each crossing cable's rail: next to its target, on the side its source is.
@@ -246,7 +261,10 @@ export function wiringLayout(model, layout, pinYs = new Map()) {
   const xRight = (t) => w - channel + CHANNEL_PAD_PU * PU + (t + 0.5) * pitch;
   const xLeft = (t) => channel - CHANNEL_PAD_PU * PU - (t + 0.5) * pitch;
   const boxes = rects.map((r) => ({ entry: r.entry, x: channel, y: r.y, w: w - 2 * channel, h: r.h }));
-  const ports = [...placed.values()].map((p) => ({ ...p, x: p.side === 'in' ? channel : w - channel }));
+  const ports = [...placed.values()].map(({ pinX, ...p }) => {
+    const edge = { x: p.side === 'in' ? channel : w - channel, y: p.y };
+    return { ...p, x: pinX ?? edge.x, edge };
+  });
   const portXY = new Map(ports.map((p) => [p.id, p]));
   // A cable whose instrument has no rectangle (not measured yet) is not drawn.
   const placedCable = (c) => (c.a.edge || placed.has(`port out ${c.a.address}`)) && (c.b.edge || placed.has(`port in ${c.b.address}`));

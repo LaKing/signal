@@ -18,6 +18,7 @@ import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { engineOf } from './plane-control.js';
 import { REVEAL, chipPath, engineLayout, insideOf, layLevel, orderedTracks, revealShare } from './plane-engine.js';
 import { PU } from './plate.js';
+import { packageOf } from './plane-package.js';
 
 const root = new URL('../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
@@ -37,14 +38,11 @@ function studio(graph = STUDIO) {
   const layout = stackLayout(stack, stack.instruments.map((entry) => ({ entry, w: stack.width * PU, h: heights[entry], x: null })));
   const model = wiringModel(stack, owner, stackOf, instances, connections, pins);
   const pinYs = new Map(pinPlaces(pins, layout.rects).map((p) => [`${p.side} ${p.address}`, p.y]));
-  const wiring = wiringLayout(model, layout, pinYs);
-  const engines = layout.rects.map((r) => {
-    const ports = wiring.ports.filter((p) => p.entry === r.entry);
-    const edgeIns = new Map(ports.filter((p) => p.side === 'in').map((p) => [p.address, p.y]));
-    const edgeOuts = new Map(ports.filter((p) => p.side === 'out').map((p) => [p.address, p.y]));
-    return engineLayout({ entry: r.entry, rect: r, names: engineOf(r.entry, owner), graph, edgeIns, edgeOuts, title: r.entry });
-  });
-  return { owner, layout, wiring, engines };
+  // Each instrument's engine package (no controls measured here: the free room is the whole rectangle), as every layer draws it.
+  const packages = new Map(layout.rects.map((r) => [r.entry, packageOf({ rect: r, engine: engineOf(r.entry, owner), ins: model.ports.get(r.entry).ins, outs: model.ports.get(r.entry).outs, title: r.entry })]));
+  const wiring = wiringLayout(model, layout, pinYs, packages);
+  const engines = layout.rects.map((r) => engineLayout({ entry: r.entry, rect: r, pkg: packages.get(r.entry), names: engineOf(r.entry, owner), graph, title: r.entry }));
+  return { owner, layout, wiring, engines, packages };
 }
 
 const within = (inner, outer) => inner.x >= outer.x - 1e-6 && inner.y >= outer.y - 1e-6 && inner.x + inner.w <= outer.x + outer.w + 1e-6 && inner.y + inner.h <= outer.y + outer.h + 1e-6;
@@ -99,6 +97,9 @@ test('the connections are routed: orthogonal, between their pins, never over a c
   const port = (side, address) => wiring.ports.find((p) => p.side === side && p.address === address).y;
   assert.equal(synth.edges.find((p) => p.side === 'in').y, port('in', '/melody.tick'), 'enters where the Wiring’s port is');
   assert.equal(synth.edges.find((p) => p.side === 'out').y, port('out', '/synth.out'), 'leaves where the Wiring’s port is');
+  // The Wiring's port is the package's pin: the inside's edge is there, x and y.
+  const at = (side, address) => wiring.ports.find((p) => p.side === side && p.address === address);
+  for (const e of synth.edges) assert.deepEqual([e.x, e.y], [at(e.side, e.address).x, at(e.side, e.address).y], `${e.id} at the package’s pin`);
   for (const e of engines) {
     const pinAt = new Map(e.pins.map((p) => [`${p.side} ${p.address}`, p]));
     for (const w of e.wires) {
