@@ -77,7 +77,7 @@ import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-contr
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
-import { CARD_RX, HEAD_H, engineLayout } from '../lib/plane-engine.js';
+import { CARD_RX, engineLayout } from '../lib/plane-engine.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
@@ -1745,8 +1745,9 @@ export class SignalPlane extends HTMLElement {
     const s = this.stacks.get(this.focused);
     if (!s?.layout || !this.graph || !this.model) return null;
     const wiring = this.wiringNow();
-    // What the Engine depends on: the structure, the Stack's layout, who holds what, and the Wiring's ports (where the edge is crossed).
-    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${wiring?.key ?? ''}\n${JSON.stringify([...this.model.owner])}`;
+    // What the Engine depends on: the Wiring's key (the structure, the Stack's layout, who holds what, where the edge is crossed) and the titles.
+    const titles = s.layout.rects.map((r) => instrumentTitle(r.entry, this.cards)).join('\n');
+    const key = `${wiring?.key ?? `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${JSON.stringify([...this.model.owner])}`}\n${titles}`;
     if (s.engines?.key === key) return s.engines;
     const t0 = performance.now();
     const ports = wiring?.layout.ports ?? [];

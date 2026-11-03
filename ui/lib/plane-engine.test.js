@@ -189,3 +189,28 @@ test('deterministic: the same graph and rectangles give the same layout; an inst
   const empty = engineLayout({ entry: 'x', rect: { x: 0, y: 0, w: 1280, h: 200 }, names: [], graph: STUDIO });
   assert.deepEqual([empty.cards, empty.wires, empty.pins], [[], [], []]);
 });
+
+test('odd graphs: a port inside an instance is not its own, two wires entering from one source keep apart, a malformed end leaves no edge pin', () => {
+  const inst = (name, ins, outs) => ({ name, module: 'std.x', ports: [...ins.map((p) => ({ name: p, address: `/${name}.${p}`, direction: 'in', shape: 'signal', kind: 'audio', rate: 1 })), ...outs.map((p) => ({ name: p, address: `/${name}.${p}`, direction: 'out', shape: 'signal', kind: 'audio', rate: 1 }))], parameters: [] });
+  const level = {
+    instances: [inst('a', ['in'], ['out']), inst('b', ['in'], ['out']), inst('c', ['in'], ['out']), inst('x', [], ['out'])],
+    connections: [
+      { from: '/a.out', to: '/b.in' },
+      { from: '/a/inner.out', to: '/b.in' },
+      { from: '/x.out', to: '/a.in' },
+      { from: '/x.out', to: '/c.in' },
+      { from: '/x.out', to: '/b.out' },
+      { from: '/b.out', to: '/b.in' },
+    ],
+  };
+  const laid = layLevel({ level, names: ['a', 'b', 'c'], area: { x: 0, y: 0, w: 800, h: 300 }, edgeIns: new Map([['/a.in', 40], ['/c.in', 200]]) });
+  assert.deepEqual(laid.wires.map((w) => `${w.from}>${w.to}`), ['/a.out>/b.in', '/x.out>/a.in', '/x.out>/c.in', '/b.out>/b.in'], 'the nested address and the malformed end are not drawn');
+  assert.deepEqual(laid.edges.map((e) => e.id), ['edge in /a.in', 'edge in /c.in'], 'no orphan edge pin');
+  const [ea, ec] = laid.wires.filter((w) => w.edge === 'in');
+  // Each entering wire its own net: on one track only where their spans are apart, never joined into one.
+  const span = (w) => [Math.min(...w.points.slice(1, -1).map((p) => p.y)), Math.max(...w.points.slice(1, -1).map((p) => p.y))];
+  const [sa, sc] = [span(ea), span(ec)];
+  assert.ok(ea.points[1].x !== ec.points[1].x || sa[1] < sc[0] || sc[1] < sa[0], 'never joined on one vertical');
+  assert.deepEqual([ea.junctions, ec.junctions], [[], []]);
+  for (const w of laid.wires) for (const p of w.points) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
+});

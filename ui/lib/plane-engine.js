@@ -46,9 +46,9 @@ export const INSET = PU;
 export const TITLE = 3 * PU;
 
 /** Where an address's instance ends: `/a.b` → `a`, `a.b` → `a`. */
-function nodeOf(address) {
-  return instanceOf(address);
-}
+const nodeOf = instanceOf;
+/** An instance's own port (`/a.b`, `a.b`), never one inside it (`/a/inner.b`). */
+const OWN_PORT = /^\/?[^/.]+\.[^/.]+$/;
 
 /**
  * One level laid out in `area` (plane units): `level` (`{instances,
@@ -71,19 +71,34 @@ function nodeOf(address) {
  *   - an edge pin `{id, side, address, x, y}`, where a wire crosses the
  *     frame.
  */
-export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), frame = area }) {
+export function layLevel(args) {
+  // Laid out with room for every lane a wire might need, then again with the lanes the wires took (when they still fit).
+  const first = layPass(args, null);
+  if (first.reserved.over === first.lanes.over && first.reserved.feedback === first.lanes.feedback) return strip(first);
+  const second = layPass(args, first.lanes);
+  return strip(second.lanes.over <= first.lanes.over && second.lanes.feedback <= first.lanes.feedback ? second : first);
+}
+
+function strip({ reserved, ...laid }) {
+  return laid;
+}
+
+/** One pass of `layLevel`: `reserve` the lanes kept above and below the cards (`{over, feedback}`), or null for as many as might be needed. */
+function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), frame = area }, reserve) {
   const all = level?.instances ?? [];
   const wanted = names ? new Set(names) : null;
   const instances = all.filter((i) => !wanted || wanted.has(i.name));
   const inside = new Set(instances.map((i) => i.name));
   const byName = new Map(instances.map((i) => [i.name, i]));
   const connections = (level?.connections ?? []).map((c, index) => ({ ...c, index }));
-  const portAt = (address) => {
+  // A port of a drawn instance on the side a connection's end needs (`out` for its source, `in` for its target).
+  const portAt = (address, direction) => {
+    if (!OWN_PORT.test(String(address ?? ''))) return null;
     const inst = byName.get(nodeOf(address));
     const name = portOf(address);
-    const port = inst?.ports?.find((p) => p.name === name);
+    const port = inst?.ports?.find((p) => p.name === name && p.direction === direction);
     if (port) return { port, parameter: false };
-    const param = inst?.parameters?.find((p) => p.name === name);
+    const param = direction === 'in' ? inst?.parameters?.find((p) => p.name === name) : null;
     return param ? { port: { ...param, direction: 'in', shape: 'signal' }, parameter: true } : null;
   };
   // The connections drawn: between two drawn instances, or crossing the edge (one per inner end: the Wiring's port).
@@ -91,8 +106,8 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
   const entering = new Map();
   const leaving = new Map();
   for (const c of connections) {
-    const a = inside.has(nodeOf(c.from)) && portAt(c.from);
-    const b = inside.has(nodeOf(c.to)) && portAt(c.to);
+    const a = inside.has(nodeOf(c.from)) && portAt(c.from, 'out');
+    const b = inside.has(nodeOf(c.to)) && portAt(c.to, 'in');
     if (a && b) internal.push(c);
     else if (b && !inside.has(nodeOf(c.from)) && !entering.has(c.to)) entering.set(c.to, c);
     else if (a && !inside.has(nodeOf(c.to)) && !leaving.has(c.from)) leaving.set(c.from, c);
@@ -100,7 +115,7 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
   // A parameter has a pin only where a signal connection drives it.
   const driven = new Map();
   for (const c of [...internal, ...entering.values()]) {
-    const at = portAt(c.to);
+    const at = portAt(c.to, 'in');
     if (!at?.parameter) continue;
     const name = nodeOf(c.to);
     if (!driven.has(name)) driven.set(name, []);
@@ -144,7 +159,8 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
   let overs = 0;
   let backs = 0;
   for (const w of wires) {
-    w.srcKey = `s ${w.c.from}`;
+    // Wires entering from one outside source keep apart: each its own edge pin, its own net.
+    w.srcKey = w.edge === 'in' ? `e ${w.c.to}` : `s ${w.c.from}`;
     w.dstKey = `d ${w.c.to}`;
     if (w.b === w.a + 1) net(w.a, w.srcKey);
     else {
@@ -162,12 +178,13 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
   const channelsW = Array.from({ length: n + 1 }, (_, k) => chW(k - 1));
   const naturalW = colW.reduce((s, x) => s + x, 0) + channelsW.reduce((s, x) => s + x, 0);
   const bandH = Math.max(HEADER, ...colH);
-  const naturalH = bandH + (overs + backs) * LANE + (overs ? LANE : 0) + (backs ? LANE : 0);
+  const reserved = reserve ?? { over: overs, feedback: backs };
+  const naturalH = bandH + (reserved.over + reserved.feedback) * LANE + (reserved.over ? LANE : 0) + (reserved.feedback ? LANE : 0);
   const scale = n ? Math.min(MAX_SCALE, area.w / Math.max(1, naturalW), area.h / Math.max(1, naturalH)) : 1;
   // The width left over spreads the columns: each channel takes a share.
   const spare = Math.max(0, area.w - naturalW * scale) / (n + 1);
   // From the top of the area (under the title, beside where the Wiring's ports enter), the lanes above first.
-  const top = area.y + (overs ? (overs + 1) * LANE * scale : 0);
+  const top = area.y + (reserved.over ? (reserved.over + 1) * LANE * scale : 0);
   const cardsTop = top;
   const cardsBottom = top + bandH * scale;
   const chX = new Map();
@@ -287,14 +304,23 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
     }
   }
   const gap = TRACK * scale;
-  for (const [w, t] of assignTracks(overIv, gap)) w.yh = cardsTop - (t + 1) * LANE * scale;
-  for (const [w, t] of assignTracks(backIv, gap)) w.yh = cardsBottom + (t + 1) * LANE * scale;
+  const lanes = { over: 0, feedback: 0 };
+  for (const [w, t] of assignTracks(overIv, gap)) {
+    w.yh = cardsTop - (t + 1) * LANE * scale;
+    lanes.over = Math.max(lanes.over, t + 1);
+  }
+  for (const [w, t] of assignTracks(backIv, gap)) {
+    w.yh = cardsBottom + (t + 1) * LANE * scale;
+    lanes.feedback = Math.max(lanes.feedback, t + 1);
+  }
   // The channels' tracks: one per net, over the heights it spans there; the lowest-starting nearest its column (as the Wiring's).
   const spans = new Map();
   // `y0` where the net comes into the channel from the left, `y1` where it leaves to the right.
   const span = (ch, key, y0, y1) => {
     if (!spans.has(ch)) spans.set(ch, new Map());
     const m = spans.get(ch);
+    // A wire straight across the channel (along a row) takes no track of its own.
+    if (Math.abs(y0 - y1) < 1e-9 && !m.has(key)) return;
     const iv = m.get(key) ?? { key, lo: Math.min(y0, y1), hi: Math.max(y0, y1), yl: y0, yr: y1 };
     iv.lo = Math.min(iv.lo, y0, y1);
     iv.hi = Math.max(iv.hi, y0, y1);
@@ -317,11 +343,11 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
     for (const [key, t] of tracks) trackX.set(`${ch} ${key}`, centre + (t - (count - 1) / 2) * pitch);
   }
   const out = drawn.map((w) => {
-    const xa = trackX.get(`${w.a} ${w.srcKey}`);
+    const xa = trackX.get(`${w.a} ${w.srcKey}`) ?? mid(w.a);
     let points;
     if (w.b === w.a + 1) points = [w.P, { x: xa, y: w.P.y }, { x: xa, y: w.Q.y }, w.Q];
     else {
-      const xb = trackX.get(`${w.b - 1} ${w.dstKey}`);
+      const xb = trackX.get(`${w.b - 1} ${w.dstKey}`) ?? mid(w.b - 1);
       points = [w.P, { x: xa, y: w.P.y }, { x: xa, y: w.yh }, { x: xb, y: w.yh }, { x: xb, y: w.Q.y }, w.Q];
     }
     return {
@@ -353,7 +379,7 @@ export function layLevel({ level, names = null, area, edgeIns = new Map(), edgeO
     delete w.srcKey;
     delete w.track;
   }
-  return { scale, cards, pins, wires: out, edges, lanes: { over: overIv.length, feedback: backIv.length } };
+  return { scale, cards, pins, wires: out, edges, lanes, reserved };
 }
 
 /**
@@ -393,8 +419,8 @@ function addressOf(address, byName) {
 
 /** A connection's kind as the Wiring names it: the source's (`events`, `vector`), `control` into a parameter or from a port that is no audio, else `audio`. */
 function kindOf(c, portAt) {
-  const from = portAt(c.from);
-  const to = portAt(c.to);
+  const from = portAt(c.from, 'out');
+  const to = portAt(c.to, 'in');
   const kind = portKind(from?.port ?? to?.port);
   if (kind === 'audio' && to?.parameter) return 'control';
   return kind;
