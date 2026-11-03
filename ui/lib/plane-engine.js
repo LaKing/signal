@@ -450,7 +450,7 @@ export function engineLayout({ entry, rect, names = [], graph, edgeIns = new Map
 /** A composite's inside fades in as its card's body grows on screen: from the first width to the second (screen px). */
 export const REVEAL = Object.freeze([240, 480]);
 /** How deep `chipPath` looks (a guard: a graph never nests itself). */
-export const MAX_DEPTH = 16;
+const CHIP_DEPTH = 16;
 /** A pin label's width by its name's length, in the cards' units (the 9 px label at the pin ± 6). */
 const LABEL_CHAR = 5.2;
 const LABEL_PAD = 8;
@@ -520,7 +520,7 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
 export function chipPath(cards, p, k, insideFor, full = REVEAL[1]) {
   const path = [];
   let level = cards;
-  while (level && path.length < MAX_DEPTH) {
+  while (level && path.length < CHIP_DEPTH) {
     const card = level.find((c) => c.composite && c.body && c.body.w * k >= full && p.x >= c.body.x && p.x <= c.body.x + c.body.w && p.y >= c.body.y && p.y <= c.body.y + c.body.h);
     if (!card) break;
     const id = path.length ? `${path.at(-1).id}/${card.id}` : card.id;

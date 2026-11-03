@@ -139,7 +139,9 @@ const LAYER_NAME = Object.fromEntries(LAYERS);
 const BAR_LAYERS = LAYERS.filter(([id]) => id !== 'setup');
 /** The chosen layer's zoom limit out, relative to the focused Stack's fit. */
 const MIN_SCALE = 0.02;
-/** The zoom's limit in, relative to the focused Stack's fit: deep enough for chips inside chips at the Engine layer, still bounded. */
+/** The chosen layer's zoom limit in, relative to the focused Stack's fit, but at the Engine. */
+const MAX_LAYER_SCALE = 64;
+/** The Engine's zoom limit in, relative to the focused Stack's fit: deep enough for chips inside chips, still bounded. */
 const DEEP_SCALE = 4096;
 /** At most this many chips' insides kept built while off the stage (detached, out of the document); more are dropped and built again when needed. */
 const INSIDES_KEPT = 48;
@@ -302,8 +304,10 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-edge { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .e-edge.in { fill: var(--signal-meter-rms, #3ecf8e); }
 .e-plain { fill: #1d232c; pointer-events: none; }
-.e-pin-label.halo { stroke: #161a20; stroke-linejoin: round; paint-order: stroke; }
+.e-pin-label.halo { stroke: #1d232c; stroke-linejoin: round; paint-order: stroke; }
 .e-inside .e-card { fill: #1b2028; }
+.e-inside .e-wire, .e-inside .e-card, .e-inside .e-pin { vector-effect: none; }
+.e-inside[data-faint] .e-card, .e-inside[data-faint] .e-pin, .e-inside[data-faint] .e-wire { pointer-events: none; }
 .rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .chooser { position: absolute; z-index: 5; width: min(640px, calc(100% - 16px)); overflow: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 4px; border-radius: 6px; background: var(--signal-panel, #1f232b); border: 1px solid #3a414d; box-shadow: 0 6px 20px #0008; }
 .chooser-title { grid-column: 1 / -1; padding: 2px 6px 4px; color: var(--signal-muted, #8a93a3); }
@@ -1816,7 +1820,7 @@ export class SignalPlane extends HTMLElement {
    * title. `parent`: the chip it is the inside of (null at the instrument's own level); `add(id, element, item)`: the culling's
    * registration (the instrument's level only). Each composite card is registered as a chip (`s.engineChips`): its plain body
    * shows until its inside, laid out and drawn when first revealed (`renderInsides`), fades in over it. Inside a chip the lines
-   * are drawn at the level's scale (the plane's transform is the stage's CSS one, which `non-scaling-stroke` does not undo).
+   * are drawn at the level's scale (no `non-scaling-stroke` there: the same width in every engine, whatever it makes of the stage's CSS transform).
    */
   drawLevel(s, g, laid, { entry, parent, add = null }) {
     const k = laid.scale;
@@ -1925,6 +1929,9 @@ export class SignalPlane extends HTMLElement {
       // Under the card's own pins and labels (drawn after the cards), over its body.
       if (chip.group.parentNode !== chip.element) chip.element.append(chip.group);
       opacity(chip.group, share);
+      // A faint inside takes no pointer: the chip's card under it keeps its hover title and its menu.
+      const faint = share < 0.5;
+      if (chip.group.hasAttribute('data-faint') !== faint) chip.group.toggleAttribute('data-faint', faint);
       for (const child of chip.children) visit(child);
     };
     for (const chip of s.engineTopChips) visit(chip);
@@ -1965,9 +1972,30 @@ export class SignalPlane extends HTMLElement {
   /** The view travels to show a chip (`part`: its `body`, the Layer N buttons; else the whole card, Show Chip). */
   showChip(chip, part = null) {
     const rect = this.focusRect();
-    if (!chip || !rect) return;
+    const fit = this.fitK();
+    if (!chip || !rect || !fit) return;
     const r = part === 'body' ? chip.card.body : chip.card;
-    this.travel(fitAll({ x: rect.x + r.x, y: rect.y + r.y, w: r.w, h: r.h }, this.viewport), this.layer ? 0 : LIFT);
+    const target = { x: rect.x + r.x, y: rect.y + r.y, w: r.w, h: r.h };
+    let k = fitAll(target, this.viewport).k;
+    if (!this.layer) {
+      // The coupled zoom: the chip's instrument is the opened one, and the view stays at the Engine (never above its band's end).
+      if (this.opened !== chip.entry) {
+        this.opened = chip.entry;
+        this.barKey = null;
+      }
+      k = Math.max(k, fit * splitDepth(this.engineBandNow()[1]).r);
+    }
+    this.travel(this.viewAround(target, Math.min(k, fit * DEEP_SCALE)), this.layer ? 0 : LIFT);
+  }
+
+  /** The view at scale `k` with plane rectangle `r`'s centre at the stage's centre. */
+  viewAround(r, k) {
+    return { k, x: this.viewport.w / 2 - (r.x + r.w / 2) * k, y: this.viewport.h / 2 - (r.y + r.h / 2) * k };
+  }
+
+  /** A chip by its id now (the bar's buttons look it up when clicked: a layout since may have replaced the chip). */
+  chipById(id) {
+    return this.stacks.get(this.focused)?.engineChips?.get(id) ?? null;
   }
 
   /** Docks the level bar (the breadcrumb, the zoom, Edit layout) in `host`, such as the app's toolbar, with its styles. */
@@ -1994,7 +2022,10 @@ export class SignalPlane extends HTMLElement {
         b.setAttribute('aria-current', String(here));
         b.disabled = id !== 'stack' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
         // Inside a chip, Engine travels back out to the instrument whole.
-        if (deeper) b.addEventListener('click', () => this.outOfChips(chips[0]));
+        if (deeper) {
+          const outer = chips[0].id;
+          b.addEventListener('click', () => this.outOfChips(this.chipById(outer)));
+        }
         else if (!here) b.addEventListener('click', () => this.goTo(id === 'stack' && !this.focused ? 'setup' : id));
         layers.append(b);
       }
@@ -2003,7 +2034,8 @@ export class SignalPlane extends HTMLElement {
         const deepest = i === chips.length - 1;
         const b = html('button', { type: 'button', className: 'layer', textContent: `Layer ${i + 1}`, title: `Layer ${i + 1}: inside ${chip.card.name} (${chip.address})` });
         b.setAttribute('aria-current', String(deepest));
-        b.addEventListener('click', () => this.showChip(chip, 'body'));
+        const id = chip.id;
+        b.addEventListener('click', () => this.showChip(this.chipById(id), 'body'));
         layers.append(b);
       });
       this.levelText = html('span', { className: 'level' });
@@ -2040,9 +2072,15 @@ export class SignalPlane extends HTMLElement {
   outOfChips(chip) {
     if (!chip) return;
     if (this.layer) return this.fitOnScreen(this.focused, chip.entry);
+    // The coupled zoom: at the engine band's end, the instrument's centre at the stage's (computed outright: deep inside a
+    // chip the instrument's centre is far off the stage, and a zoom about it would keep it there).
+    const r = this.instrumentRects().find((x) => x.entry === chip.entry);
+    const fit = this.fitK();
+    if (!r || !fit) return;
     this.opened = chip.entry;
     this.barKey = null;
-    this.enterEngine();
+    const to = this.viewAround(r, fit * splitDepth(this.engineBandNow()[1]).r);
+    this.travel({ ...to, ...clampTop(to, this.focusRect(), this.viewport) }, LIFT);
   }
 
   /** A layer button's title: what it shows. */
@@ -2437,8 +2475,8 @@ export class SignalPlane extends HTMLElement {
     const s = this.stacks.get(name);
     const entry = [...(s?.cards ?? [])].find(([, element]) => path.includes(element))?.[0] ?? null;
     const shows = [];
-    // At the Engine, on a chip's card (the innermost card under the click): Show Chip first.
-    const node = level === 'engine' && name === this.focused ? path.find((n) => n?.classList?.contains?.('e-node')) : null;
+    // At the Engine, on a chip's card or anything inside it (the innermost chip under the click): Show Chip first.
+    const node = level === 'engine' && name === this.focused ? path.find((n) => n?.classList?.contains?.('e-node') && n.dataset?.chip) : null;
     const chip = node?.dataset?.chip ? s?.engineChips?.get(node.dataset.chip) : null;
     if (chip) shows.push({ id: 'show-chip', label: 'Show Chip' }, { id: 'separator' });
     if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
@@ -2922,7 +2960,8 @@ export class SignalPlane extends HTMLElement {
     if (this.layer) {
       // The layer is chosen alone: the zoom only scales, about `at` (no focus, no instrument opens, no fit stop).
       const fit = this.fitK() ?? fitScale(this.layout?.bounds ?? { w: 1, h: 1 }, this.viewport);
-      const k = Math.min(fit * DEEP_SCALE, Math.max(fit * MIN_SCALE, this.view.k * factor));
+      // Only the Engine goes deep (into the chips); the other layers keep the earlier limit.
+      const k = Math.min(fit * (this.layer === 'engine' ? DEEP_SCALE : MAX_LAYER_SCALE), Math.max(fit * MIN_SCALE, this.view.k * factor));
       this.lift = 0;
       this.setView(zoomAbout(this.view, k / this.view.k, at));
       return;

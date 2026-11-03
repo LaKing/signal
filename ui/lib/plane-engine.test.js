@@ -51,8 +51,7 @@ const within = (inner, outer) => inner.x >= outer.x - 1e-6 && inner.y >= outer.y
 const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
 /** Whether the axis-aligned segment p–q passes through the inside of `r` (its edges excluded). */
-function crosses(p, q, r) {
-  const e = 0.5;
+function crosses(p, q, r, e = 0.5) {
   if (Math.abs(p.y - q.y) < 1e-9) {
     const [x0, x1] = [Math.min(p.x, q.x), Math.max(p.x, q.x)];
     return p.y > r.y + e && p.y < r.y + r.h - e && x1 > r.x + e && x0 < r.x + r.w - e;
@@ -239,7 +238,7 @@ test('a chip’s inside: every inner instance inside the card’s body, apart; t
     for (const w of inside.wires) for (let i = 1; i < w.points.length; i++) {
       const [p, q] = [w.points[i - 1], w.points[i]];
       assert.ok(within({ x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(p.x - q.x), h: Math.abs(p.y - q.y) }, card), `${card.name}: ${w.id} inside the card`);
-      for (const c of inside.cards) assert.ok(!crosses(p, q, c), `${card.name}: ${w.from} → ${w.to} passes over ${c.name}`);
+      for (const c of inside.cards) assert.ok(!crosses(p, q, c, 0.5 * inside.scale), `${card.name}: ${w.from} → ${w.to} passes over ${c.name}`);
     }
   }
   assert.equal(chips, 9, 'the synth, the seven drum voices and the echo');
@@ -315,6 +314,7 @@ test('recursive: a chip inside a chip reveals in its own card’s body, its edge
     const pinY = (side) => outer.pins.find((p) => p.card === inner.id && p.side === side).y;
     assert.deepEqual(deep.edges.map((x) => [x.side, x.address, x.y]), [['in', 'lp.in', pinY('in')], ['in', 'hp.in', pinY('in')], ['out', 'mix.out', pinY('out')]]);
     for (const w of deep.wires) for (const p of w.points) assert.ok(within({ x: p.x, y: p.y, w: 0, h: 0 }, inner), `${w.id} inside the inner card (${inner.h.toFixed(2)} tall)`);
+    for (const w of deep.wires) for (let i = 1; i < w.points.length; i++) for (const c of deep.cards) assert.ok(!crosses(w.points[i - 1], w.points[i], c, 0.5 * deep.scale), `${w.from} → ${w.to} passes over ${c.name}`);
     assert.deepEqual(insideOf({ graph: structuredClone(graph), card: inner, pins: outer.pins, scale: outer.scale }), deep, 'the same inside every time');
   }
 });
