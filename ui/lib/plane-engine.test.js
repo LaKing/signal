@@ -93,8 +93,8 @@ test('the connections are routed: orthogonal, between their pins, never over a c
   const synth = engines.find((e) => e.entry === 'card:mono-synth');
   assert.deepEqual(synth.wires.map((w) => `${w.from} → ${w.to} ${w.kind} ${w.route}`), [
     '/transport.tick → /melody.tick events edge',
-    '/melody.hz → /synth.hz control adjacent',
-    '/melody.gate → /synth.gate control adjacent',
+    '/melody.hz → /synth.hz frequency adjacent',
+    '/melody.gate → /synth.gate gate adjacent',
     '/melody.velocity → /synth.velocity control adjacent',
     '/synth.out → /echo.in audio edge',
   ]);
@@ -421,25 +421,41 @@ test('the control signal’s lanes: nested so that legs need not cross, as few a
   assert.deepEqual(bindLanes([{ c: 0, p: 100 }, { c: 100, p: 0 }]), [0, 1]);
 });
 
-test('inside a composite a parameter goes on from its pin on the card’s left: a tag at each target, its whole way kept for a selection; the chip’s pins named inside', () => {
-  const graph = { composites: { voice: { instances: [lagOf('f', ['cut', 'q']), lagOf('g', ['cut', 'q'])], connections: [{ from: 'f.out', to: 'g.in' }], parameters: [{ name: 'cutoff', to: ['f.cut', 'g.cut'] }, { name: 'reso', to: ['g.q'] }], inputs: [{ name: 'in', to: ['f.in'] }], outputs: [{ name: 'out', from: 'g.out' }] } } };
+test('inside a composite a parameter goes on from its pin on the card’s left, wired as the Wiring wires: its own track, never along another’s; the chip’s pins named inside', () => {
+  const graph = { composites: { voice: { instances: [lagOf('f', ['cut', 'q']), lagOf('g', ['cut', 'q'])], connections: [{ from: 'f.out', to: 'g.in' }], parameters: [{ name: 'cutoff', to: ['f.cut', 'g.cut'] }, { name: 'reso', to: ['g.q'] }, { name: 'drive', to: ['f.q'] }], inputs: [{ name: 'in', to: ['f.in'] }], outputs: [{ name: 'out', from: 'g.out' }] } } };
   const card = { id: 'v', name: 'v', module: 'voice', x: 0, y: 0, w: 400, h: 300, body: { x: 10, y: 40, w: 380, h: 250 } };
   const pin = (side, name, y, parameter = false) => ({ card: 'v', side, name, address: `/v.${name}`, parameter, x: side === 'in' ? 0 : 400, y });
-  const laid = insideOf({ graph, card, pins: [pin('in', 'in', 60), pin('in', 'cutoff', 80, true), pin('in', 'reso', 100, true), pin('out', 'out', 60)] });
-  assert.deepEqual(laid.binds.map((b) => [b.address, b.export]).sort(), [['f.cut', 'cutoff'], ['g.cut', 'cutoff'], ['g.q', 'reso']]);
+  const ys = { cutoff: 80, reso: 100, drive: 120 };
+  const laid = insideOf({ graph, card, pins: [pin('in', 'in', 60), ...Object.entries(ys).map(([name, y]) => pin('in', name, y, true)), pin('out', 'out', 60)] });
+  assert.deepEqual(laid.binds.map((b) => [b.address, b.export]).sort(), [['f.cut', 'cutoff'], ['f.q', 'drive'], ['g.cut', 'cutoff'], ['g.q', 'reso']]);
   assert.ok(laid.wires.some((w) => w.from === '@inputs.in'), 'an input wired from its pin');
   assert.ok(!laid.wires.some((w) => String(w.from).startsWith('@inputs.cutoff')), 'a parameter is no wire');
-  const cardsTop = Math.min(...laid.cards.map((c) => c.y));
+  const segments = (pts) => pts.slice(1).map((q, i) => [pts[i], q]);
   for (const b of laid.binds) {
     const target = laid.pins.find((p) => p.side === 'in' && p.address === b.address);
     assert.ok(target.parameter && target.bind && target.connected);
-    assert.deepEqual(b.points.at(-1), { x: target.x, y: target.y }, 'the stub into its pin');
-    assert.ok(b.tag.x < b.points[0].x && b.tag.text === b.export, 'the tag left of the stub, the parameter’s name');
-    assert.deepEqual(b.route[0], { x: 0, y: b.export === 'cutoff' ? 80 : 100 }, 'its way from the chip’s pin');
-    assert.ok(b.route.some((q) => q.y < cardsTop), 'along a lane above the cards');
-    assert.deepEqual(b.route.at(-1), { x: target.x, y: target.y });
+    assert.deepEqual(b.points[0], { x: 0, y: ys[b.export] }, 'from the chip’s pin');
+    assert.deepEqual(b.points.at(-1), { x: target.x, y: target.y }, 'into its pin');
+    for (const [a, q] of segments(b.points)) assert.ok(a.x === q.x || a.y === q.y, 'orthogonal');
+    for (const c of laid.cards) for (const [a, q] of segments(b.points).slice(0, -1)) {
+      const crosses = Math.max(a.x, q.x) > c.x + 1e-6 && Math.min(a.x, q.x) < c.x + c.w - 1e-6 && Math.max(a.y, q.y) > c.y + 1e-6 && Math.min(a.y, q.y) < c.y + c.h - 1e-6;
+      assert.ok(!crosses, `${b.export} → ${b.address} never over card ${c.name}`);
+    }
   }
-  assert.deepEqual(laid.names.map((n) => [n.side, n.text, n.x, n.y]), [['in', 'in', 0, 60], ['in', 'cutoff', 0, 80], ['in', 'reso', 0, 100], ['out', 'out', 400, 60]]);
+  // Legs of two pins never run along one another.
+  const along = ([a, b], [c, d]) => {
+    if (a.x === b.x && c.x === d.x && a.x === c.x) return Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y)) - Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y)) > 1e-6;
+    if (a.y === b.y && c.y === d.y && a.y === c.y) return Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x)) - Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x)) > 1e-6;
+    return false;
+  };
+  for (const b of laid.binds) for (const o of laid.binds) {
+    if (o.export === b.export) continue;
+    for (const s1 of segments(b.points)) for (const s2 of segments(o.points)) assert.ok(!along(s1, s2), `${b.export} and ${o.export} apart`);
+  }
+  // The pin on to two targets: one net, a dot where a branch turns off.
+  assert.equal(laid.binds.filter((b) => b.export === 'cutoff').flatMap((b) => b.junctions).length, 1);
+  assert.equal(laid.binds.filter((b) => b.export !== 'cutoff').flatMap((b) => b.junctions).length, 0);
+  assert.deepEqual(laid.names.map((n) => [n.side, n.text, n.x, n.y]), [['in', 'in', 0, 60], ['in', 'cutoff', 0, 80], ['in', 'reso', 0, 100], ['in', 'drive', 0, 120], ['out', 'out', 400, 60]]);
 });
 
 test('an address located at the Engine: its card, laid inside its chips as they are drawn', () => {

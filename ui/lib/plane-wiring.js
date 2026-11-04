@@ -42,17 +42,26 @@ export const WIRING_TEXT = Object.freeze({
   title: Object.freeze({ base: 16, min: 12, cap: 30 }),
   port: Object.freeze({ base: 12, min: 10, cap: 20 }),
 });
-/** The kinds of cable, in the order a legend lists them. */
-export const CABLE_KINDS = Object.freeze(['audio', 'control', 'events', 'vector']);
+/**
+ * The kinds of cable, in the order a legend lists them: the colour standard
+ * (the owner's decision of 2026-11-04), one colour per group of port kinds.
+ */
+export const CABLE_KINDS = Object.freeze(['audio', 'control', 'gate', 'frequency', 'events', 'vector', 'generic']);
 
-/** The kind of a port as `graph` gives it, from its shape and kind: `events`, `vector`, `control` or `audio`. */
+/** Each port kind's cable kind: gain and phase are continuous controls, a trigger a gate's moment. */
+const KIND_GROUP = Object.freeze({ audio: 'audio', control: 'control', gain: 'control', phase: 'control', gate: 'gate', trigger: 'gate', frequency: 'frequency', generic: 'generic' });
+
+/**
+ * The kind of a port as `graph` gives it, from its shape and kind: `events`, `vector`, or its kind's group
+ * (`KIND_GROUP`); a port with no kind is `audio` at the frame rate, else `control`.
+ */
 export function portKind(port) {
   const shape = port?.shape;
   if (shape === 'events') return 'events';
   if (shape && typeof shape === 'object' && 'vector' in shape) return 'vector';
   if (shape === 'vector') return 'vector';
-  // A signal at the frame rate whose kind says nothing else (`generic`) carries audio; control, gate and the rest are control.
-  return (port?.kind === 'audio' || port?.kind === 'generic' || port?.kind == null) && (port?.rate ?? 1) === 1 ? 'audio' : 'control';
+  if (port?.kind != null) return KIND_GROUP[port.kind] ?? 'generic';
+  return (port?.rate ?? 1) === 1 ? 'audio' : 'control';
 }
 
 /** Every top-level port and parameter of `instances` by address: `Map(address → {port, parameter})`. */
@@ -66,15 +75,20 @@ export function portIndex(instances = []) {
 }
 
 /**
- * A cable's kind: the source's (`events`, `vector`), else `control` for a
- * signal into a parameter or from a port that is no audio, else `audio`.
+ * A connection's kind from its ends' ports (`from`, `to`; `parameter` whether `to` is a parameter): the source's
+ * (`portKind`), a `generic` source taking its target's; `control` for audio or `generic` into a parameter.
  */
-export function cableKind(connection, index) {
-  const from = index.get(connection.from)?.port ?? null;
-  const to = index.get(connection.to) ?? null;
-  const kind = portKind(from ?? to?.port);
-  if (kind === 'audio' && to?.parameter) return 'control';
+export function connectionKind(from, to, parameter = false) {
+  let kind = portKind(from ?? to);
+  if (kind === 'generic' && from && to && !parameter) kind = portKind(to);
+  if (parameter && (kind === 'audio' || kind === 'generic')) return 'control';
   return kind;
+}
+
+/** A cable's kind (`connectionKind`'s) from `portIndex`'s `index`. */
+export function cableKind(connection, index) {
+  const to = index.get(connection.to) ?? null;
+  return connectionKind(index.get(connection.from)?.port ?? null, to?.port ?? null, !!to?.parameter);
 }
 
 /**

@@ -87,6 +87,25 @@ test('a cable’s kind: events, vector, control (into a parameter, or a signal t
   assert.equal(cableKind({ from: '/seq.v', to: '/osc.in' }, index), 'vector');
 });
 
+test('the colour standard: each port kind in its group, a generic source taking its target’s kind', () => {
+  const port = (address, direction, kind) => ({ address, direction, shape: 'signal', kind });
+  const instances = [
+    { name: 'seq', ports: [port('/seq.gate', 'out', 'gate'), port('/seq.hit', 'out', 'trigger'), port('/seq.hz', 'out', 'frequency'), port('/seq.amp', 'out', 'gain')], parameters: [] },
+    { name: 'math', ports: [port('/math.a', 'in', 'generic'), port('/math.out', 'out', 'generic')], parameters: [{ address: '/math.k' }] },
+    { name: 'osc', ports: [port('/osc.freq', 'in', 'frequency'), port('/osc.ph', 'in', 'phase')], parameters: [] },
+  ];
+  const index = portIndex(instances);
+  assert.equal(cableKind({ from: '/seq.gate', to: '/math.a' }, index), 'gate');
+  assert.equal(cableKind({ from: '/seq.hit', to: '/math.a' }, index), 'gate');
+  assert.equal(cableKind({ from: '/seq.hz', to: '/math.a' }, index), 'frequency');
+  assert.equal(cableKind({ from: '/seq.amp', to: '/math.a' }, index), 'control');
+  assert.equal(cableKind({ from: '/math.out', to: '/osc.freq' }, index), 'frequency');
+  assert.equal(cableKind({ from: '/math.out', to: '/osc.ph' }, index), 'control');
+  assert.equal(cableKind({ from: '/math.out', to: '/math.a' }, index), 'generic');
+  assert.equal(cableKind({ from: '/math.out', to: '/math.k' }, index), 'control');
+  assert.equal(cableKind({ from: '/seq.gate', to: '/math.k' }, index), 'gate');
+});
+
 test('the layout: ports on the box edges, cables in the channels and rails, never over a box; the edge cable meets the Setup’s pin', () => {
   const s = studio();
   const layout = studioLayout(s.stack);
