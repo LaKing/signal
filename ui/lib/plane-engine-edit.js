@@ -93,7 +93,14 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
     const address = fullAddress(prefix, p.address);
     items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey(p.side, address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: name, port: p.name, side: p.side, parameter: p.parameter, address, local: `${name}.${p.name}`, cardChip: card ? chipOf(card) : null, module: card?.module ?? null });
   }
-  // The control signal's legs into the parameters (`bindLegs`): each selectable, by the parameter it sets.
+  // A card's control pins on its edge facing the connector (`bindLegs`'): a parameter's pin, a chip's a place its parameter export is moved to.
+  for (const p of laid?.bindPins ?? []) {
+    const card = cardById.get(p.card);
+    if (!card) continue;
+    const address = fullAddress(prefix, p.address);
+    items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey('in', address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: card.name, port: p.name, side: 'in', parameter: true, bind: true, address, local: `${card.name}.${p.name}`, cardChip: chipOf(card), module: card.module ?? null });
+  }
+  // The control signal's legs into the parameters (`bindLegs`, inside a chip `layLevel`'s): each selectable, by the parameter it sets.
   for (const b of laid?.binds ?? []) {
     const address = fullAddress(prefix, b.address);
     items.push({ kind: 'e-bind', id: `${scope}|${b.id}`, key: bindKey(address), points: b.points, entry, patchLevel: level, prefix, chip, address, local: b.address, export: b.export ?? null });
@@ -218,25 +225,47 @@ function exportConnect(frame, inner) {
   return { level: inner.patchLevel, ops: [exportOp(true, role, frame.port, inner.local)], what: `${frame.address} → ${inner.address} (${frame.module}’s export)` };
 }
 
-/** An export's wire inside a chip with its inner end moved onto `to` (one patch: its old port let go, the new one taken). */
+/**
+ * An export's wire inside a chip with one end moved onto `to` (one patch): its inner end onto another pin inside (the
+ * export's old port let go, the new one taken), or its end on the chip's own pin onto another of the chip's pins (the
+ * inner port handed to that pin's export, `exportHandOver`).
+ */
 function exportMove(wire, end, to, def) {
   const into = String(wire.written.from).startsWith('@inputs.');
   const name = String(into ? wire.written.from : wire.written.to).replace(/^@(inputs|outputs)\./, '');
-  if ((into && end !== 'to') || (!into && end !== 'from')) return { error: `Not moved: the chip’s own pin stays; move the wire’s end inside` };
-  if (to?.kind !== 'e-pin' || (to.chip ?? null) !== (wire.chip ?? null)) return { error: 'Not moved: drop the wire’s end on a pin inside the same chip' };
-  if (to.side !== (into ? 'in' : 'out')) return { error: `Not moved: ${into ? 'an input’s export goes on to an input or a parameter' : 'an output’s export leaves from an output'}` };
   const role = !into ? 'output' : def?.parameters?.some((p) => p.name === name) ? 'parameter' : 'input';
   const old = written(into ? wire.written.to : wire.written.from);
+  if ((into && end !== 'to') || (!into && end !== 'from')) return exportHandOver({ chip: wire.chip, level: wire.patchLevel, prefix: wire.prefix, role, name, port: old }, to);
+  if (to?.kind !== 'e-pin' || (to.chip ?? null) !== (wire.chip ?? null)) return { error: 'Not moved: drop the wire’s end on a pin inside the same chip' };
+  if (to.side !== (into ? 'in' : 'out')) return { error: `Not moved: ${into ? 'an input’s export goes on to an input or a parameter' : 'an output’s export leaves from an output'}` };
   if (old === written(to.local)) return { error: 'Not moved: it is already there' };
   return { level: wire.patchLevel, ops: exportSwap(role, name, old, to.local), what: `${wire.from} → ${wire.to} moved to ${to.address} (${wire.patchLevel}’s export)` };
 }
 
 /**
- * A control signal's leg inside a chip (`bindLegs`', an `e-bind` with a prefix) moved onto inner parameter `port`
- * (`instance.parameter` at the chip's level): the composite's parameter export `bind.export` reaches it instead.
+ * Inner port `port` of the export `role` `name` (of the composite at `level`, the inside of chip `chip` at `prefix`)
+ * handed to the export of the chip's own pin `to` (an `e-pin` of the level around, on that chip's card): the new export
+ * reaches it first, then the old one lets go (an output names one port: it lets go first). The old export goes with its
+ * last port. `{level, ops, what}`, or `{error}`.
+ */
+function exportHandOver({ chip, level, prefix, role, name, port }, to) {
+  if (to?.kind !== 'e-pin' || !to.cardChip || to.cardChip !== chip) return { error: 'Not moved: drop the chip’s end of the wire on another of the chip’s own pins' };
+  if ((to.side === 'out') !== (role === 'output')) return { error: `Not moved: ${role === 'output' ? 'an output’s export goes to an output of the chip' : 'an input’s or a parameter’s export comes from an input or a parameter of the chip'}` };
+  const now = to.side === 'out' ? 'output' : to.parameter ? 'parameter' : 'input';
+  if (now === role && to.port === name) return { error: 'Not moved: it is already there' };
+  const ops = role === 'output' ? [exportOp(false, role, name, port), exportOp(true, now, to.port, port)] : [exportOp(true, now, to.port, port), exportOp(false, role, name, port)];
+  return { level, ops, what: `${fullAddress(prefix, port)} now ${role === 'output' ? 'leaves at' : 'comes from'} ${to.address} instead of ${prefix}.${name} (${level}’s export)` };
+}
+
+/**
+ * A control signal's leg inside a chip (an `e-bind` with a prefix) moved onto inner parameter `port`
+ * (`instance.parameter` at the chip's level): the composite's parameter export `bind.export` reaches it instead; its end
+ * on the chip's own pin onto another of the chip's pins (`port` that pin's `e-pin`): that pin's export reaches it instead.
  */
 export function bindMoveOps(bind, port) {
   if (bind?.kind !== 'e-bind' || !bind.prefix || !bind.export) return { error: 'Not moved: grab a leg inside a chip' };
+  // The leg's end on the chip's own pin onto another of its pins: the inner parameter handed to that pin's export.
+  if (port?.kind === 'e-pin') return exportHandOver({ chip: bind.chip, level: bind.patchLevel, prefix: bind.prefix, role: 'parameter', name: bind.export, port: written(bind.local) }, port);
   const old = written(bind.local);
   if (old === written(port)) return { error: 'Not moved: it is already there' };
   return { level: bind.patchLevel, ops: exportSwap('parameter', bind.export, old, port), what: `${bind.prefix}.${bind.export} now reaches ${fullAddress(bind.prefix, port)}` };

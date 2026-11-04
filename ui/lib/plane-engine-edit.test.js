@@ -235,3 +235,37 @@ test('an export’s port moved inside a chip: the new port taken first, then the
   assert.ok(bindMoveOps(bind, 'ladder.cutoff_hz').error, 'already there');
   assert.ok(bindMoveOps({ ...bind, prefix: '' }, 'ladder.drive').error, 'a leg at the package is a control’s bind, not an export');
 });
+
+test('an export’s end on the chip’s own pin moved onto another of its pins: the inner port handed to that pin’s export', () => {
+  const chipPin = (side, port, extra = {}) => ({ kind: 'e-pin', side, card: 'synth', port, address: `/synth.${port}`, local: `synth.${port}`, chip: null, cardChip: 'card synth', patchLevel: '', parameter: false, ...extra });
+  const def = { parameters: [{ name: 'cutoff' }, { name: 'drive' }] };
+  // An input's export: the new export reaches the port first, then the old lets go.
+  const input = { kind: 'e-wire', from: '/synth.gate', to: '/synth/fenv.gate', written: { from: '@inputs.gate', to: 'fenv.gate' }, patchLevel: 'moog_voice', prefix: '/synth', chip: 'card synth', frame: true };
+  assert.deepEqual(rewireOps(input, 'from', chipPin('in', 'velocity'), def).ops, [
+    { op: 'export.connect', role: 'input', name: 'velocity', port: 'fenv.gate' },
+    { op: 'export.disconnect', role: 'input', name: 'gate', port: 'fenv.gate' },
+  ]);
+  assert.equal(rewireOps(input, 'from', chipPin('in', 'velocity'), def).level, 'moog_voice');
+  assert.ok(rewireOps(input, 'from', chipPin('in', 'gate'), def).error, 'already there');
+  assert.ok(rewireOps(input, 'from', chipPin('out', 'out'), def).error, 'an input’s export from an input of the chip');
+  assert.ok(rewireOps(input, 'from', { ...chipPin('in', 'hz'), cardChip: 'card other' }, def).error, 'another chip’s pin');
+  // An output names one port: the old lets go first.
+  const output = { kind: 'e-wire', from: '/synth/volume.out', to: '/synth.out', written: { from: 'volume.out', to: '@outputs.out' }, patchLevel: 'moog_voice', prefix: '/synth', chip: 'card synth', frame: true };
+  assert.deepEqual(rewireOps(output, 'to', chipPin('out', 'aux'), def).ops, [
+    { op: 'export.disconnect', role: 'output', name: 'out', port: 'volume.out' },
+    { op: 'export.connect', role: 'output', name: 'aux', port: 'volume.out' },
+  ]);
+  // A parameter's leg: its end on the chip's control pin onto another control pin.
+  const bind = { kind: 'e-bind', prefix: '/synth', patchLevel: 'moog_voice', chip: 'card synth', export: 'cutoff', local: 'ladder.cutoff_hz' };
+  assert.deepEqual(bindMoveOps(bind, chipPin('in', 'drive', { parameter: true, bind: true })).ops, [
+    { op: 'export.connect', role: 'parameter', name: 'drive', port: 'ladder.cutoff_hz' },
+    { op: 'export.disconnect', role: 'parameter', name: 'cutoff', port: 'ladder.cutoff_hz' },
+  ]);
+});
+
+test('a card’s control pins are pins too: a parameter’s at the instrument’s level, a chip’s where its exports are moved to', () => {
+  const laid = engineLayout({ entry: 'card:mono-synth', rect: { x: 0, y: 0, w: 1280, h: 420 }, pkg: null, names: ['melody', 'synth'], graph: STUDIO });
+  const items = engineItems({ ...laid, bindPins: [{ id: 'bind /synth.cutoff', card: 'card synth', name: 'cutoff', address: '/synth.cutoff', x: 10, y: 5 }] }, { entry: 'card:mono-synth' });
+  const p = items.find((i) => i.kind === 'e-pin' && i.bind);
+  assert.deepEqual([p.address, p.side, p.parameter, p.port, p.local, p.cardChip], ['/synth.cutoff', 'in', true, 'cutoff', 'synth.cutoff', 'card synth']);
+});

@@ -13,7 +13,7 @@ import { parseContent } from './panel-tree.js';
 import { panelCards, parsePlane } from './plane-file.js';
 import { assignInstruments, edgePins, stackMembers } from './plane-instruments.js';
 import { pinPlaces, stackLayout } from './plane-layout.js';
-import { assignTracks, cableKind, portIndex, polylinePath, simplify, wiringLayout, wiringModel } from './plane-wiring.js';
+import { assignTracks, cableKind, edgeCableMoves, portIndex, polylinePath, simplify, wiringLayout, wiringModel } from './plane-wiring.js';
 import { PU } from './plate.js';
 
 const root = new URL('../../', import.meta.url);
@@ -187,4 +187,18 @@ test('an instrument not measured yet has no rectangle: its cables are left out, 
   assert.equal(w.cables.length, 5);
   // Edge cables and the Stack's edge pins never share an id.
   assert.ok(w.cables.filter((c) => c.a.edge || c.b.edge).every((c) => c.id.startsWith('cable ')));
+});
+
+test('a cable through the Stack’s edge moved: every connection it stands for, its end inside the Stack moved, outside kept', () => {
+  const connections = [{ from: '/synth.out', to: '/bus.in' }, { from: '/synth.out', to: '/rec.in' }, { from: '/synth.out', to: '/echo.in' }, { from: '/in.l', to: '/synth.hz' }];
+  const inStack = (a) => ['synth', 'echo', 'pad'].includes(a.replace(/^\//, '').split(/[./]/)[0]);
+  const out = { from: '/synth.out', to: '/bus.in', a: { entry: 'synth', address: '/synth.out' }, b: { edge: 'out', pin: '/synth.out' } };
+  assert.deepEqual(edgeCableMoves(out, connections, inStack, '/pad.out'), [
+    { was: { from: '/synth.out', to: '/bus.in' }, now: { from: '/pad.out', to: '/bus.in' } },
+    { was: { from: '/synth.out', to: '/rec.in' }, now: { from: '/pad.out', to: '/rec.in' } },
+  ]);
+  const into = { from: '/in.l', to: '/synth.hz', a: { edge: 'in', pin: '/synth.hz' }, b: { entry: 'synth', address: '/synth.hz' } };
+  assert.deepEqual(edgeCableMoves(into, connections, inStack, '/pad.hz'), [{ was: { from: '/in.l', to: '/synth.hz' }, now: { from: '/in.l', to: '/pad.hz' } }]);
+  assert.deepEqual(edgeCableMoves(into, connections, inStack, '/synth.hz'), [], 'already there');
+  assert.deepEqual(edgeCableMoves({ ...into, a: { entry: 'x', address: '/in.l' } }, connections, inStack, '/pad.hz'), [], 'not through the edge');
 });

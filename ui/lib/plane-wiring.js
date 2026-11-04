@@ -78,6 +78,21 @@ export function cableKind(connection, index) {
 }
 
 /**
+ * A cable through the Stack's edge (`wiringModel`'s, `a.edge` or `b.edge`) with its inner end moved to port `address` (the
+ * owner's, 2026-11-04: every wire rewired by hand): every connection it stands for (one cable per edge pin, the Setup draws
+ * its fan-out outside), its end inside the Stack moved, its end outside kept. `connections` the top level's, `inStack(a)`
+ * whether an address lies in the Stack. `[{was: {from, to}, now: {from, to}}]`, empty when there is nothing to move.
+ */
+export function edgeCableMoves(cable, connections, inStack, address) {
+  const out = Boolean(cable?.b?.edge);
+  if (!out && !cable?.a?.edge) return [];
+  return (connections ?? [])
+    .filter((c) => (out ? c.from === cable.from && !inStack(c.to) : c.to === cable.to && !inStack(c.from)))
+    .map((c) => ({ was: { from: c.from, to: c.to }, now: out ? { from: address, to: c.to } : { from: c.from, to: address } }))
+    .filter((m) => m.now.from !== m.was.from || m.now.to !== m.was.to);
+}
+
+/**
  * The Wiring level's model of Stack `stack` (ADR 0051 §1, §4): `owner`
  * (`assignInstruments`'), `stackOf` (`stackMembers`'), `instances` and
  * `connections` (`graph.top`'s), `pins` (the Stack's `edgePins`). Returns

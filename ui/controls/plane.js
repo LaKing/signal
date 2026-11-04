@@ -78,12 +78,12 @@ import { defaultPanel } from '../lib/panel.js';
 import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
-import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
+import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
 import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
-import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
+import { WIRING_TEXT, edgeCableMoves, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, locateAddress, revealShare } from '../lib/plane-engine.js';
@@ -331,7 +331,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 /* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
-.e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-pin.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
+.e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); } .e-pin.e-bind-pin, .e-pin.k-control.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -348,7 +348,8 @@ svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, 
 .e-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .stage[data-engine-edit] .e-pin { cursor: crosshair; }
 /* No dashed lines (the owner's rule): the cable being drawn is a plain line. */
-.rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.rubber { fill: none; stroke: var(--signal-focus, #5aa9ff); }
+.drop-hint { fill: none; stroke: var(--signal-focus, #5aa9ff); }
 .chooser { position: absolute; z-index: 5; width: min(640px, calc(100% - 16px)); overflow: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 4px; border-radius: 6px; background: var(--signal-panel, #1f232b); border: 1px solid #3a414d; box-shadow: 0 6px 20px #0008; }
 .chooser-title { grid-column: 1 / -1; padding: 2px 6px 4px; color: var(--signal-muted, #8a93a3); }
 .chooser button { text-align: left; background: none; border: none; color: var(--signal-fg, #d6dbe4); padding: 3px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer; }
@@ -2066,8 +2067,9 @@ export class SignalPlane extends HTMLElement {
     // Inside a package: the control signal, each bound parameter from the connector into its card (`bindsOf`).
     for (const b of laid.binds ?? []) {
       const path = this.keyed(svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) }), bindKey(full(b.address)), keyed);
-      path.append(svg('title', {}, `${b.address}: its control at the Control layer, through the package’s connector`));
+      path.append(svg('title', {}, top ? `${b.address}: its control at the Control layer, through the package’s connector` : `${full(b.address)}: ${parent.card.name}’s parameter ${b.export ?? ''}, set by its control`));
       wires.append(path);
+      for (const j of b.junctions ?? []) wires.append(svg('circle', { class: 'e-junction e-bind-dot', cx: j.x, cy: j.y, r: 2.5 * k }));
     }
     g.append(wires);
     const composites = new Map();
@@ -2095,7 +2097,7 @@ export class SignalPlane extends HTMLElement {
       g.append(card);
     }
     for (const p of laid.pins) {
-      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
+      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
       dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
       // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
       const chip = composites.get(p.card);
@@ -2959,6 +2961,7 @@ export class SignalPlane extends HTMLElement {
       // A wire's end grabbed: the rubber from its other end, which stays.
       const g = this.gesture;
       this.drawRubber(g.end ? (g.end === 'from' ? g.hit.points.at(-1) : g.hit.points[0]) : g.hit, at);
+      this.drawHint(this.dropHint(g, this.hitAt(at), at));
       return;
     }
     if (!this.drag || event.pointerId !== this.drag.id) return;
@@ -3007,11 +3010,13 @@ export class SignalPlane extends HTMLElement {
    */
   grabbedEnd(hit, at) {
     // A control's leg into the engine (the package's level): its card's end moves, the connector's stays.
-    // Inside a chip, the leg of its parameter's export: its inner end moves (the composite's export).
-    if (hit?.kind === 'e-bind' && this.engineEditing()) return 'to';
-    // An export's wire inside a chip: its inner end moves, the chip's own pin stays.
-    if (hit?.kind === 'e-wire' && hit.frame && this.engineEditing()) return String(hit.written?.from).startsWith('@inputs.') ? 'to' : 'from';
-    const movable = (hit?.kind === 'cable' && !hit.cable.a.edge && !hit.cable.b.edge) || (hit?.kind === 'auto' && hit.auto?.to && !hit.auto.inner) || (hit?.kind === 'e-wire' && this.engineEditing());
+    if (hit?.kind === 'e-bind' && this.engineEditing() && !hit.prefix) return 'to';
+    // A cable through the Stack's edge: its end inside the Stack moves, the edge's stays (the Setup moves that one).
+    if (hit?.kind === 'cable' && hit.cable.a.edge && hit.cable.b.edge) return null;
+    if (hit?.kind === 'cable' && hit.cable.a.edge) return 'to';
+    if (hit?.kind === 'cable' && hit.cable.b.edge) return 'from';
+    // Inside a chip, an export's wire and its parameter's leg move either end: the inner one, or the chip's own pin's.
+    const movable = hit?.kind === 'cable' || (hit?.kind === 'auto' && hit.auto?.to && !hit.auto.inner) || ((hit?.kind === 'e-wire' || hit?.kind === 'e-bind') && this.engineEditing());
     if (!movable || !hit.points?.length) return null;
     const rect = this.focusRect();
     if (!rect) return null;
@@ -3025,8 +3030,9 @@ export class SignalPlane extends HTMLElement {
   dropWireEnd(hit, end, at) {
     const to = this.hitAt(at);
     if (hit.kind === 'e-wire') return this.writeEngine(rewireOps(hit, end, to, this.graph?.composites?.[hit.patchLevel]));
-    if (hit.kind === 'e-bind' && hit.prefix) return this.dropInnerBind(hit, to, at);
+    if (hit.kind === 'e-bind' && hit.prefix) return this.dropInnerBind(hit, to, at, end);
     if (hit.kind === 'e-bind') return this.dropBindLeg(hit, to, at);
+    if (hit.kind === 'cable' && (hit.cable.a.edge || hit.cable.b.edge)) return this.dropEdgeCable(hit.cable, to);
     const old = hit.kind === 'cable' ? hit.cable : hit.auto;
     let from = old.from;
     let into = old.to;
@@ -3069,8 +3075,27 @@ export class SignalPlane extends HTMLElement {
     return this.say('Not bound: drop the leg on a card of the engine, or on a parameter’s pin');
   }
 
-  /** A parameter export's leg inside a chip dropped: onto an inner parameter's pin, or a card of the chip's level through a chooser of its parameters. */
-  dropInnerBind(hit, to, at) {
+  /**
+   * A cable through the Stack's edge with its inner end dropped (`grabbedEnd`): onto a port of the side it needs, every
+   * connection it stands for moved there in one patch (one undo), their ends outside the Stack kept.
+   */
+  dropEdgeCable(cable, to) {
+    const want = cable.b.edge ? 'out' : 'in';
+    if (to?.kind !== 'port' || to.port.side !== want) return this.say(`Not moved: drop the cable’s end on ${want === 'out' ? 'an output' : 'an input'} of an instrument`);
+    const inStack = (address) => this.model?.stackOf?.get(instanceOf(address)) === this.focused;
+    const moves = edgeCableMoves(cable, this.graph?.top?.connections ?? [], inStack, to.port.address);
+    if (!moves.length) return this.say('Not moved: it is already there');
+    const ops = [...moves.map((m) => removeConnection(m.was.from, m.was.to)), ...moves.map((m) => addConnection(m.now.from, m.now.to))];
+    const what = moves.length === 1 ? `${moves[0].was.from} → ${moves[0].was.to} moved: ${moves[0].now.from} → ${moves[0].now.to}` : `${moves.length} connections through the Stack’s edge moved to ${to.port.address}`;
+    return this.writePatch(ops, what);
+  }
+
+  /**
+   * A parameter export's leg inside a chip dropped: its inner end onto an inner parameter's pin, or a card of the chip's
+   * level through a chooser of its parameters; its end on the chip's own pin (`end` `'from'`) onto another of its pins.
+   */
+  dropInnerBind(hit, to, at, end = 'to') {
+    if (end === 'from') return to?.kind === 'e-pin' ? this.writeEngine(bindMoveOps(hit, to)) : this.say('Not moved: drop the chip’s end of the leg on another of the chip’s own pins');
     if (to?.kind === 'e-pin' && to.parameter && to.chip === hit.chip) return this.writeEngine(bindMoveOps(hit, to.local));
     if (to?.kind === 'e-card' && to.chip === hit.chip) {
       const inst = this.graph?.composites?.[hit.patchLevel]?.instances?.find((i) => i.name === to.name);
@@ -3089,6 +3114,8 @@ export class SignalPlane extends HTMLElement {
     const from = hit.kind === 'cube' ? { x: hit.x + hit.w, y: hit.y + hit.h / 2 } : { x: hit.x, y: hit.y };
     const line = s.rubber ?? svg('path', { class: 'rubber' });
     line.setAttribute('d', `M${from.x - 2} ${from.y - 2} L${p.x - rect.x - 2} ${p.y - rect.y - 2}`);
+    // 2 px on screen at any zoom (the stage's CSS scale is no SVG transform: a non-scaling stroke would scale with it).
+    line.style.strokeWidth = String(2 / this.view.k);
     if (!s.rubber) {
       s.rubber = line;
       s.rubberSvg.append(line);
@@ -3099,7 +3126,63 @@ export class SignalPlane extends HTMLElement {
     for (const s of this.stacks.values()) {
       s.rubber?.remove();
       s.rubber = null;
+      s.hint?.remove();
+      s.hint = null;
     }
+  }
+
+  /**
+   * Where the cable or the wire's end being dragged (`gesture`) would land if dropped now on `to` (`hitAt`'s at `at`): a
+   * pin or a port `{x, y}`, a card, a box or a control `{x, y, w, h}` (plane units, in the focused Stack), or null where
+   * it fits nothing. A hint only: the drop decides (and says why it refuses).
+   */
+  dropHint(g, to, at) {
+    const point = (p) => ({ x: p.x, y: p.y });
+    const box = (r) => ({ x: r.x, y: r.y, w: r.w, h: r.h });
+    const control = () => {
+      const c = this.controlAt(at);
+      return c?.writes ? box(c.rect) : null;
+    };
+    const hit = g.hit;
+    if (g.end) {
+      const want = g.end === 'from' ? 'out' : 'in';
+      if (hit.kind === 'cable') return to?.kind === 'port' && to.port.side === want ? point(to) : null;
+      if (hit.kind === 'auto') return g.end === 'to' ? control() : to?.kind === 'auto-pin' || to?.kind === 'external' ? point(to) : null;
+      if (hit.kind === 'e-wire') return to?.kind === 'e-pin' && to.side === want && (to.chip === hit.chip || (hit.frame && to.cardChip === hit.chip)) ? point(to) : null;
+      if (hit.kind === 'e-bind' && !hit.prefix) return to?.kind === 'e-pin' && to.parameter && !to.prefix ? point(to) : to?.kind === 'e-card' && !to.prefix ? box(to) : null;
+      if (hit.kind === 'e-bind' && g.end === 'from') return to?.kind === 'e-pin' && to.side === 'in' && to.cardChip === hit.chip ? point(to) : null;
+      if (hit.kind === 'e-bind') return to?.kind === 'e-pin' && to.parameter && to.chip === hit.chip ? point(to) : to?.kind === 'e-card' && to.chip === hit.chip ? box(to) : null;
+      return null;
+    }
+    if (hit.kind === 'port') {
+      if (to?.kind === 'port' && to.port.side !== hit.port.side && to.port.entry !== hit.port.entry) return point(to);
+      return to?.kind === 'box' && to.entry !== hit.port.entry ? box(to) : null;
+    }
+    if (hit.kind === 'via') return to?.kind === 'param' ? point(to) : to?.kind === 'cube' ? box(to) : null;
+    if (hit.kind === 'auto-pin' || hit.kind === 'external' || hit.kind === 'cube') return control();
+    if (hit.kind === 'e-pin') {
+      if (to?.kind === 'e-pin' && to !== hit && (to.side !== hit.side || to.cardChip === hit.chip || hit.cardChip === to.chip)) return point(to);
+      return to?.kind === 'e-card' && to.chip === hit.chip && to.name !== hit.card ? box(to) : null;
+    }
+    return null;
+  }
+
+  /** The drop's hint (`dropHint`'s) drawn over the focused Stack: a ring round a pin, an outline round a card; none for null. */
+  drawHint(shape) {
+    const s = this.stacks.get(this.focused);
+    if (!s) return;
+    if (!shape) {
+      s.hint?.remove();
+      s.hint = null;
+      return;
+    }
+    // In screen px at the zoom now, set off as the rubber is (2 units).
+    const k = this.view.k;
+    const style = `stroke-width: ${3 / k}`;
+    const ring = 'w' in shape ? svg('rect', { class: 'drop-hint', x: shape.x - 2 - 4 / k, y: shape.y - 2 - 4 / k, width: shape.w + 8 / k, height: shape.h + 8 / k, rx: 6 / k, style }) : svg('circle', { class: 'drop-hint', cx: shape.x - 2, cy: shape.y - 2, r: 10 / k, style });
+    s.hint?.remove();
+    s.hint = ring;
+    s.rubberSvg.append(ring);
   }
 
   /**
