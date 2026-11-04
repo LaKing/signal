@@ -94,7 +94,8 @@ test('hit items inside a chip: full addresses under it, its composite’s level,
 
 test('what a point hits: an inner card over the chip’s, the chip’s empty body, the instrument’s empty space, nothing outside', () => {
   const { all, top, rect, card: chipCard, inside } = monoSynth();
-  const k = 4;
+  // Close enough that a point on a card's middle is on no pin of it.
+  const k = 40;
   const rects = [{ entry: 'card:mono-synth', ...rect }];
   const fenv = inside.cards.find((c) => c.name === 'fenv');
   const onFenv = { x: fenv.x + fenv.w / 2, y: fenv.y + fenv.h / 2 };
@@ -263,9 +264,3 @@ test('an export’s end on the chip’s own pin moved onto another of its pins: 
   ]);
 });
 
-test('a card’s control pins are pins too: a parameter’s at the instrument’s level, a chip’s where its exports are moved to', () => {
-  const laid = engineLayout({ entry: 'card:mono-synth', rect: { x: 0, y: 0, w: 1280, h: 420 }, pkg: null, names: ['melody', 'synth'], graph: STUDIO });
-  const items = engineItems({ ...laid, bindPins: [{ id: 'bind /synth.cutoff', card: 'card synth', name: 'cutoff', address: '/synth.cutoff', x: 10, y: 5 }] }, { entry: 'card:mono-synth' });
-  const p = items.find((i) => i.kind === 'e-pin' && i.bind);
-  assert.deepEqual([p.address, p.side, p.parameter, p.port, p.local, p.cardChip], ['/synth.cutoff', 'in', true, 'cutoff', 'synth.cutoff', 'card synth']);
-});

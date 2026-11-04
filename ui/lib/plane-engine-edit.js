@@ -56,7 +56,7 @@ export function pinKey(side, address) {
   return `pin ${side} ${norm(address)}`;
 }
 
-/** The key of a leg of the control signal into parameter `address` (ui/lib/plane-engine.js `bindLegs`). */
+/** The key of a leg of the control signal into parameter `address` (ui/lib/plane-engine.js `layLevel`'s `binds`). */
 export function bindKey(address) {
   return `bind ${norm(address)}`;
 }
@@ -93,14 +93,7 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
     const address = fullAddress(prefix, p.address);
     items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey(p.side, address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: name, port: p.name, side: p.side, parameter: p.parameter, address, local: `${name}.${p.name}`, cardChip: card ? chipOf(card) : null, module: card?.module ?? null });
   }
-  // A card's control pins on its edge facing the connector (`bindLegs`'): a parameter's pin, a chip's a place its parameter export is moved to.
-  for (const p of laid?.bindPins ?? []) {
-    const card = cardById.get(p.card);
-    if (!card) continue;
-    const address = fullAddress(prefix, p.address);
-    items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey('in', address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: card.name, port: p.name, side: 'in', parameter: true, bind: true, address, local: `${card.name}.${p.name}`, cardChip: chipOf(card), module: card.module ?? null });
-  }
-  // The control signal's legs into the parameters (`bindLegs`, inside a chip `layLevel`'s): each selectable, by the parameter it sets.
+  // The control signal's legs into the parameters (`layLevel`'s `binds`): each selectable, by the parameter it sets.
   for (const b of laid?.binds ?? []) {
     const address = fullAddress(prefix, b.address);
     items.push({ kind: 'e-bind', id: `${scope}|${b.id}`, key: bindKey(address), points: b.points, entry, patchLevel: level, prefix, chip, address, local: b.address, export: b.export ?? null });

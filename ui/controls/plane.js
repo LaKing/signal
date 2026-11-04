@@ -2065,7 +2065,7 @@ export class SignalPlane extends HTMLElement {
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
     }
-    // Inside a package: the control signal, each bound parameter from the connector into its card (`bindsOf`).
+    // The control signal: in a package each bound parameter wired from the connector into its pin; inside a chip a tag at each target.
     // Inside a chip, a tag at each target, its parameter's name; its whole way from the chip's pin drawn only when selected.
     const tags = svg('g', { class: 'e-bind-tags' });
     for (const b of laid.binds ?? []) {
@@ -2100,7 +2100,7 @@ export class SignalPlane extends HTMLElement {
         card.append(plain);
         const id = top ? c.id : `${parent.id}/${c.id}`;
         card.dataset.chip = id;
-        const chip = { id, entry, card: c, pins: laid.pins, bindPins: laid.bindPins ?? [], scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
+        const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
         composites.set(c.id, chip);
         s.engineChips.set(id, chip);
         parent.children.push(chip);
@@ -2109,7 +2109,7 @@ export class SignalPlane extends HTMLElement {
     }
     for (const p of laid.pins) {
       const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
-      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? 'a parameter a connection drives' : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
+      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? `a parameter${p.bind ? ' its control sets' : p.connected ? ' a connection drives' : ''}` : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
       // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
       const chip = composites.get(p.card);
       const label = svg('text', { class: `e-pin-label${chip ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(chip ? { 'stroke-width': 2.5 * k } : {}) }, p.name);
@@ -2117,10 +2117,10 @@ export class SignalPlane extends HTMLElement {
       if (chip) chip.labels.append(label);
       else g.append(label);
     }
-    for (const p of laid.bindPins ?? []) {
-      const dot = this.keyed(svg('circle', { class: 'e-pin e-bind-pin', cx: p.x, cy: p.y, r: 2.5 * k, ...line(1.5) }), pinKey('in', full(p.address)), keyed);
-      dot.append(svg('title', {}, `${full(p.address)} (a parameter its control sets)`));
-      g.append(dot);
+    // Inside a chip, its pins' names at the inside's scale by its edges (the chip's own labels fade out as its inside comes in).
+    for (const n of laid.names ?? []) {
+      const left = n.side === 'in';
+      g.append(svg('text', { class: 'e-pin-label halo e-inherited', x: left ? n.x + 4 * k : n.x - 4 * k, y: n.y - 2.5 * k, 'font-size': 8 * k, 'text-anchor': left ? 'start' : 'end', 'stroke-width': 2.5 * k }, n.text));
     }
     for (const chip of composites.values()) g.append(chip.labels);
     g.append(tags);
@@ -2172,7 +2172,7 @@ export class SignalPlane extends HTMLElement {
 
   /** A chip's inside laid out (`insideOf`), once: kept on the chip, which lives as long as the Engine's layout (its key: the graph, the Stack's layout, who holds what). */
   insideFor(chip) {
-    if (chip.laid === undefined) chip.laid = insideOf({ graph: this.graph, card: chip.card, pins: chip.pins, bindPins: chip.bindPins, scale: chip.scale });
+    if (chip.laid === undefined) chip.laid = insideOf({ graph: this.graph, card: chip.card, pins: chip.pins, scale: chip.scale });
     return chip.laid;
   }
 
