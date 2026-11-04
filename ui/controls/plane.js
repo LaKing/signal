@@ -2042,7 +2042,7 @@ export class SignalPlane extends HTMLElement {
         card.append(plain);
         const id = top ? c.id : `${parent.id}/${c.id}`;
         card.dataset.chip = id;
-        const chip = { id, entry, card: c, pins: laid.pins, scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
+        const chip = { id, entry, card: c, pins: laid.pins, bindPins: laid.bindPins ?? [], scale: k, address, element: card, plain, labels: svg('g', { class: 'e-chip-labels' }), parent, children: [], laid: undefined, group: null };
         composites.set(c.id, chip);
         s.engineChips.set(id, chip);
         parent.children.push(chip);
@@ -2113,7 +2113,7 @@ export class SignalPlane extends HTMLElement {
 
   /** A chip's inside laid out (`insideOf`), once: kept on the chip, which lives as long as the Engine's layout (its key: the graph, the Stack's layout, who holds what). */
   insideFor(chip) {
-    if (chip.laid === undefined) chip.laid = insideOf({ graph: this.graph, card: chip.card, pins: chip.pins, scale: chip.scale });
+    if (chip.laid === undefined) chip.laid = insideOf({ graph: this.graph, card: chip.card, pins: chip.pins, bindPins: chip.bindPins, scale: chip.scale });
     return chip.laid;
   }
 

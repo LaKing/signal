@@ -473,20 +473,28 @@ export function engineLayout({ entry, rect, pkg = null, names = [], graph, title
  * bind, x, y}`.
  */
 export function bindsOf(pkg, laid, band = bindBand(pkg)) {
+  if (!pkg?.params?.length || !laid.cards.length) return { binds: [], bindPins: [] };
+  const top = pkg.connector === 'top';
+  // Out of the connector below the title band (it passes under it), the lanes in the band between it and the cards.
+  return bindLegs(pkg.params.map((p) => ({ address: p.address, x: p.x })), laid.cards, laid.scale, top ? pkg.body.y : pkg.y + pkg.h, band, top);
+}
+
+/**
+ * Legs of the control signal in a band (`bindsOf`'s, and inside a composite `insideOf`'s): each source `{address, x}` (the
+ * target, `instance.parameter`, and where it leaves the band's edge at `start`) into a pin on its instance's card (of
+ * `cards`, scale `k`) on the edge facing the band, in the sources' order along each card; nested in lanes (the Control
+ * layer's legs' rule) so that the legs into one card never cross. A source whose instance is not among `cards` is left out.
+ */
+export function bindLegs(sources, cards, k, start, band, top = true) {
   const binds = [];
   const bindPins = [];
-  if (!pkg?.params?.length || !laid.cards.length) return { binds, bindPins };
-  const top = pkg.connector === 'top';
-  const k = laid.scale;
-  // Out of the connector below the title band (it passes under it), the lanes in the band between it and the cards.
-  const start = top ? pkg.body.y : pkg.y + pkg.h;
-  const gap = band / (pkg.params.length + 1);
+  const gap = band / (sources.length + 1);
   const byCard = new Map();
-  for (const p of pkg.params) {
-    const c = laid.cards.find((card) => card.name === instanceOf(p.address));
+  for (const p of sources) {
+    const c = cards.find((card) => card.name === instanceOf(p.address));
     if (!c) continue;
     if (!byCard.has(c)) byCard.set(c, []);
-    byCard.get(c).push(p);
+    if (!byCard.get(c).some((q) => q.address === p.address)) byCard.get(c).push(p);
   }
   for (const [c, list] of byCard) {
     const ordered = [...list].sort((a, b) => a.x - b.x);
@@ -496,12 +504,12 @@ export function bindsOf(pkg, laid, band = bindBand(pkg)) {
       bindPins.push({ id: `bind ${p.address}`, card: c.id, name: portOf(p.address), address: p.address, side: 'in', kind: 'control', parameter: true, connected: true, bind: true, x, y });
     });
   }
-  // Nested so that no two cross (the Control layer's legs' rule): straight out, along its lane, straight into the card.
-  const lanes = legLanes(bindPins.map((q) => ({ c: pkg.params.find((p) => p.address === q.address).x, p: q.x })));
-  bindPins.forEach((q, i) => {
-    const from = pkg.params.find((p) => p.address === q.address);
+  // Straight out, along its lane, straight into the card; a source with several targets fans out from one point.
+  const legs = sources.filter((p) => bindPins.some((q) => q.address === p.address)).map((p) => ({ from: p, to: bindPins.find((q) => q.address === p.address) }));
+  const lanes = legLanes(legs.map((l) => ({ c: l.from.x, p: l.to.x })));
+  legs.forEach(({ from, to }, i) => {
     const laneY = top ? start + (lanes[i] + 1) * gap : start - (lanes[i] + 1) * gap;
-    binds.push({ id: q.id, address: q.address, kind: 'control', points: simplify([{ x: from.x, y: start }, { x: from.x, y: laneY }, { x: q.x, y: laneY }, { x: q.x, y: q.y }]) });
+    binds.push({ id: `${to.id} ${i}`, address: to.address, kind: 'control', points: simplify([{ x: from.x, y: start }, { x: from.x, y: laneY }, { x: to.x, y: laneY }, { x: to.x, y: to.y }]) });
   });
   return { binds, bindPins };
 }
@@ -555,10 +563,12 @@ export function revealShare(px, range = REVEAL) {
  * with `{module, area, frame}`, or null when the graph has no such
  * composite. Pure; the same arguments give the same inside.
  */
-export function insideOf({ graph, card, pins = [], scale = 1 }) {
+export function insideOf({ graph, card, pins = [], bindPins = [], scale = 1 }) {
   const def = graph?.composites?.[card?.module];
   if (!def || !card.body) return null;
   const mine = pins.filter((p) => p.card === card.id);
+  // The control signal entering at the card's top (`bindLegs`' pins): each parameter on to its targets inside.
+  const sources = bindPins.filter((p) => p.card === card.id).flatMap((p) => (def.parameters?.find((x) => x.name === p.name)?.to ?? []).map((to) => ({ address: to, x: p.x })));
   const connections = [...(def.connections ?? [])];
   const edgeIns = new Map();
   const edgeOuts = new Map();
@@ -581,10 +591,12 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
   const b = card.body;
   const left = Math.min(0.3 * b.w, Math.max(0, labels('in') - (b.x - card.x)));
   const right = Math.min(0.3 * b.w, Math.max(0, labels('out') - (card.x + card.w - (b.x + b.w))));
-  const area = { x: b.x + left, y: b.y, w: Math.max(1e-6, b.w - left - right), h: Math.max(1e-6, b.h) };
+  // A band at the body's top for the control signal's lanes, kept clear of the inner cards.
+  const band = sources.length ? b.h * Math.min(0.3, (sources.length + 1) * 0.02) : 0;
+  const area = { x: b.x + left, y: b.y + band, w: Math.max(1e-6, b.w - left - right), h: Math.max(1e-6, b.h - band) };
   const frame = { x: card.x, y: card.y, w: card.w, h: card.h };
   const laid = layLevel({ level: { instances: def.instances ?? [], connections }, area, edgeIns, edgeOuts, frame, joinEdges: true });
-  return { module: card.module, area, frame, ...laid };
+  return { module: card.module, area, frame, ...laid, ...bindLegs(sources, laid.cards, laid.scale, b.y, band) };
 }
 
 /**

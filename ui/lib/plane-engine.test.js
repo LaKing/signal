@@ -385,3 +385,17 @@ test('the control signal into the engine: each bound parameter from the connecto
   }
   assert.deepEqual(bindsOf({ ...pkg, params: [] }, laid), { binds: [], bindPins: [] });
 });
+
+test('inside a composite the control signal goes on: a parameter entering at the card’s top to each of its targets', () => {
+  const graph = { composites: { voice: { instances: [{ name: 'f', module: 'std.lag', ports: [{ name: 'in', direction: 'in', shape: 'signal' }, { name: 'out', direction: 'out', shape: 'signal' }], parameters: [{ name: 'cut' }] }, { name: 'g', module: 'std.lag', ports: [{ name: 'in', direction: 'in', shape: 'signal' }, { name: 'out', direction: 'out', shape: 'signal' }], parameters: [{ name: 'cut' }] }], connections: [{ from: 'f.out', to: 'g.in' }], parameters: [{ name: 'cutoff', to: ['f.cut', 'g.cut'] }], inputs: [], outputs: [] } } };
+  const card = { id: 'v', name: 'v', module: 'voice', x: 0, y: 0, w: 400, h: 300, body: { x: 10, y: 40, w: 380, h: 250 } };
+  const laid = insideOf({ graph, card, bindPins: [{ card: 'v', name: 'cutoff', x: 200, y: 0 }] });
+  assert.deepEqual(laid.bindPins.map((p) => p.address).sort(), ['f.cut', 'g.cut']);
+  assert.equal(laid.binds.length, 2);
+  for (const b of laid.binds) {
+    assert.deepEqual(b.points[0], { x: 200, y: card.body.y }, 'from where it entered');
+    const c = laid.cards.find((x) => x.name === b.address[0]);
+    assert.equal(b.points.at(-1).y, c.y, 'into its card’s top');
+  }
+  assert.ok(laid.area.y > card.body.y, 'the inner cards below the band');
+});
