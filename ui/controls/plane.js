@@ -332,7 +332,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 /* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
 .e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
-.e-bind.e-route:not(.selected) { display: none; } .e-bind-tag { fill: var(--signal-effective, #ffb74d); stroke: #1d232c; stroke-linejoin: round; paint-order: stroke; pointer-events: none; } .e-pin.e-bind-pin, .e-pin.k-control.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
+.e-bind.e-route:not(.selected) { opacity: 0.45; } .e-bind-tag { fill: var(--signal-effective, #ffb74d); stroke: #1d232c; stroke-linejoin: round; paint-order: stroke; pointer-events: none; } .e-pin.e-bind-pin, .e-pin.k-control.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -2071,13 +2071,13 @@ export class SignalPlane extends HTMLElement {
     for (const b of laid.binds ?? []) {
       const key = bindKey(full(b.address));
       const title = top ? `${b.address}: its control at the Control layer, through the package’s connector` : `${full(b.address)}: ${parent.card.name}’s parameter ${b.export ?? ''} (${parent.address}.${b.export ?? ''}), set by its control; select it to see its way`;
-      if (b.route) wires.append(this.keyed(svg('path', { class: 'e-wire e-bind e-route', d: polylinePath(b.route, 6 * k, CORNERS), ...line(2) }), key, keyed));
+      if (b.route) wires.append(this.keyed(svg('path', { class: 'e-wire e-bind e-route', d: polylinePath(b.route, 6 * k, CORNERS), ...line(1.5) }), key, keyed));
       const path = this.keyed(svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) }), key, keyed);
       path.append(svg('title', {}, title));
       wires.append(path);
       for (const j of b.junctions ?? []) wires.append(svg('circle', { class: 'e-junction e-bind-dot', cx: j.x, cy: j.y, r: 2.5 * k }));
       if (b.tag) {
-        const text = this.keyed(svg('text', { class: 'e-bind-tag', x: b.tag.x, y: b.tag.y + 3 * k, 'font-size': 9 * k, 'text-anchor': 'end', 'stroke-width': 2.5 * k }, b.tag.text), key, keyed);
+        const text = this.keyed(svg('text', { class: 'e-bind-tag', x: b.tag.x, y: b.tag.y, 'font-size': 9 * k, 'text-anchor': 'end', 'stroke-width': 2.5 * k }, b.tag.text), key, keyed);
         text.append(svg('title', {}, title));
         tags.append(text);
       }

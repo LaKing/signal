@@ -493,9 +493,21 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     // From the chip's pin on its left edge: into the edge's channel, up to the lane; else down from the edge above.
     const start = bindFrom === 'left' ? [{ x: l.x, y: l.y }, { x: chX.get(-1).x0 + (CHANNEL_PAD / 2) * scale, y: l.y }] : [{ x: l.x, y: bindY }];
     const route = simplify([...start, { x: start.at(-1).x, y: laneY }, { x: down, y: laneY }, { x: down, y: Q.y }, Q]);
-    return { ...base, points: [stub, Q], tag: { x: stub.x - 2 * scale, y: Q.y, text: String(l.export ?? '') }, route };
+    // The tag over the run into the pin, as a wire's name on a schematic.
+    return { ...base, points: [stub, Q], tag: { x: stub.x - 2 * scale, y: Q.y - 2 * scale, text: String(l.export ?? '') }, route };
   });
   // A wired parameter on to several targets: a dot where the leg nearer the edge turns off the farther one's way.
+  // Tags: the ways are one bus (from the chip's pins into one trunk, along one lane, down by the tags), drawn always; a dot
+  // where a way branches off another mid-run.
+  if (!bindWired) {
+    const seen = new Set();
+    for (const b of legsOut) for (const p of b.route.slice(1, -1)) {
+      const id = `${p.x.toFixed(6)} ${p.y.toFixed(6)}`;
+      if (seen.has(id) || !legsOut.some((o) => o !== b && o.route.slice(1).some((q, i) => within(p, o.route[i], q)))) continue;
+      seen.add(id);
+      b.junctions.push({ x: p.x, y: p.y });
+    }
+  }
   if (bindWired) for (const b of legsOut) {
     const turn = b.points[1];
     if (!turn) continue;
