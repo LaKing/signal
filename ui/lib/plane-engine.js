@@ -185,7 +185,8 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   for (const w of wires) {
     // Wires entering from one outside source keep apart: each its own edge pin, its own net (`joinEdges`: one net per source, a composite's input fanning out).
     w.srcKey = w.edge === 'in' && !joinEdges ? `e ${w.c.to}` : `s ${w.c.from}`;
-    w.dstKey = `d ${w.c.to}`;
+    // Into a column across others: one track per source there (its branches into the column one trunk).
+    w.dstKey = `d ${w.srcKey} ${w.b}`;
     if (w.b === w.a + 1) net(w.a, w.srcKey);
     else {
       net(w.a, w.srcKey);
@@ -335,13 +336,27 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   }
   const gap = TRACK * scale;
   const lanes = { over: 0, feedback: 0, binds: 0 };
-  for (const [w, t] of assignTracks(overIv, gap)) {
-    w.yh = cardsTop - (t + 1) * LANE * scale;
-    lanes.over = Math.max(lanes.over, t + 1);
-  }
-  for (const [w, t] of assignTracks(backIv, gap)) {
-    w.yh = cardsBottom + (t + 1) * LANE * scale;
-    lanes.feedback = Math.max(lanes.feedback, t + 1);
+  // The branches of one net share a lane (a tree, never parallel lines a hair apart): one interval per source, over all its branches.
+  const bySource = (ivs) => {
+    const groups = new Map();
+    for (const iv of ivs) {
+      const g = groups.get(iv.key.srcKey);
+      if (g) {
+        g.lo = Math.min(g.lo, iv.lo);
+        g.hi = Math.max(g.hi, iv.hi);
+        g.wires.push(iv.key);
+      } else groups.set(iv.key.srcKey, { key: iv.key.srcKey, lo: iv.lo, hi: iv.hi, wires: [iv.key] });
+    }
+    return [...groups.values()];
+  };
+  for (const [groups, below] of [[bySource(overIv), false], [bySource(backIv), true]]) {
+    const tracks = assignTracks(groups, gap);
+    for (const g of groups) {
+      const t = tracks.get(g.key);
+      for (const w of g.wires) w.yh = below ? cardsBottom + (t + 1) * LANE * scale : cardsTop - (t + 1) * LANE * scale;
+      if (below) lanes.feedback = Math.max(lanes.feedback, t + 1);
+      else lanes.over = Math.max(lanes.over, t + 1);
+    }
   }
   // The channels' tracks: one per net, over the heights it spans there; the lowest-starting nearest its column (as the Wiring's).
   const spans = new Map();
@@ -406,16 +421,25 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
       junctions: [],
     };
   });
-  // A fan-out's branches: a dot where a branch leaves its trunk anywhere but at the trunk's ends.
+  // A fan-out's branches: a dot where a branch turns off another branch of its net in the middle of one of its straight runs (a T), never at a corner or an end.
   const fan = new Map();
   for (const w of out) fan.set(w.srcKey, (fan.get(w.srcKey) ?? 0) + 1);
+  const dots = new Set();
+  const within = (p, a, b) => {
+    const eps = 1e-6;
+    if (Math.abs(a.x - b.x) < eps && Math.abs(p.x - a.x) < eps) return p.y > Math.min(a.y, b.y) + eps && p.y < Math.max(a.y, b.y) - eps;
+    if (Math.abs(a.y - b.y) < eps && Math.abs(p.y - a.y) < eps) return p.x > Math.min(a.x, b.x) + eps && p.x < Math.max(a.x, b.x) - eps;
+    return false;
+  };
   for (const w of out) {
     if (fan.get(w.srcKey) < 2) continue;
-    const ys = out.filter((o) => o.srcKey === w.srcKey).flatMap((o) => o.points.filter((p) => Math.abs(p.x - w.track) < 1e-6).map((p) => p.y));
-    const lo = Math.min(...ys);
-    const hi = Math.max(...ys);
-    const turn = w.points.find((p, i) => i > 0 && Math.abs(p.x - w.track) < 1e-6 && Math.abs(p.y - w.points[0].y) > 1e-6);
-    if (turn && turn.y > lo + 1e-6 && turn.y < hi - 1e-6) w.junctions.push({ x: turn.x, y: turn.y });
+    const others = out.filter((o) => o !== w && o.srcKey === w.srcKey);
+    for (const p of w.points.slice(1, -1)) {
+      const id = `${p.x.toFixed(6)} ${p.y.toFixed(6)}`;
+      if (dots.has(id) || !others.some((o) => o.points.slice(1).some((q, i) => within(p, o.points[i], q)))) continue;
+      dots.add(id);
+      w.junctions.push({ x: p.x, y: p.y });
+    }
   }
   for (const w of out) {
     delete w.srcKey;
