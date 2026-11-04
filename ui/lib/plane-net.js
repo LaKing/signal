@@ -14,9 +14,10 @@ import { fullAddress, norm, wireKey } from './plane-engine-edit.js';
 
 /**
  * The links of `graph` (`{top: {instances, connections}, composites}`):
- * `Map(address → [{to, key}])` both ways, `key` the connection's `wireKey`
+ * `Map(address → [{to, key, out}])` both ways, `key` the connection's `wireKey`
  * as the Engine draws it (an export's from the chip's pin to its target
- * inside, or from its source inside to the chip's pin). Built once per graph.
+ * inside, or from its source inside to the chip's pin), `out` whether the
+ * signal flows from the address to `to`. Built once per graph.
  */
 export function netLinks(graph) {
   if (!graph) return new Map();
@@ -24,9 +25,9 @@ export function netLinks(graph) {
   const links = new Map();
   const link = (a, b) => {
     const key = wireKey(a, b);
-    for (const [x, y] of [[a, b], [b, a]]) {
+    for (const [x, y, out] of [[a, b, true], [b, a, false]]) {
       if (!links.has(x)) links.set(x, []);
-      links.get(x).push({ to: y, key });
+      links.get(x).push({ to: y, key, out });
     }
   };
   for (const c of graph.top?.connections ?? []) link(norm(c.from), norm(c.to));
@@ -88,7 +89,7 @@ export function selectionSeeds(selection) {
     return [];
   }
   if (selection.kind === 'cable' || selection.kind === 'auto') return [selection.from, selection.to];
-  if (selection.kind === 'port' || selection.kind === 'leg') return [selection.address];
+  if (selection.kind === 'port' || selection.kind === 'leg' || selection.kind === 'address') return [selection.address];
   return [];
 }
 
@@ -96,4 +97,24 @@ export function selectionSeeds(selection) {
 export function selectionNet(graph, selection) {
   const seeds = selectionSeeds(selection).filter(Boolean);
   return seeds.length && graph ? netOf(graph, seeds) : null;
+}
+
+/**
+ * Each port of `net` by its part in it (`graph`'s links): `source` where
+ * the signal only leaves (an instance's output), `target` where it only
+ * arrives (an instance's input or parameter), `through` where it does both
+ * (a chip's pin, an export on its way in or out). `{sources, targets,
+ * through}`, each sorted.
+ */
+export function netRoles(graph, net) {
+  const links = netLinks(graph);
+  const roles = { sources: [], targets: [], through: [] };
+  for (const a of net?.addresses ?? []) {
+    const own = links.get(a) ?? [];
+    const out = own.some((l) => l.out);
+    const into = own.some((l) => !l.out);
+    (out && into ? roles.through : out ? roles.sources : roles.targets).push(a);
+  }
+  for (const list of Object.values(roles)) list.sort();
+  return roles;
 }

@@ -44,7 +44,10 @@ test('nothing inside a tab or a panel scrolls on its own', () => {
   // layout is the panel editor in place over the whole plane (no frame of
   // the panel's page, which would hold the session token), and the panel
   // it edits scrolls inside it as the panel's own page would.
-  const allowed = { 'schematic.js': ['.side-body'], 'module-browser.js': ['.browser .tree', '.browser .detail'], 'slot-dialogs.js': ['.slot-dialog .body'], 'plane.js': ['.editor-body'] };
+  // A fifth (the owner's, 2026-11-04): the Deck's sidebar, the schematic
+  // sidebar's successor, a column at the plane's left whose body scrolls
+  // inside it; the plane itself never scrolls.
+  const allowed = { 'schematic.js': ['.side-body'], 'module-browser.js': ['.browser .tree', '.browser .detail'], 'slot-dialogs.js': ['.slot-dialog .body'], 'plane.js': ['.editor-body', '.side'] };
   for (const file of controls) {
     const text = read(`controls/${file}`);
     if (!allowed[file]) assert.deepEqual([...text.matchAll(SCROLLS)], [], file);

@@ -89,6 +89,7 @@ import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
 import { ENGINE_SELECTABLE, addOps, bindKey, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { selectionNet } from '../lib/plane-net.js';
+import { planeSidebar } from '../lib/plane-sidebar.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
@@ -353,6 +354,23 @@ svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, 
 .chooser button { text-align: left; background: none; border: none; color: var(--signal-fg, #d6dbe4); padding: 3px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer; }
 .chooser button:hover, .chooser button:focus-visible { background: #2c3340; outline: none; }
 .notes p.said { color: var(--signal-fg, #d6dbe4); }
+/* The sidebar (2026-11-04): a column at the left while something is selected, its content scrolling inside it. */
+.side { position: absolute; left: 0; top: 0; bottom: 0; width: 280px; box-sizing: border-box; overflow: auto; padding: 10px 12px 16px;
+  background: var(--signal-board-bg, #0e1014); border-right: 1px solid #3a414d; overscroll-behavior: contain; z-index: 3; }
+.side[hidden] { display: none; }
+.side header { display: flex; align-items: flex-start; gap: 8px; }
+.side h2 { flex: 1; margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.side h3 { margin: 14px 0 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); }
+.side-sub { margin: 4px 0 0; color: var(--signal-muted, #8a93a3); overflow-wrap: anywhere; }
+.side dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; margin: 10px 0 0; }
+.side dt { color: var(--signal-muted, #8a93a3); } .side dd { margin: 0; overflow-wrap: anywhere; }
+.side-close { background: none; border: none; color: var(--signal-muted, #8a93a3); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.side-close:hover { color: var(--signal-fg, #d6dbe4); }
+.side-link { display: block; width: 100%; text-align: left; background: none; border: none; border-radius: 3px; padding: 2px 4px; color: var(--signal-accent, #4fc3f7);
+  font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.side-link:hover, .side-link:focus-visible { background: #1c2129; outline: none; }
+.side-action { margin-top: 14px; background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; color: var(--signal-fg, #d6dbe4);
+  font: inherit; padding: 4px 10px; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) { .world { transition: none; } }
 /* The schematic's Add module browser, for Add module… at the Engine (its preview frames plain, no dashed line). */
 ${BROWSER_CSS}
@@ -510,7 +528,9 @@ export class SignalPlane extends HTMLElement {
     this.world.append(this.setupSvg);
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
-    this.stage.append(this.world, this.bar, this.notes);
+    // The sidebar: what is selected and its net, while something is (`renderSide`).
+    this.side = html('aside', { className: 'side', hidden: true });
+    this.stage.append(this.world, this.bar, this.notes, this.side);
     if (this.barDock) this.dockBar(this.barDock);
     root.append(html('style', { textContent: CSS }), this.stage);
     // The wheel: the plane's own on every layer (captured before a knob or a fader sees it when the layer is chosen alone).
@@ -2646,9 +2666,10 @@ export class SignalPlane extends HTMLElement {
     attempt();
   }
 
-  /** Whether `event` is on the Edit layout over the plane (the plane underneath takes nothing of it). */
+  /** Whether `event` is on the Edit layout or the sidebar over the plane (the plane underneath takes nothing of it). */
   overEditor(event) {
-    return Boolean(this.editing && event.composedPath?.().includes(this.editing.overlay));
+    const path = event.composedPath?.() ?? [];
+    return Boolean((this.editing && path.includes(this.editing.overlay)) || (this.side && !this.side.hidden && path.includes(this.side)));
   }
 
   /** Closes Edit layout (its editor left first; what it wrote is written). */
@@ -3281,11 +3302,50 @@ export class SignalPlane extends HTMLElement {
     this.markSelection();
   }
 
+  /** The sidebar drawn for the selection (ui/lib/plane-sidebar.js): hidden while nothing is selected. */
+  renderSide() {
+    if (!this.side) return;
+    const model = planeSidebar(this.selection, { graph: this.graph, net: this.selNet });
+    this.side.hidden = !model;
+    if (!model) return this.side.replaceChildren();
+    const close = html('button', { className: 'side-close', type: 'button', title: 'Close (Escape)', textContent: '×' });
+    close.addEventListener('click', () => this.select(null));
+    const head = html('header');
+    head.append(html('h2', { textContent: model.title }), close);
+    const parts = [head];
+    if (model.subtitle) parts.push(html('p', { className: 'side-sub', textContent: model.subtitle }));
+    if (model.rows.length) {
+      const dl = html('dl');
+      for (const r of model.rows) dl.append(html('dt', { textContent: r.label }), html('dd', { textContent: r.value }));
+      parts.push(dl);
+    }
+    for (const section of model.sections) {
+      const box = html('section');
+      box.append(html('h3', { textContent: `${section.title} · ${section.items.length + section.more}` }));
+      for (const item of section.items) {
+        const link = html('button', { className: 'side-link', type: 'button', textContent: item.label, title: `Select ${item.address}` });
+        link.addEventListener('click', () => this.select({ kind: 'address', address: item.address }));
+        box.append(link);
+      }
+      if (section.more) box.append(html('p', { className: 'side-sub', textContent: `and ${section.more} more` }));
+      parts.push(box);
+    }
+    if (model.copy.length) {
+      const copy = html('button', { className: 'side-action', type: 'button', textContent: model.copy.length === 1 ? 'Copy address' : `Copy ${model.copy.length} addresses` });
+      copy.addEventListener('click', () => {
+        navigator.clipboard?.writeText(model.copy.join('\n')).then(() => this.say('Copied'), () => this.say('The clipboard took nothing'));
+      });
+      parts.push(copy);
+    }
+    this.side.replaceChildren(...parts);
+  }
+
   markSelection() {
     // The Engine's elements by key (an inside built later marks itself as it is drawn, `keyed`).
     // The selection's whole net (ui/lib/plane-net.js): every level and layer marks its part of it.
     this.selNet = selectionNet(this.graph, this.selection);
     this.selKeys = selectionKeys(this.selection, this.selNet);
+    this.renderSide();
     for (const s of this.stacks.values()) {
       for (const layer of [s.wiringSvg, s.controlSvg, s.engineSvg]) {
         if (this.selNet) layer?.setAttribute('data-net', '');
