@@ -82,9 +82,12 @@ const OWN_PORT = /^\/?[^/.]+\.[^/.]+$/;
  *     of `adjacent`, `row`, `over`, `feedback`, `edge`;
  *   - an edge pin `{id, side, address, x, y}`, where a wire crosses the
  *     frame;
- *   - a bind `{id, address, export, kind: 'control', points, junctions}`:
- *     down from its `x`, along its lane above the cards (`bindLanes`),
- *     down the channel left of its card's column into its pin.
+ *   - a bind `{id, address, export, kind: 'control', points, tag, route,
+ *     junctions}`: `points` its tag's stub into its pin, `tag` `{x, y,
+ *     text}` (the parameter's name, right-aligned at `x`, in room the
+ *     channel left of the card's column keeps clear), `route` its whole
+ *     way, drawn when selected: down from its `x`, along one lane above
+ *     the cards, down beside the tags into its pin.
  */
 export function layLevel(args) {
   // Laid out with room for every lane a wire might need, then again with the lanes the wires took (when they still fit).
@@ -195,17 +198,21 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
       else backs++;
     }
   }
-  // A leg comes down the channel left of its card's column.
-  for (const l of legs) net(columnOf.get(nodeOf(l.address)) - 1, l.key);
+  // A leg ends in a tag beside its pin, the parameter's name, in the channel left of the card's column: room kept there by the card, clear of the tracks.
+  const tagW = new Map();
+  for (const l of legs) {
+    const ch = columnOf.get(nodeOf(l.address)) - 1;
+    tagW.set(ch, Math.max(tagW.get(ch) ?? 0, TAG_STUB + LABEL_PAD + LABEL_CHAR * String(l.export ?? '').length));
+  }
   const chW = (ch) => {
     const tracks = nets.get(ch)?.size ?? 0;
     const least = ch === -1 || ch === n - 1 ? EDGE_MIN : CHANNEL_MIN;
-    return Math.max(least, 2 * CHANNEL_PAD + tracks * TRACK);
+    return Math.max(least, 2 * CHANNEL_PAD + tracks * TRACK + (tagW.get(ch) ?? 0));
   };
   const channelsW = Array.from({ length: n + 1 }, (_, k) => chW(k - 1));
   const naturalW = colW.reduce((s, x) => s + x, 0) + channelsW.reduce((s, x) => s + x, 0);
   const bandH = Math.max(HEADER, ...colH);
-  const reserved = reserve ?? { over: overs, feedback: backs, binds: legs.length };
+  const reserved = reserve ?? { over: overs, feedback: backs, binds: legs.length ? 1 : 0 };
   const naturalH = bandH + (reserved.binds + reserved.over + reserved.feedback) * LANE + (reserved.binds ? LANE : 0) + (reserved.over ? LANE : 0) + (reserved.feedback ? LANE : 0);
   const scale = n ? Math.min(MAX_SCALE, area.w / Math.max(1, naturalW), area.h / Math.max(1, naturalH)) : 1;
   // The width left over spreads the columns: each channel takes a share.
@@ -378,23 +385,16 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
       span(w.b - 1, w.dstKey, w.yh, w.Q.y);
     }
   }
-  // The control signal's legs: down from the frame's top, along a lane above the cards (nested, `bindLanes`), down the channel left of the card into its pin.
-  for (const l of legs) {
-    l.ch = columnOf.get(nodeOf(l.address)) - 1;
-    l.Q = pinOf.get(`in ${l.address}`) ?? pinOf.get(`in ${addressOf(l.address, byName)}`);
-  }
-  const drawnLegs = legs.filter((l) => l.Q);
-  const laneOf = bindLanes(drawnLegs.map((l) => ({ c: l.x, p: mid(l.ch) })), gap);
-  drawnLegs.forEach((l, i) => {
-    l.yh = area.y + (laneOf[i] + 1) * LANE * scale;
-    lanes.binds = Math.max(lanes.binds, laneOf[i] + 1);
-    span(l.ch, l.key, l.yh, l.Q.y);
-  });
+  // The control signal's legs (the owner's, 2026-11-04: a tag at each target, the whole way only when selected): the tag's stub
+  // into its pin; the way from the frame's top along one lane above the cards, down by the tags' room, drawn when selected.
+  const drawnLegs = legs.map((l) => ({ ...l, ch: columnOf.get(nodeOf(l.address)) - 1, Q: pinOf.get(`in ${l.address}`) ?? pinOf.get(`in ${addressOf(l.address, byName)}`) })).filter((l) => l.Q);
+  if (drawnLegs.length) lanes.binds = 1;
   const trackX = new Map();
   for (const [ch, m] of spans) {
     const tracks = orderedTracks([...m.values()], (PAD * scale) / 2);
     const count = Math.max(1, ...[...tracks.values()].map((t) => t + 1));
-    const { x0, x1 } = chX.get(ch);
+    const { x0 } = chX.get(ch);
+    const x1 = chX.get(ch).x1 - (tagW.get(ch) ?? 0) * scale;
     const pitch = Math.min(TRACK * scale, (x1 - x0) / (count + 1));
     const centre = (x0 + x1) / 2;
     for (const [key, t] of tracks) trackX.set(`${ch} ${key}`, centre + (t - (count - 1) / 2) * pitch);
@@ -445,45 +445,22 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     delete w.srcKey;
     delete w.track;
   }
+  const laneY = area.y + LANE * scale;
   const legsOut = drawnLegs.map((l) => {
-    const xb = trackX.get(`${l.ch} ${l.key}`) ?? mid(l.ch);
-    return { id: `bind ${l.key}`, address: l.address, export: l.export ?? null, kind: 'control', points: simplify([{ x: l.x, y: bindY }, { x: l.x, y: l.yh }, { x: xb, y: l.yh }, { x: xb, y: l.Q.y }, { x: l.Q.x, y: l.Q.y }]), junctions: [] };
+    const stub = { x: l.Q.x - TAG_STUB * scale, y: l.Q.y };
+    const down = chX.get(l.ch).x1 - (tagW.get(l.ch) ?? 0) * scale;
+    return {
+      id: `bind ${l.key}`,
+      address: l.address,
+      export: l.export ?? null,
+      kind: 'control',
+      points: [stub, { x: l.Q.x, y: l.Q.y }],
+      tag: { x: stub.x - 2 * scale, y: l.Q.y, text: String(l.export ?? '') },
+      route: simplify([{ x: l.x, y: bindY }, { x: l.x, y: laneY }, { x: down, y: laneY }, { x: down, y: l.Q.y }, { x: l.Q.x, y: l.Q.y }]),
+      junctions: [],
+    };
   });
-  // A parameter on to several targets: a dot where a shallower leg turns off the deeper one's way down.
-  for (const b of legsOut) {
-    const turn = b.points[1];
-    const deeper = legsOut.find((o) => o !== b && o.points[0].x === b.points[0].x && o.points[1].y > turn.y + 1e-9);
-    if (deeper && !deeper.junctions.some((j) => j.y === turn.y)) deeper.junctions.push({ x: turn.x, y: turn.y });
-  }
   return { scale, cards, pins, wires: out, edges, lanes, reserved, binds: legsOut };
-}
-
-/**
- * The lanes of legs `[{c, p}]` (each down from `c` on a band's edge, along its lane, on at `p`; lane 0 nearest the edge),
- * nested so that legs need not cross: of two going right whose spans meet, the one from further right runs nearer the edge
- * (of two from one point, the one going further), mirrored for those going left; a leg takes the lane after the last of
- * those, and no lane holds two legs whose spans meet (with `gap`), so the lanes are as few as that allows (legs that never
- * meet share one). `[lane]`, in the legs' order.
- */
-export function bindLanes(legs, gap = 0) {
-  const lanes = new Array(legs.length).fill(0);
-  const all = legs.map((l, i) => ({ i, lo: Math.min(l.c, l.p), hi: Math.max(l.c, l.p), right: l.p >= l.c, c: l.c, p: l.p }));
-  const right = all.filter((l) => l.right).sort((a, b) => b.c - a.c || b.p - a.p || a.i - b.i);
-  const left = all.filter((l) => !l.right).sort((a, b) => a.c - b.c || a.p - b.p || a.i - b.i);
-  const meet = (a, b) => a.lo <= b.hi + gap && b.lo <= a.hi + gap;
-  const placed = [];
-  for (const list of [right, left]) {
-    const before = [];
-    for (const l of list) {
-      let lane = 0;
-      for (const o of before) if (meet(l, o)) lane = Math.max(lane, lanes[o.i] + 1);
-      while (placed.some((o) => lanes[o.i] === lane && meet(l, o))) lane++;
-      lanes[l.i] = lane;
-      before.push(l);
-      placed.push(l);
-    }
-  }
-  return lanes;
 }
 
 /**
@@ -634,6 +611,8 @@ const CHIP_DEPTH = 16;
 /** A pin label's width by its name's length, in the cards' units (the 9 px label at the pin ± 6). */
 const LABEL_CHAR = 5.2;
 const LABEL_PAD = 8;
+/** A control signal's tag: its stub into the pin (cards' units). */
+const TAG_STUB = 10;
 /** The most of a chip's body its pin labels keep clear on each side. */
 const LABEL_SHARE = 0.125;
 
@@ -663,7 +642,7 @@ export function insideOf({ graph, card, pins = [], bindPins = [], scale = 1 }) {
   const def = graph?.composites?.[card?.module];
   if (!def || !card.body) return null;
   const mine = pins.filter((p) => p.card === card.id);
-  // The control signal entering at the card's top (`bindLegs`' pins): each parameter on to its targets inside, wired as a signal is (`layLevel`'s `binds`): into a pin row of its own on the target's card, down the channel beside it.
+  // The control signal entering at the card's top (`bindLegs`' pins): each parameter on to its targets inside (`layLevel`'s `binds`): a pin row of its own on the target's card, a tag with the parameter's name beside it, the whole way drawn when selected.
   const sources = bindPins.filter((p) => p.card === card.id).flatMap((p) => (def.parameters?.find((x) => x.name === p.name)?.to ?? []).map((to) => ({ address: to, x: p.x, export: p.name })));
   const connections = [...(def.connections ?? [])];
   const edgeIns = new Map();

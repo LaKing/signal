@@ -331,7 +331,8 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 /* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
-.e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); } .e-pin.e-bind-pin, .e-pin.k-control.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
+.e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
+.e-bind.e-route:not(.selected) { display: none; } .e-bind-tag { fill: var(--signal-effective, #ffb74d); stroke: #1d232c; stroke-linejoin: round; paint-order: stroke; pointer-events: none; } .e-pin.e-bind-pin, .e-pin.k-control.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -343,7 +344,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-wire.selected { stroke-width: 4; filter: drop-shadow(0 0 3px currentColor); }
 /* A selected net followed (the owner's, 2026-11-04): everything else steps back, at every layer and depth. */
 svg[data-net] :is(.e-wire, .w-cable, .c-leg, .c-auto):not(.selected) { opacity: 0.18; }
-svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, .c-via, .w-junction, .e-junction):not(.selected) { opacity: 0.35; }
+svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, .c-via, .w-junction, .e-junction, .e-bind-tag):not(.selected) { opacity: 0.35; }
 .e-card.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .e-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .stage[data-engine-edit] .e-pin { cursor: crosshair; }
@@ -2065,11 +2066,21 @@ export class SignalPlane extends HTMLElement {
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
     }
     // Inside a package: the control signal, each bound parameter from the connector into its card (`bindsOf`).
+    // Inside a chip, a tag at each target, its parameter's name; its whole way from the chip's pin drawn only when selected.
+    const tags = svg('g', { class: 'e-bind-tags' });
     for (const b of laid.binds ?? []) {
-      const path = this.keyed(svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) }), bindKey(full(b.address)), keyed);
-      path.append(svg('title', {}, top ? `${b.address}: its control at the Control layer, through the package’s connector` : `${full(b.address)}: ${parent.card.name}’s parameter ${b.export ?? ''}, set by its control`));
+      const key = bindKey(full(b.address));
+      const title = top ? `${b.address}: its control at the Control layer, through the package’s connector` : `${full(b.address)}: ${parent.card.name}’s parameter ${b.export ?? ''} (${parent.address}.${b.export ?? ''}), set by its control; select it to see its way`;
+      if (b.route) wires.append(this.keyed(svg('path', { class: 'e-wire e-bind e-route', d: polylinePath(b.route, 6 * k, CORNERS), ...line(2) }), key, keyed));
+      const path = this.keyed(svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) }), key, keyed);
+      path.append(svg('title', {}, title));
       wires.append(path);
       for (const j of b.junctions ?? []) wires.append(svg('circle', { class: 'e-junction e-bind-dot', cx: j.x, cy: j.y, r: 2.5 * k }));
+      if (b.tag) {
+        const text = this.keyed(svg('text', { class: 'e-bind-tag', x: b.tag.x, y: b.tag.y + 3 * k, 'font-size': 9 * k, 'text-anchor': 'end', 'stroke-width': 2.5 * k }, b.tag.text), key, keyed);
+        text.append(svg('title', {}, title));
+        tags.append(text);
+      }
     }
     g.append(wires);
     const composites = new Map();
@@ -2112,6 +2123,7 @@ export class SignalPlane extends HTMLElement {
       g.append(dot);
     }
     for (const chip of composites.values()) g.append(chip.labels);
+    g.append(tags);
   }
 
   /** An Engine element marked with `key` (what a selection of it marks, `selectionKeys`), kept in `list`, selected now if it is. */

@@ -16,7 +16,7 @@ import { assignInstruments, edgePins, stackMembers } from './plane-instruments.j
 import { pinPlaces, stackLayout } from './plane-layout.js';
 import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { engineOf } from './plane-control.js';
-import { REVEAL, bindBand, bindLanes, bindsOf, chipPath, engineLayout, insideOf, layLevel, locateAddress, orderedTracks, revealShare } from './plane-engine.js';
+import { REVEAL, bindBand, bindsOf, chipPath, engineLayout, insideOf, layLevel, locateAddress, orderedTracks, revealShare } from './plane-engine.js';
 import { PU } from './plate.js';
 import { packageOf } from './plane-package.js';
 
@@ -386,43 +386,33 @@ test('the control signal into the engine: each bound parameter from the connecto
   assert.deepEqual(bindsOf({ ...pkg, params: [] }, laid), { binds: [], bindPins: [] });
 });
 
-test('inside a composite the control signal goes on: from the card’s top along a lane, down the channel beside its target, into a pin row of its own', () => {
+test('inside a composite the control signal goes on: a tag with the parameter’s name at each target’s pin row, its whole way kept for a selection', () => {
   const lag = (name) => ({ name, module: 'std.lag', ports: [{ name: 'in', direction: 'in', shape: 'signal' }, { name: 'out', direction: 'out', shape: 'signal' }], parameters: [{ name: 'cut' }, { name: 'q' }] });
   const graph = { composites: { voice: { instances: [lag('f'), lag('g')], connections: [{ from: 'f.out', to: 'g.in' }], parameters: [{ name: 'cutoff', to: ['f.cut', 'g.cut'] }, { name: 'reso', to: ['g.q'] }], inputs: [], outputs: [] } } };
   const card = { id: 'v', name: 'v', module: 'voice', x: 0, y: 0, w: 400, h: 300, body: { x: 10, y: 40, w: 380, h: 250 } };
-  const laid = insideOf({ graph, card, bindPins: [{ card: 'v', name: 'cutoff', x: 200, y: 0 }, { card: 'v', name: 'reso', x: 300, y: 0 }] });
+  const from = { cutoff: 200, reso: 300 };
+  const laid = insideOf({ graph, card, bindPins: Object.entries(from).map(([name, x]) => ({ card: 'v', name, x, y: 0 })) });
   assert.deepEqual(laid.binds.map((b) => [b.address, b.export]).sort(), [['f.cut', 'cutoff'], ['g.cut', 'cutoff'], ['g.q', 'reso']]);
   const cardsTop = Math.min(...laid.cards.map((c) => c.y));
+  const over = (p, q, o) => p.x === q.x && p.x > o.x && p.x < o.x + o.w && Math.max(p.y, q.y) > o.y && Math.min(p.y, q.y) < o.y + o.h;
   for (const b of laid.binds) {
     const pin = laid.pins.find((p) => p.side === 'in' && p.address === b.address);
-    assert.ok(pin?.parameter && pin.connected, `${b.address}: a pin row of its own`);
-    assert.deepEqual(b.points.at(-1), { x: pin.x, y: pin.y }, 'into its pin, from the left');
-    assert.equal(b.points[0].y, card.body.y, 'from the body’s top');
-    assert.ok(b.points[1].y < cardsTop, 'its lane above the cards');
+    assert.ok(pin?.parameter && pin.connected && pin.bind, `${b.address}: a pin row of its own, the control signal’s`);
+    assert.deepEqual(b.points.at(-1), { x: pin.x, y: pin.y }, 'the stub into its pin, from the left');
     const c = laid.cards.find((x) => x.name === b.address[0]);
-    const down = b.points.at(-2);
-    assert.ok(down.x < c.x && down.y === pin.y, 'down the channel left of its card');
-    for (const o of laid.cards) {
-      // Never over a card: each vertical outside every card.
-      for (let i = 1; i < b.points.length - 1; i++) {
-        const [p, q] = [b.points[i - 1], b.points[i]];
-        if (p.x !== q.x) continue;
-        assert.ok(!(p.x > o.x && p.x < o.x + o.w && Math.max(p.y, q.y) > o.y && Math.min(p.y, q.y) < o.y + o.h), `${b.address} runs over ${o.name}`);
-      }
+    assert.ok(b.points[0].x < pin.x && b.tag.x < b.points[0].x && b.tag.y === pin.y && b.tag.text === b.export, 'the tag left of the stub, the parameter’s name');
+    // The tag clear of the channel's tracks: every wire's vertical left of the card runs left of the tag's text.
+    const room = 5.2 * b.tag.text.length * laid.scale;
+    for (const w of laid.wires) for (let i = 1; i < w.points.length; i++) {
+      const [p, q] = [w.points[i - 1], w.points[i]];
+      if (p.x === q.x && p.x < c.x) assert.ok(p.x < b.tag.x - room, `${w.from} → ${w.to} runs through the tag ${b.tag.text}`);
     }
+    assert.deepEqual(b.route[0], { x: from[b.export], y: card.body.y }, 'its way from the chip’s pin, at the body’s top');
+    assert.ok(b.route[1].y < cardsTop, 'along a lane above the cards');
+    assert.deepEqual(b.route.at(-1), { x: pin.x, y: pin.y });
+    for (const o of laid.cards) for (let i = 1; i < b.route.length; i++) assert.ok(!over(b.route[i - 1], b.route[i], o), `${b.address} runs over ${o.name}`);
   }
-  const fan = laid.binds.filter((b) => b.export === 'cutoff');
-  assert.equal(fan.flatMap((b) => b.junctions).length, 1, 'one parameter fanning out: a dot where it branches');
   assert.deepEqual(laid.bindPins, []);
-});
-
-test('the control signal’s lanes: nested so that legs need not cross, as few as that allows', () => {
-  // Going right: the one from further right nearer the edge; legs that never meet share a lane; one going left never shares a lane with one it meets.
-  assert.deepEqual(bindLanes([{ c: 0, p: 100 }, { c: 50, p: 150 }]), [1, 0]);
-  assert.deepEqual(bindLanes([{ c: 0, p: 10 }, { c: 50, p: 60 }]), [0, 0]);
-  assert.deepEqual(bindLanes([{ c: 100, p: 0 }, { c: 150, p: 50 }]), [0, 1]);
-  assert.deepEqual(bindLanes([{ c: 0, p: 100 }, { c: 100, p: 0 }]), [0, 1]);
-  assert.deepEqual(bindLanes([{ c: 0, p: 50 }, { c: 0, p: 100 }]), [1, 0], 'from one point: the one going further nearer the edge');
 });
 
 test('an address located at the Engine: its card, laid inside its chips as they are drawn', () => {
