@@ -7,8 +7,8 @@
 // (`packageOf`), at the same place with the same signal pins as the Wiring
 // and Engine layers draw it; and on it:
 //   - **binding legs** (the "factory routing"): each bound control to its
-//     parameter's pin on the cube's connector, the legs run as a ribbon in
-//     a band under the controls, nested so that no two cross (ADR 0047
+//     parameter's pin on the cube's connector, the legs run bare (no ribbon
+//     box) in a band under the controls, nested so that no two cross (ADR 0047
 //     §8b); a reader's leg (a meter, a scope) comes out of the cube; a bind
 //     outside the engine (a role endpoint's `gain`) leaves the instrument
 //     at its right edge;

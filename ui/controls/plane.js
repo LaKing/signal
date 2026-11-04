@@ -274,6 +274,9 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .pkg-top { fill: #2d3440; pointer-events: none; }
 .pkg-title { fill: var(--signal-fg, #d6dbe4); font-weight: 600; letter-spacing: 0.08em; pointer-events: none; }
 .pkg-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
+/* Every chip's pin at every layer (the owner's, 2026-11-04): a connected one filled in its kind's colour, a free one a ring round a black hole. */
+.pkg-pin.k-audio.connected, .e-pin.k-audio.connected { fill: var(--signal-accent, #4fc3f7); } .pkg-pin.k-control.connected, .e-pin.k-control.connected { fill: #b39ddb; }
+.pkg-pin.k-events.connected, .e-pin.k-events.connected { fill: var(--signal-meter-rms, #3ecf8e); } .pkg-pin.k-vector.connected, .e-pin.k-vector.connected { fill: var(--signal-effective, #ffb74d); }
 /* Hover titles where nothing lies under it: at the Engine its body and pins, at the Wiring its pins (at Control a front panel's piano roll may lie under it). */
 .pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin { pointer-events: all; }
 .pkg-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 4; }
@@ -296,15 +299,13 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .w-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .w-junction.k-control { fill: #b39ddb; } .w-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .w-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .c-sheet { fill: #0f1d17; stroke: #24412f; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .c-footprint { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 7%, #13241c); stroke: none; }
-.c-ribbon { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 12%, transparent); stroke: color-mix(in srgb, var(--signal-effective, #ffb74d) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.c-ribbon-label { fill: var(--signal-effective, #ffb74d); font-size: 9px; font-weight: 600; }
 .c-leg { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.45; color: var(--signal-effective, #ffb74d); }
 .c-leg.reads { stroke: var(--signal-meter-rms, #3ecf8e); }
 .c-via { fill: var(--signal-effective, #ffb74d); opacity: 0.6; }
 .c-via.selected, .c-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .c-auto { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .c-auto.inner { stroke-width: 1.75; opacity: 0.85; }
-.c-pin { fill: var(--signal-effective, #ffb74d); }
+.c-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .c-auto-pin { fill: #b39ddb; stroke: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .c-auto-label { fill: var(--signal-muted, #8a93a3); font-size: 9px; }
 .c-edge { fill: #b39ddb; stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
@@ -323,8 +324,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-wire { pointer-events: stroke; }
 .e-name { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
 .e-module, .e-pin-label { fill: var(--signal-muted, #8a93a3); }
-.e-pin { fill: #2a2f38; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.e-pin.k-audio.connected { fill: var(--signal-accent, #4fc3f7); } .e-pin.k-control.connected { fill: #b39ddb; } .e-pin.k-events.connected { fill: var(--signal-meter-rms, #3ecf8e); } .e-pin.k-vector.connected { fill: var(--signal-effective, #ffb74d); }
+.e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
@@ -1560,7 +1560,7 @@ export class SignalPlane extends HTMLElement {
     const radius = Math.min(5, pkg.pitch * 0.38);
     const small = pkg.pitch < 20 ? { style: `font-size: ${(pkg.pitch * 0.7).toFixed(2)}px` } : {};
     for (const p of [...pkg.ins, ...pkg.outs]) {
-      const dot = svg('circle', { class: `pkg-pin k-${p.kind}`, cx: p.x, cy: p.y, r: +radius.toFixed(2), 'data-id': p.id });
+      const dot = svg('circle', { class: `pkg-pin k-${p.kind}${p.connected === false ? '' : ' connected'}`, cx: p.x, cy: p.y, r: +radius.toFixed(2), 'data-id': p.id });
       dot.append(svg('title', {}, `${p.address} (${p.kind} ${p.side === 'in' ? 'input' : 'output'}): a pin of ${pkg.title}’s engine`));
       pinsGroup.append(dot);
       pins.set(p.id, dot);
@@ -1786,15 +1786,7 @@ export class SignalPlane extends HTMLElement {
       if (!legged.has(c.id) || !c.rect) continue;
       root.append(svg('rect', { class: 'c-footprint', x: c.rect.x - 3, y: c.rect.y - 3, width: c.rect.w + 6, height: c.rect.h + 6, rx: 7 }));
     }
-    // The legs' band: a ribbon under the lanes, labelled once.
-    if (layout.legs.length >= 3) {
-      const band = layout.band;
-      const xs = layout.legs.flatMap((l) => l.points.map((p) => p.x));
-      const x0 = Math.min(...xs);
-      const x1 = Math.max(...xs);
-      root.append(svg('rect', { class: 'c-ribbon', x: x0 - 4, y: band.y + 2, width: x1 - x0 + 8, height: band.h - 4, rx: 3 }));
-      root.append(svg('text', { class: 'c-ribbon-label', x: x0, y: band.y - 2 }, `params ×${layout.legs.length}`));
-    }
+    // The legs run bare in their band, no ribbon box over them (the owner's, 2026-11-04).
     for (const l of layout.legs) {
       const path = svg('path', { class: `c-leg${l.reads ? ' reads' : ''}`, d: polylinePath(l.points, 3, CORNERS) });
       path.append(svg('title', {}, `${control.controls.find((c) => c.id === l.control)?.label || l.address} ⇢ ${l.address}`));
@@ -1821,7 +1813,7 @@ export class SignalPlane extends HTMLElement {
     elements.set('cube', cube);
     items.push({ kind: 'cube', id: 'cube', x: c.x, y: c.y, w: c.w, h: c.h });
     for (const p of layout.pins) {
-      const dot = svg('rect', { class: 'c-pin', x: p.x - 3, y: p.y - 3, width: 6, height: 6 });
+      const dot = svg('circle', { class: 'c-pin', cx: p.x, cy: p.y, r: 3.5 });
       dot.append(svg('title', {}, p.address));
       root.append(dot);
       elements.set(p.id, dot);
