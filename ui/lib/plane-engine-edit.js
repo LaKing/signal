@@ -55,6 +55,11 @@ export function pinKey(side, address) {
   return `pin ${side} ${norm(address)}`;
 }
 
+/** The key of a leg of the control signal into parameter `address` (ui/lib/plane-engine.js `bindLegs`). */
+export function bindKey(address) {
+  return `bind ${norm(address)}`;
+}
+
 /**
  * The hit items of one laid-out level (`layLevel`'s, plane units, Stack-
  * relative), in the order they are drawn: wires, cards, pins, and at the
@@ -86,6 +91,11 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
     const name = card?.name ?? String(p.address).replace(/^\//, '').split('.')[0];
     const address = fullAddress(prefix, p.address);
     items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey(p.side, address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: name, port: p.name, side: p.side, parameter: p.parameter, address, local: `${name}.${p.name}`, cardChip: card ? chipOf(card) : null, module: card?.module ?? null });
+  }
+  // The control signal's legs into the parameters (`bindLegs`): each selectable, by the parameter it sets.
+  for (const b of laid?.binds ?? []) {
+    const address = fullAddress(prefix, b.address);
+    items.push({ kind: 'e-bind', id: `${scope}|${b.id}`, key: bindKey(address), points: b.points, entry, patchLevel: level, prefix, chip, address });
   }
   // Inside a chip the edge dots are its card's own pins (the level around's items).
   if (!prefix) {
@@ -122,7 +132,7 @@ export function engineTarget(items, p, k, { revealed = new Set(), rects = [] } =
 }
 
 /** The kinds a click selects (empty space clears). */
-export const ENGINE_SELECTABLE = new Set(['e-wire', 'e-card', 'e-pin', 'e-edge']);
+export const ENGINE_SELECTABLE = new Set(['e-wire', 'e-card', 'e-pin', 'e-edge', 'e-bind']);
 
 /** A hit as the selection keeps it (view state): the item, and the keys of what it marks. */
 export function engineSelection(hit) {
@@ -134,12 +144,16 @@ export function engineSelection(hit) {
  * The element keys a selection marks at the Engine: its own; a Wiring cable
  * the Engine's drawing of the same connection, a Wiring port both its pins.
  */
-export function selectionKeys(selection) {
-  if (!selection) return new Set();
-  if (selection.kind === 'engine') return new Set(selection.keys);
-  if (selection.kind === 'cable') return new Set([wireKey(selection.from, selection.to)]);
-  if (selection.kind === 'port') return new Set([pinKey('in', selection.address), pinKey('out', selection.address)]);
-  return new Set();
+export function selectionKeys(selection, net = null) {
+  const keys = new Set();
+  if (!selection) return keys;
+  if (selection.kind === 'engine') for (const key of selection.keys) keys.add(key);
+  if (selection.kind === 'cable') keys.add(wireKey(selection.from, selection.to));
+  if (selection.kind === 'port') keys.add(pinKey('in', selection.address)).add(pinKey('out', selection.address));
+  // Its whole net (ui/lib/plane-net.js `netOf`): the wires walked, the ports' pins, the control signal's legs into them.
+  for (const key of net?.wires ?? []) keys.add(key);
+  for (const address of net?.addresses ?? []) keys.add(pinKey('in', address)).add(pinKey('out', address)).add(bindKey(address));
+  return keys;
 }
 
 /** The subject of the app's Show in items (ui/app/lib/show-in.js `subjectOf`) for an Engine hit, or null. */

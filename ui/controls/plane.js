@@ -87,7 +87,8 @@ import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from 
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
-import { ENGINE_SELECTABLE, addOps, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
+import { ENGINE_SELECTABLE, addOps, bindKey, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
+import { selectionNet } from '../lib/plane-net.js';
 import { headPath } from '../lib/schematic-draw.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
@@ -339,6 +340,9 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-inside[data-faint] .e-card, .e-inside[data-faint] .e-pin, .e-inside[data-faint] .e-wire { pointer-events: none; }
 /* The Engine's selection (step 3), as Wiring's: a glow, the card's edge and a pin in the focus colour (inside a chip a line keeps its width at scale). */
 .e-wire.selected { stroke-width: 4; filter: drop-shadow(0 0 3px currentColor); }
+/* A selected net followed (the owner's, 2026-11-04): everything else steps back, at every layer and depth. */
+svg[data-net] :is(.e-wire, .w-cable, .c-leg, .c-auto):not(.selected) { opacity: 0.18; }
+svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, .c-via, .w-junction, .e-junction):not(.selected) { opacity: 0.35; }
 .e-card.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .e-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 .stage[data-engine-edit] .e-pin { cursor: crosshair; }
@@ -1560,6 +1564,8 @@ export class SignalPlane extends HTMLElement {
     const labels = svg('g', { class: 'pkg-labels' });
     const pinsGroup = svg('g', { class: 'pkg-pins' });
     const pins = new Map();
+    // Every pin by the port it stands for: a selection's net marks it (`markSelection`).
+    const marks = [];
     // A shrunk package's pins closer: their dots and labels in proportion (a full one's pitch is 24).
     const radius = Math.min(5, pkg.pitch * 0.38);
     const small = pkg.pitch < 20 ? { style: `font-size: ${(pkg.pitch * 0.7).toFixed(2)}px` } : {};
@@ -1568,6 +1574,8 @@ export class SignalPlane extends HTMLElement {
       dot.append(svg('title', {}, `${p.address} (${p.kind} ${p.side === 'in' ? 'input' : 'output'}): a pin of ${pkg.title}’s engine`));
       pinsGroup.append(dot);
       pins.set(p.id, dot);
+      dot.netAddress = p.address;
+      marks.push(dot);
       labels.append(svg('text', { class: 'pkg-pin-label', x: p.side === 'in' ? p.x + 2 * radius : p.x - 2 * radius, y: p.y + 4, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...small }, p.label));
     }
     // Its control pins at every layer (the owner's, 2026-11-04): the bound parameters on its connector, the automation
@@ -1578,15 +1586,19 @@ export class SignalPlane extends HTMLElement {
         const dot = svg('circle', { class: 'pkg-param', cx: p.x, cy: p.y, r: +small.toFixed(2) });
         dot.append(svg('title', {}, `${p.address}: a bound parameter of ${pkg.title}’s engine (its control at the Control layer)`));
         pinsGroup.append(dot);
+        Object.assign(dot, { netAddress: p.address, netOnly: true });
+        marks.push(dot);
       }
       for (const p of pkg.autos) {
         const dot = svg('circle', { class: 'pkg-auto', cx: p.x, cy: p.y, r: +(radius * 0.8).toFixed(2) });
         dot.append(svg('title', {}, `${p.address}: automation out of ${pkg.title}’s engine into a control`));
         pinsGroup.append(dot);
+        Object.assign(dot, { netAddress: p.address, netOnly: true });
+        marks.push(dot);
       }
     }
     g.append(labels, pinsGroup);
-    return { g, pins, labels, pinsGroup };
+    return { g, pins, labels, pinsGroup, marks };
   }
 
   drawWiring(s, wiring) {
@@ -1596,6 +1608,7 @@ export class SignalPlane extends HTMLElement {
     const elements = new Map();
     const items = [];
     s.wiringGroups = new Map();
+    s.netMarks = { ...s.netMarks, wiring: [] };
     // Bottom up: the instruments' faint boxes, the cables (a cable runs into its box to its pin), the packages over them.
     const boxes = svg('g', { class: 'w-boxes' });
     const packages = svg('g', { class: 'w-packages' });
@@ -1611,6 +1624,7 @@ export class SignalPlane extends HTMLElement {
         const drawn = this.drawPackage(pkg, 'wiring', `${pkg.title}’s audio engine: its cables end on its pins (the same at Control and the Engine; zoom in at the Engine to see its inside)`);
         front.append(drawn.g);
         for (const [id, element] of drawn.pins) pinElements.set(id, element);
+        s.netMarks.wiring.push(...drawn.marks);
       }
       s.wiringGroups.set(b.entry, [g, front]);
       boxes.append(g);
@@ -1772,8 +1786,10 @@ export class SignalPlane extends HTMLElement {
     s.controlItems = [];
     s.controlElements = new Map();
     s.readouts = new Map();
+    s.netMarks = { ...s.netMarks, control: [] };
     for (const control of controls) {
       const one = this.drawControl(control);
+      s.netMarks.control.push(...one.marks);
       root.append(one.root);
       for (const item of one.items) s.controlItems.push({ ...item, id: `${control.entry}|${item.id}`, entry: control.entry });
       for (const [id, element] of one.elements) s.controlElements.set(`${control.entry}|${id}`, element);
@@ -1827,7 +1843,8 @@ export class SignalPlane extends HTMLElement {
     }
     // The engine package: the one the Wiring and the Engine draw, at the same place with the same signal pins.
     const c = layout.cube;
-    const cube = this.drawPackage(c, 'control', `${c.title}’s engine: ${c.names.join(', ') || 'no instances'}. Its inside is the Engine layer’s.`).g;
+    const package_ = this.drawPackage(c, 'control', `${c.title}’s engine: ${c.names.join(', ') || 'no instances'}. Its inside is the Engine layer’s.`);
+    const cube = package_.g;
     root.append(cube);
     elements.set('cube', cube);
     items.push({ kind: 'cube', id: 'cube', x: c.x, y: c.y, w: c.w, h: c.h });
@@ -1864,7 +1881,7 @@ export class SignalPlane extends HTMLElement {
       const element = control.controls.find((x) => x.id === ro.control)?.element ?? null;
       readouts.set(ro.id, { ...ro, text, fill, element, shown: '' });
     }
-    return { root, items, elements, readouts };
+    return { root, items, elements, readouts, marks: package_.marks };
   }
 
   renderControl(fades) {
@@ -1962,6 +1979,7 @@ export class SignalPlane extends HTMLElement {
     s.insidesBuilt = new Set();
     // The elements a selection marks (`keyed`): the packages' pins here, each built inside's on its chip.
     s.engineKeyed = [];
+    s.netMarks = { ...s.netMarks, engine: [] };
     for (const e of engines.layouts) {
       const g = svg('g', { 'data-entry': e.entry });
       const r = e.rect;
@@ -1972,6 +1990,7 @@ export class SignalPlane extends HTMLElement {
         // The plain body, where the inside will show, fading out as it comes in.
         const plain = svg('rect', { class: 'e-plain', x: e.area.x, y: e.area.y, width: e.area.w, height: e.area.h, rx: 3 });
         drawn.g.insertBefore(plain, drawn.labels);
+        s.netMarks.engine.push(...drawn.marks);
         // A pin marks the connection crossing the instrument's edge there (the inside's edge, `engineItems`' e-edge).
         for (const p of e.edges) {
           const pin = drawn.pins.get(`port ${p.side} ${p.address}`);
@@ -2020,7 +2039,7 @@ export class SignalPlane extends HTMLElement {
     }
     // Inside a package: the control signal, each bound parameter from the connector into its card (`bindsOf`).
     for (const b of laid.binds ?? []) {
-      const path = svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) });
+      const path = this.keyed(svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) }), bindKey(full(b.address)), keyed);
       path.append(svg('title', {}, `${b.address}: its control at the Control layer, through the package’s connector`));
       wires.append(path);
     }
@@ -2060,7 +2079,7 @@ export class SignalPlane extends HTMLElement {
       else g.append(label);
     }
     for (const p of laid.bindPins ?? []) {
-      const dot = svg('circle', { class: 'e-pin e-bind-pin', cx: p.x, cy: p.y, r: 2.5 * k, ...line(1.5) });
+      const dot = this.keyed(svg('circle', { class: 'e-pin e-bind-pin', cx: p.x, cy: p.y, r: 2.5 * k, ...line(1.5) }), pinKey('in', full(p.address)), keyed);
       dot.append(svg('title', {}, `${full(p.address)} (a parameter its control sets)`));
       g.append(dot);
     }
@@ -3264,8 +3283,14 @@ export class SignalPlane extends HTMLElement {
 
   markSelection() {
     // The Engine's elements by key (an inside built later marks itself as it is drawn, `keyed`).
-    this.selKeys = selectionKeys(this.selection);
+    // The selection's whole net (ui/lib/plane-net.js): every level and layer marks its part of it.
+    this.selNet = selectionNet(this.graph, this.selection);
+    this.selKeys = selectionKeys(this.selection, this.selNet);
     for (const s of this.stacks.values()) {
+      for (const layer of [s.wiringSvg, s.controlSvg, s.engineSvg]) {
+        if (this.selNet) layer?.setAttribute('data-net', '');
+        else layer?.removeAttribute('data-net');
+      }
       for (const list of [s.engineKeyed, ...[...(s.insidesBuilt ?? [])].map((chip) => chip.keyed)]) {
         for (const element of list ?? []) element.classList?.toggle('selected', (element.planeKeys ?? [element.getAttribute('data-key')]).some((key) => this.selKeys.has(key)));
       }
@@ -3273,7 +3298,15 @@ export class SignalPlane extends HTMLElement {
     for (const s of this.stacks.values()) {
       for (const elements of [s.wiringElements, s.controlElements]) {
         if (!elements) continue;
-        for (const [id, element] of elements) element.classList?.toggle('selected', selectedId(this.selection, id, s));
+        for (const [id, element] of elements) element.classList?.toggle('selected', selectedId(this.selection, id, s, this.selNet));
+      }
+      // The packages' pins at every layer: a pin of the net marked; one only the net marks is let go otherwise.
+      for (const list of Object.values(s.netMarks ?? {})) {
+        for (const element of list) {
+          const on = Boolean(this.selNet?.addresses.has(norm(element.netAddress)));
+          if (on) element.classList?.add('selected');
+          else if (element.netOnly) element.classList?.remove('selected');
+        }
       }
     }
   }
@@ -3570,11 +3603,12 @@ function selectionOf(hit) {
   return { kind: hit.kind, id: hit.id };
 }
 
-/** Whether drawn item `id` of Stack `s` draws `selection`. */
-function selectedId(selection, id, s) {
+/** Whether drawn item `id` of Stack `s` draws `selection`, or a part of its net (`net`, ui/lib/plane-net.js `netOf`'s). */
+function selectedId(selection, id, s, net = null) {
   if (!selection) return false;
   const item = s.wiringItems?.find((i) => i.id === id) ?? s.controlItems?.find((i) => i.id === id);
   if (!item) return false;
+  if (net && inNet(item, net, s)) return true;
   switch (selection.kind) {
     case 'cable':
       return (item.kind === 'cable' && item.cable.from === selection.from && item.cable.to === selection.to) || (item.kind === 'auto' && item.auto.from === selection.from && item.auto.to === selection.to);
@@ -3588,6 +3622,29 @@ function selectedId(selection, id, s) {
       return item.kind === 'box' && item.entry === selection.entry;
     default:
       return item.id === selection.id;
+  }
+}
+
+/** Whether a Wiring or Control item is a part of `net`: a cable or an automation wire of it, a port, a leg, its via or its pin on it. */
+function inNet(item, net, s) {
+  const has = (address) => Boolean(address) && net.addresses.has(norm(address));
+  switch (item.kind) {
+    case 'cable':
+      return net.wires.has(wireKey(item.cable.from, item.cable.to)) || (has(item.cable.from) && has(item.cable.to));
+    case 'auto':
+      return has(item.auto.from) || has(item.auto.to);
+    case 'port':
+      return has(item.port.address);
+    case 'leg':
+      return has(item.leg.address);
+    case 'param':
+      return has(item.address);
+    case 'via':
+      return Boolean(s.controlItems?.some((i) => i.kind === 'leg' && i.entry === item.entry && i.leg.control === item.control && has(i.leg.address)));
+    case 'auto-pin':
+      return has(item.pin.address);
+    default:
+      return false;
   }
 }
 

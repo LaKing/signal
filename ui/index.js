@@ -117,6 +117,7 @@ import './lib/plane-control.test.js';
 import './lib/plane-engine.test.js';
 import './lib/plane-engine-edit.test.js';
 import './lib/plane-package.test.js';
+import './lib/plane-net.test.js';
 import './lib/plane-hit.test.js';
 import './controls/off-stage.test.js';
 import './controls/sticky-drag.test.js';
