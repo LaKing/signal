@@ -34,6 +34,7 @@
 import { PU } from './plate.js';
 import { instanceOf, portOf } from './plane-instruments.js';
 import { assignTracks, portKind, simplify } from './plane-wiring.js';
+import { legLanes } from './plane-control.js';
 import { HEADER, ROW, PAD, GAP_Y, layout as schematicLayout } from './schematic-layout.js';
 
 /** A card's corner radius and its header band's height, in the cards' own units (the schematic's). */
@@ -452,13 +453,63 @@ function kindOf(c, portAt) {
  */
 export function engineLayout({ entry, rect, pkg = null, names = [], graph, title = '' }) {
   const frame = pkg ? { x: pkg.x, y: pkg.y, w: pkg.w, h: pkg.h } : { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
-  const area = pkg ? pkg.body : { x: rect.x + INSET, y: rect.y + TITLE, w: Math.max(1, rect.w - 2 * INSET), h: Math.max(1, rect.h - TITLE - INSET) };
+  const body = pkg ? pkg.body : null;
+  // The control signal's band by the connector, kept clear of the cards (`bindsOf`).
+  const band = bindBand(pkg);
+  const area = body ? { x: body.x, y: band && pkg.connector === 'top' ? body.y + band : body.y, w: body.w, h: Math.max(1, body.h - band) } : { x: rect.x + INSET, y: rect.y + TITLE, w: Math.max(1, rect.w - 2 * INSET), h: Math.max(1, rect.h - TITLE - INSET) };
   const edgeIns = new Map((pkg?.ins ?? []).map((p) => [p.address, p.y]));
   const edgeOuts = new Map((pkg?.outs ?? []).map((p) => [p.address, p.y]));
   const level = graph?.top ?? { instances: [], connections: [] };
   const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, frame }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0 } };
   const card = { id: `package ${entry}`, package: true, composite: true, name: title, module: null, ...frame, body: area, reveal: packageReveal(area, laid.scale) };
-  return { entry, rect, pkg, frame, area, title, card, ...laid };
+  return { entry, rect, pkg, frame, area, title, card, ...laid, ...bindsOf(pkg, laid, band) };
+}
+
+/**
+ * The control signal into the engine (the owner's, 2026-11-04): each bound parameter on the package's connector (`pkg.params`)
+ * to a pin on its instance's card edge facing the connector, in the connector's order along each card, so that the legs into
+ * one card never cross. Returns `{binds, bindPins}`: a bind `{id, address, kind: 'control', points}` (connector pin, a turn
+ * by the connector, a turn by the card, the card's pin), a pin `{id, card, name, address, side, kind, parameter, connected,
+ * bind, x, y}`.
+ */
+export function bindsOf(pkg, laid, band = bindBand(pkg)) {
+  const binds = [];
+  const bindPins = [];
+  if (!pkg?.params?.length || !laid.cards.length) return { binds, bindPins };
+  const top = pkg.connector === 'top';
+  const k = laid.scale;
+  // Out of the connector below the title band (it passes under it), the lanes in the band between it and the cards.
+  const start = top ? pkg.body.y : pkg.y + pkg.h;
+  const gap = band / (pkg.params.length + 1);
+  const byCard = new Map();
+  for (const p of pkg.params) {
+    const c = laid.cards.find((card) => card.name === instanceOf(p.address));
+    if (!c) continue;
+    if (!byCard.has(c)) byCard.set(c, []);
+    byCard.get(c).push(p);
+  }
+  for (const [c, list] of byCard) {
+    const ordered = [...list].sort((a, b) => a.x - b.x);
+    const y = top ? c.y : c.y + c.h;
+    ordered.forEach((p, i) => {
+      const x = c.x + CARD_RX * k + ((i + 0.5) * (c.w - 2 * CARD_RX * k)) / ordered.length;
+      bindPins.push({ id: `bind ${p.address}`, card: c.id, name: portOf(p.address), address: p.address, side: 'in', kind: 'control', parameter: true, connected: true, bind: true, x, y });
+    });
+  }
+  // Nested so that no two cross (the Control layer's legs' rule): straight out, along its lane, straight into the card.
+  const lanes = legLanes(bindPins.map((q) => ({ c: pkg.params.find((p) => p.address === q.address).x, p: q.x })));
+  bindPins.forEach((q, i) => {
+    const from = pkg.params.find((p) => p.address === q.address);
+    const laneY = top ? start + (lanes[i] + 1) * gap : start - (lanes[i] + 1) * gap;
+    binds.push({ id: q.id, address: q.address, kind: 'control', points: simplify([{ x: from.x, y: start }, { x: from.x, y: laneY }, { x: q.x, y: laneY }, { x: q.x, y: q.y }]) });
+  });
+  return { binds, bindPins };
+}
+
+/** The height of the control signal's band in a package (0 without bound parameters): a lane per parameter, at most a third of its body. */
+export function bindBand(pkg) {
+  if (!pkg?.params?.length) return 0;
+  return Math.min(pkg.body.h / 3, (pkg.params.length + 1) * PU * 0.5);
 }
 
 /** A composite's inside fades in as its card's body grows on screen: from the first width to the second (screen px). */

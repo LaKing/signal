@@ -16,7 +16,7 @@ import { assignInstruments, edgePins, stackMembers } from './plane-instruments.j
 import { pinPlaces, stackLayout } from './plane-layout.js';
 import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from './plane-control.js';
-import { REVEAL, chipPath, engineLayout, insideOf, packageReveal, revealShare } from './plane-engine.js';
+import { REVEAL, bindBand, chipPath, engineLayout, insideOf, packageReveal, revealShare } from './plane-engine.js';
 import { CLEARANCE, PACKAGE_PU, overlaps, packageOf, pinOf } from './plane-package.js';
 import { PU } from './plate.js';
 
@@ -78,7 +78,9 @@ test('one package, the same rectangle and signal pins at the Wiring, Control and
     // The Engine's frame is the package's rectangle, its inside in the package's body.
     const e = s.engines.find((x) => x.entry === r.entry);
     assert.deepEqual(e.frame, { x: pkg.x, y: pkg.y, w: pkg.w, h: pkg.h }, `${r.entry}: the Engine’s package`);
-    assert.deepEqual(e.area, pkg.body);
+    // The inside in the package's body, less the control signal's band by its connector (`bindBand`).
+    const band = bindBand(pkg);
+    assert.deepEqual(e.area, { ...pkg.body, y: pkg.connector === 'top' ? pkg.body.y + band : pkg.body.y, h: pkg.body.h - band });
     // The Wiring's ports are the package's signal pins, x and y.
     for (const port of s.wiring.ports.filter((p) => p.entry === r.entry)) {
       const pin = pinOf(pkg, port.side, port.address);

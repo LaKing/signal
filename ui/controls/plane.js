@@ -278,7 +278,9 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .pkg-pin.k-audio.connected, .e-pin.k-audio.connected { fill: var(--signal-accent, #4fc3f7); } .pkg-pin.k-control.connected, .e-pin.k-control.connected { fill: #b39ddb; }
 .pkg-pin.k-events.connected, .e-pin.k-events.connected { fill: var(--signal-meter-rms, #3ecf8e); } .pkg-pin.k-vector.connected, .e-pin.k-vector.connected { fill: var(--signal-effective, #ffb74d); }
 /* Hover titles where nothing lies under it: at the Engine its body and pins, at the Wiring its pins (at Control a front panel's piano roll may lie under it). */
-.pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin, .pkg-engine .c-pin, .pkg-wiring .c-pin, .pkg-engine .c-auto-pin, .pkg-wiring .c-auto-pin { pointer-events: all; }
+.pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin, .pkg-param, .pkg-auto { pointer-events: all; }
+.pkg-param { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pkg-auto { fill: #b39ddb; stroke: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .pkg-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 4; }
 .pkg-pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--w-port, 12px); pointer-events: none; }
 .pkg-control .pkg-pin-label { font-size: 9px; fill: var(--signal-muted, #8a93a3); }
@@ -326,6 +328,8 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-module, .e-pin-label { fill: var(--signal-muted, #8a93a3); }
 .e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+/* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
+.e-bind { stroke: var(--signal-effective, #ffb74d); opacity: 0.7; } .e-pin.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-junction.k-audio { fill: var(--signal-accent, #4fc3f7); } .e-junction.k-control { fill: #b39ddb; } .e-junction.k-events { fill: var(--signal-meter-rms, #3ecf8e); } .e-junction.k-vector { fill: var(--signal-effective, #ffb74d); }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -1571,12 +1575,12 @@ export class SignalPlane extends HTMLElement {
     if (layer !== 'control') {
       const small = Math.min(3.5, radius * 0.7);
       for (const p of pkg.params) {
-        const dot = svg('circle', { class: 'c-pin', cx: p.x, cy: p.y, r: +small.toFixed(2) });
+        const dot = svg('circle', { class: 'pkg-param', cx: p.x, cy: p.y, r: +small.toFixed(2) });
         dot.append(svg('title', {}, `${p.address}: a bound parameter of ${pkg.title}’s engine (its control at the Control layer)`));
         pinsGroup.append(dot);
       }
       for (const p of pkg.autos) {
-        const dot = svg('circle', { class: 'c-auto-pin', cx: p.x, cy: p.y, r: +(radius * 0.8).toFixed(2) });
+        const dot = svg('circle', { class: 'pkg-auto', cx: p.x, cy: p.y, r: +(radius * 0.8).toFixed(2) });
         dot.append(svg('title', {}, `${p.address}: automation out of ${pkg.title}’s engine into a control`));
         pinsGroup.append(dot);
       }
@@ -2014,6 +2018,12 @@ export class SignalPlane extends HTMLElement {
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
     }
+    // Inside a package: the control signal, each bound parameter from the connector into its card (`bindsOf`).
+    for (const b of laid.binds ?? []) {
+      const path = svg('path', { class: 'e-wire e-bind', d: polylinePath(b.points, 6 * k, CORNERS), ...line(1.5) });
+      path.append(svg('title', {}, `${b.address}: its control at the Control layer, through the package’s connector`));
+      wires.append(path);
+    }
     g.append(wires);
     const composites = new Map();
     for (const c of laid.cards) {
@@ -2048,6 +2058,11 @@ export class SignalPlane extends HTMLElement {
       g.append(dot);
       if (chip) chip.labels.append(label);
       else g.append(label);
+    }
+    for (const p of laid.bindPins ?? []) {
+      const dot = svg('circle', { class: 'e-pin e-bind-pin', cx: p.x, cy: p.y, r: 2.5 * k, ...line(1.5) });
+      dot.append(svg('title', {}, `${full(p.address)} (a parameter its control sets)`));
+      g.append(dot);
     }
     for (const chip of composites.values()) g.append(chip.labels);
   }

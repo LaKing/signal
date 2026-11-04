@@ -16,7 +16,7 @@ import { assignInstruments, edgePins, stackMembers } from './plane-instruments.j
 import { pinPlaces, stackLayout } from './plane-layout.js';
 import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { engineOf } from './plane-control.js';
-import { REVEAL, chipPath, engineLayout, insideOf, layLevel, orderedTracks, revealShare } from './plane-engine.js';
+import { REVEAL, bindBand, bindsOf, chipPath, engineLayout, insideOf, layLevel, orderedTracks, revealShare } from './plane-engine.js';
 import { PU } from './plate.js';
 import { packageOf } from './plane-package.js';
 
@@ -359,4 +359,29 @@ test('Layer N: the chips whose fully revealed body holds the view’s centre, ou
   assert.deepEqual(chipPath(top.cards, { x: fx.body.x - 1, y: fx.body.y }, k2, insideFor), [], 'the centre outside every chip');
   const pre = outer.cards.find((c) => c.name === 'pre');
   assert.deepEqual(chipPath(top.cards, centre(pre.body), k2, insideFor).map((s) => s.id), ['card fx'], 'on a plain card inside: Layer 1 only');
+});
+
+test('the control signal into the engine: each bound parameter from the connector, in its lane, into its card; in the connector’s order, no two cross', () => {
+  const pkg = { x: 0, y: 0, w: 400, h: 200, head: { h: 32 }, body: { x: 12, y: 32, w: 376, h: 156 }, connector: 'top', params: ['/a.p1', '/a.p2', '/a.p3', '/b.q'].map((address, i) => ({ id: `pin ${address}`, address, x: 40 + i * 100, y: 0 })) };
+  const laid = { scale: 1, cards: [{ id: 'a', name: 'a', x: 20, y: 120, w: 120, h: 60 }, { id: 'b', name: 'b', x: 240, y: 120, w: 120, h: 60 }] };
+  const band = bindBand(pkg);
+  assert.ok(band > 0 && band <= pkg.body.h / 3);
+  const { binds, bindPins } = bindsOf(pkg, laid, band);
+  assert.equal(binds.length, 4);
+  assert.deepEqual(bindPins.map((p) => [p.card, p.name]), [['a', 'p1'], ['a', 'p2'], ['a', 'p3'], ['b', 'q']]);
+  for (const b of binds) {
+    const pin = bindPins.find((p) => p.address === b.address);
+    assert.deepEqual(b.points.at(-1), { x: pin.x, y: pin.y }, 'ends on its card’s pin');
+    assert.equal(b.points[0].y, pkg.body.y, 'leaves under the title band');
+    assert.ok(b.points.every((q) => q.y >= pkg.body.y && q.y <= 120), 'stays in the band above the card');
+  }
+  // No two cross: a horizontal of one never meets a vertical of another.
+  const segs = binds.flatMap((b) => b.points.slice(1).map((q, i) => [b.points[i], q, b.address]));
+  for (const [a0, a1, ka] of segs) for (const [b0, b1, kb] of segs) {
+    if (ka === kb || a0.y !== a1.y || b0.x !== b1.x) continue;
+    const [x0, x1] = [Math.min(a0.x, a1.x), Math.max(a0.x, a1.x)];
+    const [y0, y1] = [Math.min(b0.y, b1.y), Math.max(b0.y, b1.y)];
+    assert.ok(!(b0.x > x0 && b0.x < x1 && a0.y > y0 && a0.y < y1), `${ka} crosses ${kb}`);
+  }
+  assert.deepEqual(bindsOf({ ...pkg, params: [] }, laid), { binds: [], bindPins: [] });
 });
