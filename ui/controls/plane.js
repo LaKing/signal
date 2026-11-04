@@ -87,7 +87,7 @@ import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from 
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, locateAddress, revealShare } from '../lib/plane-engine.js';
-import { ENGINE_SELECTABLE, addOps, bindKey, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
+import { ENGINE_SELECTABLE, addOps, bindKey, bindMoveOps, cardKey, connectOps, rewireOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { selectionNet } from '../lib/plane-net.js';
 import { planeSidebar } from '../lib/plane-sidebar.js';
 import { headPath } from '../lib/schematic-draw.js';
@@ -2906,12 +2906,13 @@ export class SignalPlane extends HTMLElement {
     this.closeChooser();
     const at = this.point(event);
     const hit = this.hitAt(at);
-    if (!hit || !(DRAG_FROM.has(hit.kind) || (hit.kind === 'e-pin' && this.engineEditing()))) return;
+    const end = this.grabbedEnd(hit, at);
+    if (!hit || !(DRAG_FROM.has(hit.kind) || (hit.kind === 'e-pin' && this.engineEditing()) || end)) return;
     this.adopt(hit);
     event.stopPropagation();
     event.preventDefault();
     this.settleTravel();
-    this.gesture = { hit, id: event.pointerId, start: at, moved: false };
+    this.gesture = { hit, id: event.pointerId, start: at, moved: false, end };
     this.stage.setPointerCapture?.(event.pointerId);
   }
 
@@ -2955,7 +2956,9 @@ export class SignalPlane extends HTMLElement {
       if (!this.gesture.moved && Math.hypot(at.x - this.gesture.start.x, at.y - this.gesture.start.y) < 3) return;
       if (!this.gesture.moved) this.stage.setPointerCapture?.(event.pointerId);
       this.gesture.moved = true;
-      this.drawRubber(this.gesture.hit, at);
+      // A wire's end grabbed: the rubber from its other end, which stays.
+      const g = this.gesture;
+      this.drawRubber(g.end ? (g.end === 'from' ? g.hit.points.at(-1) : g.hit.points[0]) : g.hit, at);
       return;
     }
     if (!this.drag || event.pointerId !== this.drag.id) return;
@@ -2987,13 +2990,94 @@ export class SignalPlane extends HTMLElement {
       this.stage.releasePointerCapture?.(event.pointerId);
       this.clearRubber();
       const at = this.point(event);
-      if (gesture.moved) this.dropCable(gesture.hit, at);
+      if (gesture.moved && gesture.end) this.dropWireEnd(gesture.hit, gesture.end, at);
+      else if (gesture.moved) this.dropCable(gesture.hit, at);
       else this.select(selectionOf(gesture.hit));
       return;
     }
     if (!this.drag || event.pointerId !== this.drag.id) return;
     this.drag = null;
     this.stage.releasePointerCapture?.(event.pointerId);
+  }
+
+  /**
+   * Which end of a wire a press grabs (the owner's, 2026-11-04: every wire rewired by hand, at every layer): a Wiring
+   * cable between two instruments, a Control automation of the top level, an Engine wire with Edit on; the end nearer the
+   * press (`'from'` or `'to'`), or null for anything else.
+   */
+  grabbedEnd(hit, at) {
+    // A control's leg into the engine (the package's level): its card's end moves, the connector's stays.
+    // Inside a chip, the leg of its parameter's export: its inner end moves (the composite's export).
+    if (hit?.kind === 'e-bind' && this.engineEditing()) return 'to';
+    // An export's wire inside a chip: its inner end moves, the chip's own pin stays.
+    if (hit?.kind === 'e-wire' && hit.frame && this.engineEditing()) return String(hit.written?.from).startsWith('@inputs.') ? 'to' : 'from';
+    const movable = (hit?.kind === 'cable' && !hit.cable.a.edge && !hit.cable.b.edge) || (hit?.kind === 'auto' && hit.auto?.to && !hit.auto.inner) || (hit?.kind === 'e-wire' && this.engineEditing());
+    if (!movable || !hit.points?.length) return null;
+    const rect = this.focusRect();
+    if (!rect) return null;
+    const p = toPlane(this.view, at);
+    const q = { x: p.x - rect.x, y: p.y - rect.y };
+    const d = (r) => Math.hypot(q.x - r.x, q.y - r.y);
+    return d(hit.points[0]) < d(hit.points.at(-1)) ? 'from' : 'to';
+  }
+
+  /** A wire's end dropped (`grabbedEnd`): onto a pin that fits, the connection moved there in one patch (one undo). */
+  dropWireEnd(hit, end, at) {
+    const to = this.hitAt(at);
+    if (hit.kind === 'e-wire') return this.writeEngine(rewireOps(hit, end, to, this.graph?.composites?.[hit.patchLevel]));
+    if (hit.kind === 'e-bind' && hit.prefix) return this.dropInnerBind(hit, to, at);
+    if (hit.kind === 'e-bind') return this.dropBindLeg(hit, to, at);
+    const old = hit.kind === 'cable' ? hit.cable : hit.auto;
+    let from = old.from;
+    let into = old.to;
+    if (hit.kind === 'cable') {
+      const want = end === 'from' ? 'out' : 'in';
+      if (to?.kind !== 'port' || to.port.side !== want) return this.say(`Not moved: drop the cable’s ${end === 'from' ? 'source on an output' : 'end on an input'} of an instrument`);
+      if (end === 'from') from = to.port.address;
+      else into = to.port.address;
+    } else if (end === 'to') {
+      const target = this.controlAt(at);
+      const bind = target?.writes ? target.binds[0] : null;
+      if (!bind) return this.say('Not moved: drop the automation’s end on a control that drives a parameter');
+      into = bind;
+    } else {
+      const source = to?.kind === 'auto-pin' ? to.pin.address : to?.kind === 'external' ? to.pin.from : null;
+      if (!source) return this.say('Not moved: drop the automation’s source on an automation pin of the engine or an external cable');
+      from = source;
+    }
+    if (from === old.from && into === old.to) return this.say('Not moved: it is already there');
+    return this.writePatch([removeConnection(old.from, old.to), addConnection(from, into)], `${old.from} → ${old.to} moved: ${from} → ${into}`);
+  }
+
+  /**
+   * A control's leg at the Engine dropped (`grabbedEnd`): onto a parameter's pin the control binds it, onto a card of the
+   * package's level a chooser of the card's parameters (`panel.write`, as the Control layer's via dropped on the connector).
+   */
+  dropBindLeg(hit, to, at) {
+    const control = this.controlFor(hit.entry)?.controls.find((c) => c.binds.some((b) => norm(b) === norm(hit.address)));
+    if (!control) return this.say(`Not bound: no control of this instrument binds ${hit.address}`);
+    const bind = (address) => {
+      this.opened = hit.entry;
+      return this.rebind(control, address);
+    };
+    if (to?.kind === 'e-pin' && to.parameter && !to.prefix) return bind(to.address);
+    if (to?.kind === 'e-card' && !to.prefix) {
+      const inst = this.graph?.top?.instances?.find((i) => i.name === to.name);
+      const list = (inst?.parameters ?? []).map((p) => p.address ?? `/${to.name}.${p.name}`);
+      return this.openChooser(`Bind ${control.label || control.tag} to:`, list.map((a) => ({ text: a.replace(/^\//, ''), act: () => bind(a) })), at);
+    }
+    return this.say('Not bound: drop the leg on a card of the engine, or on a parameter’s pin');
+  }
+
+  /** A parameter export's leg inside a chip dropped: onto an inner parameter's pin, or a card of the chip's level through a chooser of its parameters. */
+  dropInnerBind(hit, to, at) {
+    if (to?.kind === 'e-pin' && to.parameter && to.chip === hit.chip) return this.writeEngine(bindMoveOps(hit, to.local));
+    if (to?.kind === 'e-card' && to.chip === hit.chip) {
+      const inst = this.graph?.composites?.[hit.patchLevel]?.instances?.find((i) => i.name === to.name);
+      const names = (inst?.parameters ?? []).map((p) => p.name);
+      return this.openChooser(`${hit.prefix}.${hit.export} reaches:`, names.map((n) => ({ text: `${to.name}.${n}`, act: () => this.writeEngine(bindMoveOps(hit, `${to.name}.${n}`)) })), at);
+    }
+    return this.say('Not moved: drop the leg on a card inside the same chip, or on a parameter’s pin there');
   }
 
   /** The cable being drawn: from the pressed pin to the pointer (plane units, in the focused Stack). */
@@ -3288,7 +3372,7 @@ export class SignalPlane extends HTMLElement {
     if (!sel) return false;
     if (sel.kind === 'engine') {
       if (!this.engineEditing()) return false;
-      this.writeEngine(removeOps(sel.item)).then((ok) => ok && this.select(null));
+      this.writeEngine(removeOps(sel.item, this.graph?.composites?.[sel.item?.patchLevel])).then((ok) => ok && this.select(null));
       return true;
     }
     if (sel.kind === 'cable') {

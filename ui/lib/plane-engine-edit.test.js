@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { engineLayout, insideOf } from './plane-engine.js';
 import {
   addOps,
+  bindMoveOps,
   connectOps,
   dropTargets,
   engineItems,
@@ -24,6 +25,7 @@ import {
   outStep,
   placedOwners,
   removeOps,
+  rewireOps,
   selectionKeys,
   wireKey,
 } from './plane-engine-edit.js';
@@ -122,11 +124,12 @@ test('connect: an output and an input of one level, in either order; the top lev
   assert.deepEqual(inner, { level: 'moog_voice', ops: [{ op: 'connection.add', from: 'noise.out', to: 'ladder.cutoff_hz' }], what: '/synth/noise.out → /synth/ladder.cutoff_hz' });
 });
 
-test('connect refused: a chip’s own pin to its inside (an export, as the schematic), two levels, two outputs, not a pin', () => {
+test('a chip’s own pin to its inside: the composite’s export reaches it (export.connect); refused: two levels, two outputs, not a pin', () => {
   const { all } = monoSynth();
-  const exported = connectOps(pin(all, '/synth.gate'), pin(all, '/synth/fenv.gate'));
-  assert.match(exported.error, /moog_voice’s export/);
-  assert.match(connectOps(pin(all, '/synth/volume.out'), pin(all, '/synth.out')).error, /export/, 'an inner output to the chip’s output');
+  const exported = connectOps(pin(all, '/synth.gate'), pin(all, '/synth/aenv.gate'));
+  assert.deepEqual(exported, { level: 'moog_voice', ops: [{ op: 'export.connect', role: 'input', name: 'gate', port: 'aenv.gate' }], what: '/synth.gate → /synth/aenv.gate (moog_voice’s export)' });
+  assert.deepEqual(connectOps(pin(all, '/synth/volume.out'), pin(all, '/synth.out')).ops, [{ op: 'export.connect', role: 'output', name: 'out', port: 'volume.out' }], 'an inner output to the chip’s output');
+  assert.match(connectOps(pin(all, '/synth.gate'), pin(all, '/synth/volume.out')).error, /input or a parameter inside/);
   assert.match(connectOps(pin(all, '/melody.hz'), pin(all, '/synth/fenv.gate')).error, /different levels/);
   assert.match(connectOps(pin(all, '/melody.hz'), pin(all, '/melody.gate')).error, /both outputs/);
   assert.match(connectOps(pin(all, '/melody.hz'), card(all, '/synth')).error, /on a pin/);
@@ -143,7 +146,8 @@ test('remove: a card or a wire at its level, an edge dot’s connection at the t
   assert.deepEqual(removeOps(top), { level: '', ops: [{ op: 'connection.remove', from: 'melody.hz', to: 'synth.hz' }], what: '/melody.hz → /synth.hz removed' });
   const edge = all.find((i) => i.kind === 'e-edge' && i.to === '/melody.tick');
   assert.deepEqual(removeOps(edge).ops, [{ op: 'connection.remove', from: 'transport.tick', to: 'melody.tick' }]);
-  assert.match(removeOps(all.find((i) => i.kind === 'e-wire' && i.frame)).error, /moog_voice’s export/);
+  const frame = all.find((i) => i.kind === 'e-wire' && i.frame && String(i.written.from).startsWith('@inputs.'));
+  assert.equal(removeOps(frame).ops[0].op, 'export.disconnect', 'an export’s wire: its inner port let go');
   assert.match(removeOps(pin(all, '/melody.hz')).error, /Select a wire or a card/);
   // One dot for an output leaving to several places: its wire is removed, not the dot.
   const shared = engineItems({ edges: [{ id: 'edge out a.out', side: 'out', address: 'a.out', to: 'b.in', x: 0, y: 0 }, { id: 'edge out a.out', side: 'out', address: 'a.out', to: 'c.in', x: 0, y: 0 }] }, { entry: 'e' });
@@ -206,4 +210,28 @@ test('an instance added from an instrument’s Engine stays in it until a connec
   assert.deepEqual(forget.sort(), ['bus', 'lost', 'out', 'undone'], 'gone after it was seen: forgotten');
   assert.equal(owner.get('trim'), null, 'the assignment itself unchanged');
   assert.ok(!next.has('coming'), 'not in the graph yet: kept, nothing assigned');
+});
+
+test('a wire’s end moved onto another pin: the old connection removed and the new one added in one patch', () => {
+  const wire = { kind: 'e-wire', from: '/melody.gate', to: '/synth.gate', written: { from: 'melody.gate', to: 'synth.gate' }, patchLevel: '', chip: null, frame: false };
+  const pin = (side, card, port, extra = {}) => ({ kind: 'e-pin', side, card, port, address: `/${card}.${port}`, local: `${card}.${port}`, chip: null, cardChip: null, patchLevel: '', ...extra });
+  const moved = rewireOps(wire, 'to', pin('in', 'synth', 'velocity'));
+  assert.equal(moved.level, '');
+  assert.deepEqual(moved.ops.map((o) => [o.op, o.from, o.to]), [['connection.remove', 'melody.gate', 'synth.gate'], ['connection.add', 'melody.gate', 'synth.velocity']]);
+  const source = rewireOps(wire, 'from', pin('out', 'melody', 'hz'));
+  assert.deepEqual(source.ops[1].from, 'melody.hz');
+  assert.ok(rewireOps(wire, 'to', pin('out', 'melody', 'hz')).error, 'an end on an input only');
+  assert.ok(rewireOps(wire, 'to', pin('in', 'synth', 'gate')).error, 'already there');
+  assert.ok(rewireOps(wire, 'to', pin('in', 'ladder', 'in', { chip: 'synth' })).error, 'another level');
+  assert.ok(rewireOps({ ...wire, frame: true }, 'to', pin('in', 'synth', 'velocity')).error, 'an export is edited in its slot');
+});
+
+test('an export’s port moved inside a chip: the new port taken first, then the old let go, so the export keeps its range', () => {
+  const bind = { kind: 'e-bind', prefix: '/synth', patchLevel: 'moog_voice', export: 'cutoff', local: 'ladder.cutoff_hz' };
+  assert.deepEqual(bindMoveOps(bind, 'ladder.drive').ops, [
+    { op: 'export.connect', role: 'parameter', name: 'cutoff', port: 'ladder.drive' },
+    { op: 'export.disconnect', role: 'parameter', name: 'cutoff', port: 'ladder.cutoff_hz' },
+  ]);
+  assert.ok(bindMoveOps(bind, 'ladder.cutoff_hz').error, 'already there');
+  assert.ok(bindMoveOps({ ...bind, prefix: '' }, 'ladder.drive').error, 'a leg at the package is a control’s bind, not an export');
 });

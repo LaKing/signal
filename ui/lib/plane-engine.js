@@ -506,10 +506,11 @@ export function bindLegs(sources, cards, k, start, band, top = true) {
   }
   // Straight out, along its lane, straight into the card; a source with several targets fans out from one point.
   const legs = sources.filter((p) => bindPins.some((q) => q.address === p.address)).map((p) => ({ from: p, to: bindPins.find((q) => q.address === p.address) }));
+  // Each leg keeps the export it is of inside a chip (its parameter's name on the chip), for an edit of it.
   const lanes = legLanes(legs.map((l) => ({ c: l.from.x, p: l.to.x })));
   legs.forEach(({ from, to }, i) => {
     const laneY = top ? start + (lanes[i] + 1) * gap : start - (lanes[i] + 1) * gap;
-    binds.push({ id: `${to.id} ${i}`, address: to.address, kind: 'control', points: simplify([{ x: from.x, y: start }, { x: from.x, y: laneY }, { x: to.x, y: laneY }, { x: to.x, y: to.y }]) });
+    binds.push({ id: `${to.id} ${i}`, address: to.address, export: from.export ?? null, kind: 'control', points: simplify([{ x: from.x, y: start }, { x: from.x, y: laneY }, { x: to.x, y: laneY }, { x: to.x, y: to.y }]) });
   });
   return { binds, bindPins };
 }
@@ -568,7 +569,7 @@ export function insideOf({ graph, card, pins = [], bindPins = [], scale = 1 }) {
   if (!def || !card.body) return null;
   const mine = pins.filter((p) => p.card === card.id);
   // The control signal entering at the card's top (`bindLegs`' pins): each parameter on to its targets inside.
-  const sources = bindPins.filter((p) => p.card === card.id).flatMap((p) => (def.parameters?.find((x) => x.name === p.name)?.to ?? []).map((to) => ({ address: to, x: p.x })));
+  const sources = bindPins.filter((p) => p.card === card.id).flatMap((p) => (def.parameters?.find((x) => x.name === p.name)?.to ?? []).map((to) => ({ address: to, x: p.x, export: p.name })));
   const connections = [...(def.connections ?? [])];
   const edgeIns = new Map();
   const edgeOuts = new Map();

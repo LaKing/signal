@@ -16,6 +16,7 @@
 import { hitItem } from './plane-hit.js';
 import { roleOf } from './plane-instruments.js';
 import { addConnection, addInstance, connectTargets, removeConnection, removeInstance, written } from './schematic-patch.js';
+import { exportOp } from './slot.js';
 
 /** An address with the top level's leading `/` (a level's own `a.b` → `/a.b`; an export end `@inputs.x` as it is). */
 export function norm(address) {
@@ -95,7 +96,7 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
   // The control signal's legs into the parameters (`bindLegs`): each selectable, by the parameter it sets.
   for (const b of laid?.binds ?? []) {
     const address = fullAddress(prefix, b.address);
-    items.push({ kind: 'e-bind', id: `${scope}|${b.id}`, key: bindKey(address), points: b.points, entry, patchLevel: level, prefix, chip, address });
+    items.push({ kind: 'e-bind', id: `${scope}|${b.id}`, key: bindKey(address), points: b.points, entry, patchLevel: level, prefix, chip, address, local: b.address, export: b.export ?? null });
   }
   // Inside a chip the edge dots are its card's own pins (the level around's items).
   if (!prefix) {
@@ -178,17 +179,89 @@ export function connectOps(a, b) {
   if (a?.kind !== 'e-pin' || b?.kind !== 'e-pin') return { error: 'Not connected: drop the wire on a pin' };
   // A chip's own pin and a pin inside that chip: an export of its composite (from inside, its input is a source, its output a sink).
   const frame = a.cardChip && a.cardChip === b.chip ? a : b.cardChip && b.cardChip === a.chip ? b : null;
-  if (frame) return { error: `Not connected: ${exportsReason(frame.module)}` };
+  if (frame) return exportConnect(frame, frame === a ? b : a);
   if (a.chip !== b.chip) return { error: `Not connected: ${a.address} and ${b.address} are at different levels (connect two cards of one level)` };
   if (a.side === b.side) return { error: `Not connected: ${a.address} and ${b.address} are both ${a.side === 'out' ? 'outputs' : 'inputs'}` };
   const [out, into] = a.side === 'out' ? [a, b] : [b, a];
   return { level: out.patchLevel, ops: [addConnection(out.local, into.local)], what: `${out.address} → ${into.address}` };
 }
 
+/**
+ * The `patch` that moves one end of wire `wire` (an `e-wire`) onto pin `to`
+ * (an `e-pin` of the same level): `end` the end that moves, `'from'` (onto
+ * an output) or `'to'` (onto an input or a driven parameter); the old
+ * connection removed and the new one added in one patch (one undo).
+ * `{level, ops, what}`, or `{error}`.
+ */
+export function rewireOps(wire, end, to, def = null) {
+  if (wire?.kind !== 'e-wire') return { error: 'Not moved: grab a wire' };
+  if (wire.frame) return exportMove(wire, end, to, def);
+  if (to?.kind !== 'e-pin') return { error: 'Not moved: drop the wire’s end on a pin' };
+  if (to.cardChip && to.cardChip === wire.chip) return { error: `Not moved: ${exportsReason(to.module)}` };
+  if ((to.chip ?? null) !== (wire.chip ?? null)) return { error: `Not moved: ${to.address} is at another level than the wire` };
+  const want = end === 'from' ? 'out' : 'in';
+  if (to.side !== want) return { error: `Not moved: the wire’s ${end === 'from' ? 'source' : 'end'} goes on ${want === 'out' ? 'an output' : 'an input or a parameter'}` };
+  const [from, into] = end === 'from' ? [to.local, wire.written.to] : [wire.written.from, to.local];
+  if (written(from) === written(wire.written.from) && written(into) === written(wire.written.to)) return { error: 'Not moved: it is already there' };
+  const [shownFrom, shownTo] = end === 'from' ? [to.address, wire.to] : [wire.from, to.address];
+  return { level: wire.patchLevel, ops: [removeConnection(wire.written.from, wire.written.to), addConnection(from, into)], what: `${wire.from} → ${wire.to} moved: ${shownFrom} → ${shownTo}` };
+}
+
+/**
+ * A chip's own pin `frame` wired to pin `inner` inside it (the owner's, 2026-11-04: every wire rewired by hand): the
+ * composite's export of the frame pin's name reaches the inner pin too (`export.connect` at the composite's level, as the
+ * slot editor writes it): an input or a parameter on to an inner input or parameter, an output from an inner output.
+ */
+function exportConnect(frame, inner) {
+  const role = frame.side === 'out' ? 'output' : frame.parameter ? 'parameter' : 'input';
+  if ((role === 'output') !== (inner.side === 'out')) return { error: `Not connected: ${frame.address} ${role === 'output' ? 'leaves from an output inside' : 'goes on to an input or a parameter inside'}` };
+  return { level: inner.patchLevel, ops: [exportOp(true, role, frame.port, inner.local)], what: `${frame.address} → ${inner.address} (${frame.module}’s export)` };
+}
+
+/** An export's wire inside a chip with its inner end moved onto `to` (one patch: its old port let go, the new one taken). */
+function exportMove(wire, end, to, def) {
+  const into = String(wire.written.from).startsWith('@inputs.');
+  const name = String(into ? wire.written.from : wire.written.to).replace(/^@(inputs|outputs)\./, '');
+  if ((into && end !== 'to') || (!into && end !== 'from')) return { error: `Not moved: the chip’s own pin stays; move the wire’s end inside` };
+  if (to?.kind !== 'e-pin' || (to.chip ?? null) !== (wire.chip ?? null)) return { error: 'Not moved: drop the wire’s end on a pin inside the same chip' };
+  if (to.side !== (into ? 'in' : 'out')) return { error: `Not moved: ${into ? 'an input’s export goes on to an input or a parameter' : 'an output’s export leaves from an output'}` };
+  const role = !into ? 'output' : def?.parameters?.some((p) => p.name === name) ? 'parameter' : 'input';
+  const old = written(into ? wire.written.to : wire.written.from);
+  if (old === written(to.local)) return { error: 'Not moved: it is already there' };
+  return { level: wire.patchLevel, ops: exportSwap(role, name, old, to.local), what: `${wire.from} → ${wire.to} moved to ${to.address} (${wire.patchLevel}’s export)` };
+}
+
+/**
+ * A control signal's leg inside a chip (`bindLegs`', an `e-bind` with a prefix) moved onto inner parameter `port`
+ * (`instance.parameter` at the chip's level): the composite's parameter export `bind.export` reaches it instead.
+ */
+export function bindMoveOps(bind, port) {
+  if (bind?.kind !== 'e-bind' || !bind.prefix || !bind.export) return { error: 'Not moved: grab a leg inside a chip' };
+  const old = written(bind.local);
+  if (old === written(port)) return { error: 'Not moved: it is already there' };
+  return { level: bind.patchLevel, ops: exportSwap('parameter', bind.export, old, port), what: `${bind.prefix}.${bind.export} now reaches ${fullAddress(bind.prefix, port)}` };
+}
+
+/**
+ * An export's port `old` swapped for `port`: an input's or a parameter's new port taken first, then the old one let go,
+ * so that the export, its range and its other attributes stay (it would go with its last port); an output names one port,
+ * so it lets go first.
+ */
+function exportSwap(role, name, old, port) {
+  return role === 'output' ? [exportOp(false, role, name, old), exportOp(true, role, name, port)] : [exportOp(true, role, name, port), exportOp(false, role, name, old)];
+}
+
 /** The `patch` that removes `item` (a wire, an edge dot's connection, a card): `{level, ops, what}`, or `{error}`. */
-export function removeOps(item) {
+export function removeOps(item, def = null) {
   if (item?.kind === 'e-card') return { level: item.patchLevel, ops: [removeInstance(item.name)], what: `${item.address} removed` };
   if (item?.kind === 'e-wire' || item?.kind === 'e-edge') {
+    if (item.frame && item.kind === 'e-wire') {
+      // An export's wire inside a chip: the inner port let go of the export (the export goes with its last port).
+      const into = String(item.written.from).startsWith('@inputs.');
+      const name = String(into ? item.written.from : item.written.to).replace(/^@(inputs|outputs)\./, '');
+      const role = !into ? 'output' : def?.parameters?.some((p) => p.name === name) ? 'parameter' : 'input';
+      return { level: item.patchLevel, ops: [exportOp(false, role, name, written(into ? item.written.to : item.written.from))], what: `${item.from} → ${item.to} removed (${item.patchLevel}’s export)` };
+    }
     if (item.frame) return { error: `Not removed: ${exportsReason(item.patchLevel)}` };
     if (item.shared) return { error: `Not removed: the dot at ${item.from} stands for several connections; select the wire to remove` };
     return { level: item.patchLevel, ops: [removeConnection(item.written.from, item.written.to)], what: `${item.from} → ${item.to} removed` };
