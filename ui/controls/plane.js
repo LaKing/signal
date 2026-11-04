@@ -86,7 +86,7 @@ import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, de
 import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { packageOf } from '../lib/plane-package.js';
-import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, revealShare } from '../lib/plane-engine.js';
+import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, locateAddress, revealShare } from '../lib/plane-engine.js';
 import { ENGINE_SELECTABLE, addOps, bindKey, cardKey, connectOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { selectionNet } from '../lib/plane-net.js';
 import { planeSidebar } from '../lib/plane-sidebar.js';
@@ -354,10 +354,10 @@ svg[data-net] :is(.e-pin, .pkg-pin, .pkg-param, .pkg-auto, .c-pin, .c-auto-pin, 
 .chooser button { text-align: left; background: none; border: none; color: var(--signal-fg, #d6dbe4); padding: 3px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer; }
 .chooser button:hover, .chooser button:focus-visible { background: #2c3340; outline: none; }
 .notes p.said { color: var(--signal-fg, #d6dbe4); }
-/* The sidebar (2026-11-04): a column at the left while something is selected, its content scrolling inside it. */
+/* The sidebar (the owner's, 2026-11-04): a fixed column at the plane's left, the stage beside it, its content scrolling inside it. */
+.stage { left: 280px; }
 .side { position: absolute; left: 0; top: 0; bottom: 0; width: 280px; box-sizing: border-box; overflow: auto; padding: 10px 12px 16px;
   background: var(--signal-board-bg, #0e1014); border-right: 1px solid #3a414d; overscroll-behavior: contain; z-index: 3; }
-.side[hidden] { display: none; }
 .side header { display: flex; align-items: flex-start; gap: 8px; }
 .side h2 { flex: 1; margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .side h3 { margin: 14px 0 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); }
@@ -528,11 +528,12 @@ export class SignalPlane extends HTMLElement {
     this.world.append(this.setupSvg);
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
-    // The sidebar: what is selected and its net, while something is (`renderSide`).
-    this.side = html('aside', { className: 'side', hidden: true });
-    this.stage.append(this.world, this.bar, this.notes, this.side);
+    // The sidebar: a fixed column left of the stage, what is selected and its net (`renderSide`); the stage, and the view, beside it.
+    this.side = html('aside', { className: 'side' });
+    this.stage.append(this.world, this.bar, this.notes);
     if (this.barDock) this.dockBar(this.barDock);
-    root.append(html('style', { textContent: CSS }), this.stage);
+    root.append(html('style', { textContent: CSS }), this.side, this.stage);
+    this.renderSide();
     // The wheel: the plane's own on every layer (captured before a knob or a fader sees it when the layer is chosen alone).
     this.stage.addEventListener('wheel', (e) => this.wheelCapture(e), { passive: false, capture: true });
     this.stage.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
@@ -736,6 +737,11 @@ export class SignalPlane extends HTMLElement {
       this.placed.clear();
       this.placedFor = project;
       if (this.selection?.kind === 'engine') this.select(null);
+    }
+    // The selection's net and the sidebar of the new structure (a value alone changes neither: its key).
+    if (this.graphKey !== this.sideKey) {
+      this.sideKey = this.graphKey;
+      this.markSelection();
     }
     this.readPlane().then(() => this.recompute());
   }
@@ -2254,6 +2260,18 @@ export class SignalPlane extends HTMLElement {
     this.travel(this.viewAround(target, Math.min(k, fit * DEEP_SCALE, maxK)), this.layer ? 0 : LIFT);
   }
 
+  /** Zoomed to an address at the Engine (a sidebar's link): its card a part of the stage, inside its chips revealed. */
+  showAddress(address) {
+    const found = locateAddress(this.enginesNow()?.layouts, this.graph, address);
+    if (!found) return this.say(`${address}: not in this Stack’s engines`);
+    // At a chosen layer, the Engine chosen; with the coupled zoom, `showChip` zooms into the Engine's band.
+    if (this.layer && this.layer !== 'engine') this.chooseLayer('engine');
+    // The card a third of the stage, so that its pins read and its neighbours show.
+    const r = found.rect;
+    const pad = { x: r.x - r.w, y: r.y - r.h, w: r.w * 3, h: r.h * 3 };
+    this.showChip({ card: pad, entry: found.entry });
+  }
+
   /** The view at scale `k` with plane rectangle `r`'s centre at the stage's centre. */
   viewAround(r, k) {
     return { k, x: this.viewport.w / 2 - (r.x + r.w / 2) * k, y: this.viewport.h / 2 - (r.y + r.h / 2) * k };
@@ -2669,7 +2687,7 @@ export class SignalPlane extends HTMLElement {
   /** Whether `event` is on the Edit layout or the sidebar over the plane (the plane underneath takes nothing of it). */
   overEditor(event) {
     const path = event.composedPath?.() ?? [];
-    return Boolean((this.editing && path.includes(this.editing.overlay)) || (this.side && !this.side.hidden && path.includes(this.side)));
+    return Boolean((this.editing && path.includes(this.editing.overlay)) || (this.side && path.includes(this.side)));
   }
 
   /** Closes Edit layout (its editor left first; what it wrote is written). */
@@ -3306,12 +3324,11 @@ export class SignalPlane extends HTMLElement {
   renderSide() {
     if (!this.side) return;
     const model = planeSidebar(this.selection, { graph: this.graph, net: this.selNet });
-    this.side.hidden = !model;
-    if (!model) return this.side.replaceChildren();
     const close = html('button', { className: 'side-close', type: 'button', title: 'Close (Escape)', textContent: '×' });
     close.addEventListener('click', () => this.select(null));
     const head = html('header');
-    head.append(html('h2', { textContent: model.title }), close);
+    head.append(html('h2', { textContent: model.title }));
+    if (this.selection) head.append(close);
     const parts = [head];
     if (model.subtitle) parts.push(html('p', { className: 'side-sub', textContent: model.subtitle }));
     if (model.rows.length) {
@@ -3324,7 +3341,10 @@ export class SignalPlane extends HTMLElement {
       box.append(html('h3', { textContent: `${section.title} · ${section.items.length + section.more}` }));
       for (const item of section.items) {
         const link = html('button', { className: 'side-link', type: 'button', textContent: item.label, title: `Select ${item.address}` });
-        link.addEventListener('click', () => this.select({ kind: 'address', address: item.address }));
+        link.addEventListener('click', () => {
+          this.select({ kind: 'address', address: item.address });
+          this.showAddress(item.address);
+        });
         box.append(link);
       }
       if (section.more) box.append(html('p', { className: 'side-sub', textContent: `and ${section.more} more` }));

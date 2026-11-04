@@ -624,3 +624,33 @@ export function chipPath(cards, p, k, insideFor, full = REVEAL[1]) {
   }
   return path;
 }
+
+/**
+ * Where an address lies at the Engine (the sidebar's links zoom to it):
+ * `layouts` (`engineLayout`'s, one per instrument), `graph`, `address` (an
+ * instance `/synth`, a port `/synth.cutoff`, one inside a chip
+ * `/synth/ladder.cutoff_hz`). Returns `{entry, rect, depth}`: the card that
+ * holds it (Stack-relative plane units), laid inside its chips as
+ * `insideOf` lays them, `depth` the chips it is in; null when no
+ * instrument's engine holds it.
+ */
+export function locateAddress(layouts, graph, address) {
+  const text = String(address ?? '').replace(/^\//, '');
+  const dot = text.lastIndexOf('.');
+  const path = (dot > text.lastIndexOf('/') ? text.slice(0, dot) : text).split('/').filter(Boolean);
+  if (!path.length) return null;
+  const e = (layouts ?? []).find((l) => l.cards.some((c) => c.name === path[0]));
+  if (!e) return null;
+  let laid = e;
+  let card = e.cards.find((c) => c.name === path[0]);
+  let depth = 0;
+  for (const name of path.slice(1)) {
+    const inner = card.composite ? insideOf({ graph, card, pins: laid.pins, bindPins: laid.bindPins ?? [], scale: laid.scale }) : null;
+    const next = inner?.cards.find((c) => c.name === name);
+    if (!next) break;
+    laid = inner;
+    card = next;
+    depth += 1;
+  }
+  return { entry: e.entry, rect: { x: card.x, y: card.y, w: card.w, h: card.h }, depth };
+}

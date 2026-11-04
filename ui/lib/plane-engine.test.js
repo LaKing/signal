@@ -16,7 +16,7 @@ import { assignInstruments, edgePins, stackMembers } from './plane-instruments.j
 import { pinPlaces, stackLayout } from './plane-layout.js';
 import { wiringLayout, wiringModel } from './plane-wiring.js';
 import { engineOf } from './plane-control.js';
-import { REVEAL, bindBand, bindsOf, chipPath, engineLayout, insideOf, layLevel, orderedTracks, revealShare } from './plane-engine.js';
+import { REVEAL, bindBand, bindsOf, chipPath, engineLayout, insideOf, layLevel, locateAddress, orderedTracks, revealShare } from './plane-engine.js';
 import { PU } from './plate.js';
 import { packageOf } from './plane-package.js';
 
@@ -398,4 +398,20 @@ test('inside a composite the control signal goes on: a parameter entering at the
     assert.equal(b.points.at(-1).y, c.y, 'into its card’s top');
   }
   assert.ok(laid.area.y > card.body.y, 'the inner cards below the band');
+});
+
+test('an address located at the Engine: its card, laid inside its chips as they are drawn', () => {
+  const { engines } = studio();
+  const synth = engines.find((e) => e.cards.some((c) => c.name === 'synth'));
+  const card = synth.cards.find((c) => c.name === 'synth');
+  const top = locateAddress(engines, STUDIO, '/synth.cutoff');
+  assert.equal(top.entry, synth.entry);
+  assert.deepEqual(top.rect, { x: card.x, y: card.y, w: card.w, h: card.h });
+  assert.equal(top.depth, 0);
+  const inner = locateAddress(engines, STUDIO, '/synth/ladder.cutoff_hz');
+  const ladder = insideOf({ graph: STUDIO, card, pins: synth.pins, bindPins: synth.bindPins, scale: synth.scale }).cards.find((c) => c.name === 'ladder');
+  assert.deepEqual(inner.rect, { x: ladder.x, y: ladder.y, w: ladder.w, h: ladder.h });
+  assert.equal(inner.depth, 1);
+  assert.ok(within(inner.rect, card.body), 'inside the chip’s body');
+  assert.equal(locateAddress(engines, STUDIO, '/nowhere.x'), null);
 });

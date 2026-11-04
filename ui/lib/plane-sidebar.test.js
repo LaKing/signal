@@ -10,8 +10,11 @@ import { selectionNet } from './plane-net.js';
 
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
 
-test('nothing selected, no sidebar', () => {
-  assert.equal(planeSidebar(null, { graph: STUDIO }), null);
+test('nothing selected: the project in numbers', () => {
+  const side = planeSidebar(null, { graph: STUDIO });
+  assert.equal(side.title, 'Nothing selected');
+  assert.deepEqual(side.rows.find((r) => r.label === 'Instances').value, String(STUDIO.top.instances.length));
+  assert.deepEqual(side.sections, []);
 });
 
 test('a cable: its ends, and its net by part: the source, the targets inside the chip, the chip’s pin it passes', () => {

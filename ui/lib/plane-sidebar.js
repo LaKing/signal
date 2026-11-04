@@ -1,8 +1,8 @@
 // The Deck's sidebar (the owner's, 2026-11-04): what is selected on the
 // plane, at any layer and depth, and its whole net (ui/lib/plane-net.js):
 // where its signal comes from, where it goes, the chips' pins it passes
-// through, each a link that selects that port. Shown while something is
-// selected; Escape lets the selection, and the sidebar, go. No DOM.
+// through, each a link that selects that port and zooms to it. A fixed
+// column; with nothing selected, the project in numbers. No DOM.
 
 import { netRoles } from './plane-net.js';
 
@@ -13,11 +13,11 @@ export const NET_SHOWN = 60;
  * The sidebar for `selection` (ui/controls/plane.js `selectionOf`'s) with
  * its `net` (`selectionNet`'s, or null) over `graph`: `{title, subtitle,
  * rows: [{label, value}], sections: [{title, items: [{label, address}],
- * more}], copy}` (`copy` the addresses Copy writes), or null when nothing
- * is selected.
+ * more}], copy}` (`copy` the addresses Copy writes); with nothing
+ * selected, the project in numbers and what a click does.
  */
 export function planeSidebar(selection, { graph = null, net = null } = {}) {
-  if (!selection) return null;
+  if (!selection) return overview(graph);
   const head = headOf(selection, graph);
   const sections = [];
   if (net) {
@@ -58,4 +58,21 @@ function headOf(selection, graph) {
   if (selection.kind === 'address') return port(selection.address, 'Port');
   if (selection.kind === 'instrument') return { title: selection.entry, subtitle: 'Instrument', rows: [], copy: [] };
   return { title: selection.kind, subtitle: '', rows: [], copy: [] };
+}
+
+/** The sidebar with nothing selected: the project in numbers, and what a selection shows. */
+function overview(graph) {
+  const top = graph?.top ?? { instances: [], connections: [] };
+  const composites = Object.keys(graph?.composites ?? {}).length;
+  return {
+    title: 'Nothing selected',
+    subtitle: 'Select a cable, a wire, a pin or a leg: its whole way shows here and on the plane, at every layer.',
+    rows: [
+      { label: 'Instances', value: String(top.instances?.length ?? 0) },
+      { label: 'Connections', value: String(top.connections?.length ?? 0) },
+      { label: 'Composites', value: String(composites) },
+    ],
+    sections: [],
+    copy: [],
+  };
 }
