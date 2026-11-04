@@ -278,7 +278,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .pkg-pin.k-audio.connected, .e-pin.k-audio.connected { fill: var(--signal-accent, #4fc3f7); } .pkg-pin.k-control.connected, .e-pin.k-control.connected { fill: #b39ddb; }
 .pkg-pin.k-events.connected, .e-pin.k-events.connected { fill: var(--signal-meter-rms, #3ecf8e); } .pkg-pin.k-vector.connected, .e-pin.k-vector.connected { fill: var(--signal-effective, #ffb74d); }
 /* Hover titles where nothing lies under it: at the Engine its body and pins, at the Wiring its pins (at Control a front panel's piano roll may lie under it). */
-.pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin { pointer-events: all; }
+.pkg-engine .pkg-body, .pkg-engine .pkg-pin, .pkg-wiring .pkg-pin, .pkg-engine .c-pin, .pkg-wiring .c-pin, .pkg-engine .c-auto-pin, .pkg-wiring .c-auto-pin { pointer-events: all; }
 .pkg-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 4; }
 .pkg-pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--w-port, 12px); pointer-events: none; }
 .pkg-control .pkg-pin-label { font-size: 9px; fill: var(--signal-muted, #8a93a3); }
@@ -1565,6 +1565,21 @@ export class SignalPlane extends HTMLElement {
       pinsGroup.append(dot);
       pins.set(p.id, dot);
       labels.append(svg('text', { class: 'pkg-pin-label', x: p.side === 'in' ? p.x + 2 * radius : p.x - 2 * radius, y: p.y + 4, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...small }, p.label));
+    }
+    // Its control pins at every layer (the owner's, 2026-11-04): the bound parameters on its connector, the automation
+    // sources under its outputs. The Control layer draws its own over them, with its legs and wires and their hit tests.
+    if (layer !== 'control') {
+      const small = Math.min(3.5, radius * 0.7);
+      for (const p of pkg.params) {
+        const dot = svg('circle', { class: 'c-pin', cx: p.x, cy: p.y, r: +small.toFixed(2) });
+        dot.append(svg('title', {}, `${p.address}: a bound parameter of ${pkg.title}’s engine (its control at the Control layer)`));
+        pinsGroup.append(dot);
+      }
+      for (const p of pkg.autos) {
+        const dot = svg('circle', { class: 'c-auto-pin', cx: p.x, cy: p.y, r: +(radius * 0.8).toFixed(2) });
+        dot.append(svg('title', {}, `${p.address}: automation out of ${pkg.title}’s engine into a control`));
+        pinsGroup.append(dot);
+      }
     }
     g.append(labels, pinsGroup);
     return { g, pins, labels, pinsGroup };
