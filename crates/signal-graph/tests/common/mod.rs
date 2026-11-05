@@ -442,7 +442,7 @@ pub fn nested() -> (CompositeDef, Vec<CompositeDef>) {
                 conn("mix.out", "echo.in"),
                 ConnectionDef {
                     scale: Some(0.5),
-                    ..conn("echo.out", "mix.in")
+                    ..conn("echo.out", "mix.cv")
                 },
             ],
         )

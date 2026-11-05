@@ -220,7 +220,8 @@ fn a_swap_of_connections_allocates_nothing() {
 }
 
 /// Both inputs of an exclusive pair connected: refused, on a connection
-/// into the second, naming both ports; one of them alone plans.
+/// into the second, naming both ports; one of them alone plans, and two
+/// connections into one of them are refused as a fan-in.
 #[test]
 fn exclusive_inputs_are_refused_together() {
     let errors = plan(&[("c.out", "p.in"), ("t.out", "p.ev")]).unwrap_err();
@@ -248,5 +249,11 @@ fn exclusive_inputs_are_refused_together() {
         "/t.out -> /p.ev: /p.ev and /p.in are both connected; a test.probe takes `in` or `ev`, not both"
     );
     assert!(plan(&[("c.out", "p.in")]).is_ok());
-    assert!(plan(&[("t.out", "p.ev"), ("t.out", "p.ev")]).is_ok());
+    // Two connections into one of them are a fan-in (ADR 0054), not an
+    // exclusive pair.
+    let errors = plan(&[("t.out", "p.ev"), ("t.out", "p.ev")]).unwrap_err();
+    assert!(
+        matches!(errors.as_slice(), [GraphError::FanIn { to, .. }] if to.to_string() == "/p.ev"),
+        "{errors:?}"
+    );
 }

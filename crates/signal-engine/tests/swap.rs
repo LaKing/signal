@@ -39,7 +39,8 @@ fn faded_in(live: f64, j: u64) -> f64 {
 }
 
 /// The plan of `no_allocation.rs`: module and external events, triggers to a
-/// parameter, ramps, modulation, a feedback loop, randomness, a fault.
+/// parameter (through a merge), ramps, modulation, a feedback loop, sums,
+/// randomness, a fault.
 fn rich_plan() -> ExecutionPlan {
     plan(rich_instances(), rich_connections())
 }
@@ -47,19 +48,23 @@ fn rich_plan() -> ExecutionPlan {
 fn rich_instances() -> Vec<InstanceDef> {
     vec![
         inst_with("f1", "test.flood", &[("count", 16.0)]),
-        inst_with("f2", "test.flood", &[("count", 16.0)]),
         inst("c", "test.counter"),
         inst_with("s", "test.setter", &[("value", 0.25)]),
         inst_with("k", "test.const", &[("value", 0.125)]),
+        inst("m", "test.merge"),
         inst("p", "test.probe_add"),
+        inst("q", "test.probe_add"),
         inst_with("t", "test.trigger", &[("period", 2.0)]),
         inst("e", "test.event_delay"),
         inst("impulse", "test.impulse"),
+        inst("sum", "test.add"),
         inst("loop", "test.gain"),
         inst("delay", "test.unit_delay"),
         inst("d", "test.dc"),
         inst("x", "test.faulty"),
         inst("n", "test.noise"),
+        inst("zeta", "test.add"),
+        inst("alpha", "test.add"),
         inst("rec", "test.recorder"),
     ]
 }
@@ -67,19 +72,23 @@ fn rich_instances() -> Vec<InstanceDef> {
 fn rich_connections() -> Vec<ConnectionDef> {
     vec![
         conn("f1.out", "c.in"),
-        conn("f2.out", "c.in"),
-        conn("s.out", "p.value"),
-        conn("k.out", "p.value"),
-        conn("t.out", "p.value"),
+        conn("s.out", "m.a"),
+        conn("t.out", "m.b"),
+        conn("m.out", "p.value"),
+        conn("k.out", "q.value"),
         conn("t.out", "e.in"),
-        conn("impulse.out", "loop.in"),
-        scaled("delay.out", "loop.in", 0.5),
+        scaled("delay.out", "sum.a", 0.5),
+        conn("impulse.out", "sum.b"),
+        conn("sum.out", "loop.in"),
         conn("loop.out", "delay.in"),
-        conn("d.out", "rec.zeta"),
-        conn("x.out", "rec.zeta"),
-        conn("n.out", "rec.alpha"),
-        conn("loop.out", "rec.alpha"),
-        conn("p.out", "rec.alpha"),
+        conn("d.out", "zeta.a"),
+        conn("x.out", "zeta.b"),
+        conn("zeta.out", "rec.zeta"),
+        conn("loop.out", "alpha.a"),
+        conn("n.out", "alpha.b"),
+        conn("p.out", "alpha.c"),
+        conn("q.out", "alpha.d"),
+        conn("alpha.out", "rec.alpha"),
     ]
 }
 
@@ -293,25 +302,27 @@ fn removal_plans() -> (ExecutionPlan, ExecutionPlan) {
         vec![
             inst("pm", "test.probe_mul"),
             inst("pr", "test.probe_replace"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
+        ]
+    };
+    let probes = || {
+        vec![
+            conn("pm.out", "alpha.a"),
+            conn("pr.out", "alpha.b"),
+            conn("alpha.out", "rec.alpha"),
         ]
     };
     let mut with = receivers();
     with.push(inst_with("o", "test.osc", &[("freq", 130.0)]));
-    let with = plan(
-        with,
-        vec![
-            conn("o.out", "rec.zeta"),
-            conn("o.out", "pm.value"),
-            scaled("o.out", "pr.value", -1.0),
-            conn("pm.out", "rec.alpha"),
-            conn("pr.out", "rec.alpha"),
-        ],
-    );
-    let without = plan(
-        receivers(),
-        vec![conn("pm.out", "rec.alpha"), conn("pr.out", "rec.alpha")],
-    );
+    let mut connections = vec![
+        conn("o.out", "rec.zeta"),
+        conn("o.out", "pm.value"),
+        scaled("o.out", "pr.value", -1.0),
+    ];
+    connections.extend(probes());
+    let with = plan(with, connections);
+    let without = plan(receivers(), probes());
     (with, without)
 }
 
@@ -412,9 +423,9 @@ fn removal_after_suspend_matches_an_ordinary_suspend() {
 }
 
 /// S3, cases C and D: a disconnect between survivors takes effect on the swap
-/// frame, with no fade and no hold; when a parameter loses a removed source
-/// and a surviving one, only the removed part is held. A rewired signal input
-/// changes on the swap frame.
+/// frame, with no fade and no hold; a parameter that loses a removed source
+/// holds it, one that loses a surviving source holds nothing. A rewired
+/// signal input changes on the swap frame.
 #[test]
 fn connection_changes_between_survivors_take_effect_on_the_swap_frame() {
     // Case C: /k (0.25) → /pr.value (Replace, base 0.5), then disconnected.
@@ -449,21 +460,25 @@ fn connection_changes_between_survivors_take_effect_on_the_swap_frame() {
     assert_eq!(engine.signal_input(&alpha), Some(0.25));
 
     // Case D: /pm.value (Multiply, base 0.5) loses /o (removed after its
-    // fade) and /k (0.25, survives, disconnected): the held modulation is the
-    // removed part alone, +0.0, so the effective value is 0, not 0.5 (no hold)
-    // or 0.125 (the surviving part kept).
+    // fade): the held modulation is its faded +0.0, so the effective value is
+    // 0, not 0.5 (no hold). /pm2.value loses /k (0.25, survives,
+    // disconnected): nothing is held, so 0.5, not 0.125 (the surviving part
+    // kept). (The two sources once met at one parameter; ADR 0054 gives each
+    // parameter one connection.)
     let both = plan(
         vec![
             inst_with("o", "test.osc", &[("freq", 130.0)]),
             inst_with("k", "test.const", &[("value", 0.25)]),
             inst("pm", "test.probe_mul"),
+            inst("pm2", "test.probe_mul"),
         ],
-        vec![conn("o.out", "pm.value"), conn("k.out", "pm.value")],
+        vec![conn("o.out", "pm.value"), conn("k.out", "pm2.value")],
     );
     let neither = plan(
         vec![
             inst_with("k", "test.const", &[("value", 0.25)]),
             inst("pm", "test.probe_mul"),
+            inst("pm2", "test.probe_mul"),
         ],
         vec![],
     );
@@ -473,14 +488,19 @@ fn connection_changes_between_survivors_take_effect_on_the_swap_frame() {
     for _ in 0..at {
         engine.run_frame();
     }
-    assert_eq!(
-        engine.parameter(&port_addr("/pm.value")).unwrap().effective,
-        0.125
-    );
+    let effective = |engine: &Engine, port: &str| {
+        engine
+            .parameter(&port_addr(port))
+            .unwrap()
+            .effective
+            .to_bits()
+    };
+    assert_eq!(effective(&engine, "/pm.value"), 0.0f64.to_bits());
+    assert_eq!(effective(&engine, "/pm2.value"), 0.125f64.to_bits());
     swap_at(&mut engine, &neither, at);
     engine.run_frame();
-    let effective = engine.parameter(&port_addr("/pm.value")).unwrap().effective;
-    assert_eq!(effective.to_bits(), 0.0f64.to_bits());
+    assert_eq!(effective(&engine, "/pm.value"), 0.0f64.to_bits());
+    assert_eq!(effective(&engine, "/pm2.value"), 0.5f64.to_bits());
 }
 
 /// S3: versions count from 0, and the swap record names both versions.
@@ -737,13 +757,15 @@ fn runs_are_deterministic_and_pushing_equals_up_front() {
             inst_with("t", "test.trigger", &[("period", 3.0)]),
             inst("n", "test.noise"),
             inst("o", "test.osc"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
             conn("t.out", "c.in"),
             conn("n.out", "rec.zeta"),
-            conn("o.out", "rec.alpha"),
-            conn("p.out", "rec.alpha"),
+            conn("o.out", "alpha.a"),
+            conn("p.out", "alpha.b"),
+            conn("alpha.out", "rec.alpha"),
         ],
     );
     let scenario = |events: Vec<ExternalEvent>, mode: u8| {
@@ -1001,7 +1023,7 @@ fn swaps_on_workers_rebuild_tasks_and_keep_the_pool() {
     let a = rich_plan();
     // The same instances and connections as `rich_plan`, plus `o2`.
     let b = {
-        let mut connections = vec![scaled("o2.out", "rec.zeta", 0.25)];
+        let mut connections = vec![scaled("o2.out", "zeta.c", 0.25)];
         connections.extend(rich_connections());
         let mut instances = rich_instances();
         instances.push(inst_with("o2", "test.osc", &[("freq", 330.0)]));

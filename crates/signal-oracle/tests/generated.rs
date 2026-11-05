@@ -5,6 +5,9 @@
 //! retype), run by the oracle and by the block engine at three
 //! configurations each (a block size, a thread count, a partition), which
 //! must match bit for bit: audio, log, final parameters and instance states.
+//! An input takes at most one connection (ADR 0054): where the generator
+//! draws two sources for one, they meet in a `std.add`, `std.mix` or
+//! `std.merge` of their own.
 //!
 //! Each case's graph is built twice from one random spec: as the engine's
 //! `CompositeDef` (through `signal_graph::build_plan`) and as the oracle's
@@ -99,6 +102,8 @@ struct Generator<'r> {
     /// The types instances are drawn from.
     types: Vec<&'static str>,
     next_rank: usize,
+    /// The next summing module's number (`s0`, `s1`, …).
+    next_sum: usize,
 }
 
 impl Generator<'_> {
@@ -206,7 +211,9 @@ impl Generator<'_> {
     /// Connects each input and parameter of `node` to 0–2 sources, but
     /// never both inputs of a pair its type makes exclusive (ADR 0033: a
     /// sequencer's `tick` and `follow`): the second of a pair whose first
-    /// is connected is left unconnected (its draws still made).
+    /// is connected is left unconnected (its draws still made). Two
+    /// distinct sources meet in a module ([`Generator::sum`]), never at the
+    /// input (ADR 0054: one connection per input).
     fn wire(&mut self, spec: &mut Spec, node: &Node) {
         let pairs: Vec<(&str, &str)> = self.registry.exclusive_pairs(node.type_name).collect();
         for port in self.ports(node, Direction::In) {
@@ -223,15 +230,67 @@ impl Generator<'_> {
                     spec.connections.iter().any(|(_, t, _)| *t == to)
                 }
             });
+            let mut picked: Vec<String> = Vec::new();
             for _ in 0..count {
                 let Some(from) = self.rng.pick(&candidates).cloned() else {
                     break;
                 };
-                if !taken {
-                    self.connect(spec, from, format!("{}.{}", node.name, port.name));
+                if !picked.contains(&from) {
+                    picked.push(from);
+                }
+            }
+            if taken {
+                continue;
+            }
+            let to = format!("{}.{}", node.name, port.name);
+            match <[String; 2]>::try_from(picked) {
+                Ok([a, b]) => self.sum(spec, node, a, b, to),
+                Err(picked) => {
+                    if let Some(from) = picked.into_iter().next() {
+                        self.connect(spec, from, to);
+                    }
                 }
             }
         }
+    }
+
+    /// Two sources `a` and `b` of `to` (an input of `target`) through a
+    /// module of their own (ADR 0054): signals into a `std.add` or onto two
+    /// of a `std.mix`'s inputs, events onto two of a `std.merge`'s, in a
+    /// drawn order; the module takes `target`'s rank, so it reads only what
+    /// `target` may read and no input of `target` reads it but `to`. A
+    /// signal and events (a parameter takes both) cannot meet: `a` alone.
+    fn sum(&mut self, spec: &mut Spec, target: &Node, a: String, b: String, to: String) {
+        const FOUR: [&str; 4] = ["a", "b", "c", "d"];
+        let two = |g: &mut Self| {
+            let i = g.rng.below(4);
+            let j = (i + 1 + g.rng.below(3)) % 4;
+            [FOUR[i], FOUR[j]]
+        };
+        let (type_name, ports) = match (
+            self.is_signal_output(spec, &a),
+            self.is_signal_output(spec, &b),
+        ) {
+            (true, true) if self.rng.chance(50) => ("std.add", ["a", "b"]),
+            (true, true) => ("std.mix", two(self)),
+            (false, false) => ("std.merge", two(self)),
+            _ => {
+                self.connect(spec, a, to);
+                return;
+            }
+        };
+        if self.registry.get(type_name).is_none() {
+            self.connect(spec, a, to);
+            return;
+        }
+        let name = format!("s{}", self.next_sum);
+        self.next_sum += 1;
+        let mut node = self.node(name.clone(), type_name);
+        node.rank = target.rank;
+        spec.nodes.push(node);
+        self.connect(spec, a, format!("{name}.{}", ports[0]));
+        self.connect(spec, b, format!("{name}.{}", ports[1]));
+        self.connect(spec, format!("{name}.out"), to);
     }
 
     /// Adds a connection unless it exists; a scale on signals only.
@@ -424,6 +483,7 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         rng: Rng(SplitMix64::new(draw.seed)),
         types,
         next_rank: 0,
+        next_sum: 0,
     };
     let fade = ((u64::from(draw.rate) * 5 + 500) / 1000).max(1);
 
@@ -689,12 +749,15 @@ proptest! {
 
 /// The generator reaches what AC-GEN asks for, over the cases' seeds: every
 /// standard type, feedback through `unit_delay` and `delay`, modulation,
-/// event connections, events of every kind, edits and swaps.
+/// event connections, events of every kind, edits and swaps, and sources
+/// that meet in a summing module (`std.add`, `std.mix`) or a `std.merge`
+/// (ADR 0054), where they once met at the input.
 #[test]
 fn the_generator_covers_its_dimensions() {
     let registry = registry();
     let mut types = BTreeSet::new();
     let (mut feedback, mut modulation, mut event_links) = (0, 0, 0);
+    let (mut sums, mut merges) = (0, 0);
     let (mut sets, mut ramps, mut triggers, mut edits, mut swaps) = (0, 0, 0, 0, 0);
     for seed in 0..u64::from(CASES) {
         let draw = Draw {
@@ -708,6 +771,19 @@ fn the_generator_covers_its_dimensions() {
         let case = build(&registry, &draw);
         for i in &case.plan.instances {
             types.insert(i.type_name);
+            let fed = case
+                .plan
+                .sources
+                .keys()
+                .filter(|to| to.instance() == i.address)
+                .count();
+            if i.address.to_string().starts_with("/s") && fed >= 2 {
+                match i.type_name {
+                    "std.add" | "std.mix" => sums += 1,
+                    "std.merge" => merges += 1,
+                    _ => {}
+                }
+            }
         }
         let position: Vec<_> = case.plan.schedule.iter().collect();
         for (to, sources) in &case.plan.sources {
@@ -775,6 +851,8 @@ fn the_generator_covers_its_dimensions() {
         ("triggers", triggers),
         ("edits", edits),
         ("swaps", swaps),
+        ("summed sources", sums),
+        ("merged sources", merges),
     ] {
         assert!(count > 0, "the generator made no {what}");
     }

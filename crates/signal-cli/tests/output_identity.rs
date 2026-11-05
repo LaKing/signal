@@ -79,7 +79,9 @@ fn offline_renders_are_unchanged() {
         rendered(&kick, 96_000, Vec::new()),
         (
             "01b87fbc1854a9b9".to_owned(),
-            "ea16ce98bb2f93a4".to_owned(),
+            // Since the kick's beats and ghost notes meet in a `std.merge`
+            // (ADR 0054), the log has the merge's deliveries too.
+            "5b803d360b719e2b".to_owned(),
             "01b87fbc1854a9b9".to_owned()
         )
     );

@@ -1,9 +1,9 @@
 //! M2.6-2 AC2 (ADR 0019 §2): 1 000 blocks on 8 threads, with a random delay
 //! of 0–50 µs at the start of every task (the engine's test hook), give the
 //! same audio, log and counters bit for bit as one thread, with the checked
-//! mode's exclusivity tracker on. The plan sums several signal sources into
-//! one input, modulates parameters, merges events from three sources into
-//! one input, runs a feedback loop and a fault (with the undo of the frames
+//! mode's exclusivity tracker on. The plan sums several signal sources (in
+//! `test.add`s), modulates parameters, merges events from three sources (in
+//! a `test.merge`, ADR 0054), runs a feedback loop and a fault (with the undo of the frames
 //! after it), and takes pushed external events in every block. The tracker's
 //! own figures are checked only where it is compiled in (debug builds); the
 //! results and the refusals are checked in every build (M2.7-3, finding 6).
@@ -30,48 +30,64 @@ fn stress_plan() -> ExecutionPlan {
             inst_with("f1", "test.flood", &[("count", 4.0)]),
             inst_with("f2", "test.flood", &[("count", 3.0)]),
             inst_with("t", "test.trigger", &[("period", 3.0)]),
+            inst("events", "test.merge"),
             inst("c", "test.counter"),
             inst_with("s", "test.setter", &[("value", 0.25)]),
             inst_with("k", "test.const", &[("value", 0.125)]),
+            inst("sets", "test.merge"),
             inst("p", "test.probe_add"),
+            inst("q", "test.probe_add"),
             inst("e", "test.event_delay"),
             inst_with("o1", "test.osc", &[("freq", 110.0)]),
             inst_with("o2", "test.osc", &[("freq", 230.0)]),
             inst("n", "test.noise"),
+            inst("mix", "test.add"),
             inst("sum", "test.gain"),
             inst("impulse", "test.impulse"),
+            inst("fed", "test.add"),
             inst("loop", "test.gain"),
             inst("delay", "test.unit_delay"),
             inst("d", "test.dc"),
             inst("x", "test.faulty"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
+            inst("alpha2", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            // Three event sources into one input.
-            conn("f1.out", "c.in"),
-            conn("f2.out", "c.in"),
-            conn("t.out", "c.in"),
-            // Events and modulation into one parameter.
-            conn("s.out", "p.value"),
-            conn("k.out", "p.value"),
-            conn("t.out", "p.value"),
+            // Three event sources merged into one input.
+            conn("f1.out", "events.a"),
+            conn("f2.out", "events.b"),
+            conn("t.out", "events.c"),
+            conn("events.out", "c.in"),
+            // Events into one parameter, modulation into another.
+            conn("s.out", "sets.a"),
+            conn("t.out", "sets.b"),
+            conn("sets.out", "p.value"),
+            conn("k.out", "q.value"),
             conn("t.out", "e.in"),
-            // Three signal sources into one input, its gain modulated.
-            conn("o1.out", "sum.in"),
-            scaled("o2.out", "sum.in", 0.5),
-            scaled("n.out", "sum.in", 0.25),
+            // Three signal sources summed into one input, its gain modulated.
+            scaled("n.out", "mix.a", 0.25),
+            conn("o1.out", "mix.b"),
+            scaled("o2.out", "mix.c", 0.5),
+            conn("mix.out", "sum.in"),
             scaled("d.out", "sum.gain", 0.5),
             // A feedback loop.
-            conn("impulse.out", "loop.in"),
-            scaled("delay.out", "loop.in", 0.5),
+            scaled("delay.out", "fed.a", 0.5),
+            conn("impulse.out", "fed.b"),
+            conn("fed.out", "loop.in"),
             conn("loop.out", "delay.in"),
             // The sink.
-            conn("sum.out", "rec.zeta"),
-            conn("x.out", "rec.zeta"),
-            conn("loop.out", "rec.alpha"),
-            conn("p.out", "rec.alpha"),
-            conn("c.out", "rec.alpha"),
-            conn("e.out", "rec.alpha"),
+            conn("sum.out", "zeta.a"),
+            conn("x.out", "zeta.b"),
+            conn("zeta.out", "rec.zeta"),
+            conn("c.out", "alpha.a"),
+            conn("e.out", "alpha.b"),
+            conn("loop.out", "alpha.c"),
+            conn("p.out", "alpha.d"),
+            conn("alpha.out", "alpha2.a"),
+            conn("q.out", "alpha2.b"),
+            conn("alpha2.out", "rec.alpha"),
         ],
     )
 }

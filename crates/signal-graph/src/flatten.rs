@@ -355,6 +355,23 @@ impl<'a> Flattener<'a> {
                 name: name.clone(),
             });
         }
+
+        // ADR 0054 §1: a parameter takes its control or one connection, never both: neither an
+        // inner connection nor an exported input (a connection from outside) onto it.
+        for export in &exports.parameters {
+            for parameter in &export.to {
+                if def.connections.iter().any(|c| c.to == *parameter)
+                    || exports.inputs.iter().any(|i| i.to.contains(parameter))
+                {
+                    self.errors.push(GraphError::ControlAndConnection {
+                        scope: scope.cloned(),
+                        composite: def.name.clone(),
+                        name: export.name.clone(),
+                        parameter: parameter.clone(),
+                    });
+                }
+            }
+        }
     }
 
     /// Resolves `instance` at `address`: its module, with the parameter

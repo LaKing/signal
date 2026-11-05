@@ -145,7 +145,8 @@ fn wire(from: &str, to: &str, scale: f64) -> ConnectionDef {
     }
 }
 
-/// The three watchers fed by `source` (`c` or `d`), heard on the sink.
+/// The three watchers fed by `source` (`c` or `d`), heard on the sink (`ws`
+/// and `wp` on its right channel through a `std.add`, ADR 0054).
 fn plan(source: &str, version: u64) -> ExecutionPlan {
     let root = CompositeDef {
         name: "project".to_owned(),
@@ -155,6 +156,7 @@ fn plan(source: &str, version: u64) -> ExecutionPlan {
             instance("w4", "test.watch4", &[]),
             instance("ws", "test.watch_state", &[]),
             instance("wp", "test.watch", &[]),
+            instance("sum", "std.add", &[]),
             instance("out", "std.audio_out", &[]),
         ],
         connections: vec![
@@ -162,8 +164,9 @@ fn plan(source: &str, version: u64) -> ExecutionPlan {
             wire(&format!("{source}.out"), "ws.in", 1.0),
             wire(&format!("{source}.out"), "wp.in", 1.0),
             wire("w4.out", "out.l", 1.0),
-            wire("ws.out", "out.r", 0.5),
-            wire("wp.out", "out.r", 0.25),
+            wire("ws.out", "sum.a", 0.5),
+            wire("wp.out", "sum.b", 0.25),
+            wire("sum.out", "out.r", 1.0),
         ],
         exports: Exports::default(),
     };

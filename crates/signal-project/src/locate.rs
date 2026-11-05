@@ -215,9 +215,6 @@ impl<'a> Locator<'a> {
             | GraphWarning::ConstantBeyondRange { from, to, .. } => {
                 self.connection_or_instance(from, to)
             }
-            GraphWarning::FanIn { to, from } => from
-                .get(1)
-                .and_then(|from| self.connection_or_instance(from, to)),
             GraphWarning::NoSinkReachable { instance } => self.instance_key(instance),
             // ADR 0042, 0043: at the value as written (the outermost that wins).
             GraphWarning::ParameterCorrected { parameter, .. } => self.winning_value(parameter),
@@ -248,6 +245,7 @@ impl<'a> Locator<'a> {
                 Some(at(def, def.instances.get(name)?.key.start))
             }
             GraphError::ExportNameCollision { scope, name, .. }
+            | GraphError::ControlAndConnection { scope, name, .. }
             | GraphError::EmptyExport { scope, name, .. }
             | GraphError::ExportRangeOutside { scope, name, .. }
             | GraphError::ExportRangeWithoutValues { scope, name, .. }
@@ -313,6 +311,8 @@ impl<'a> Locator<'a> {
                     .or_else(|| self.connection(from, to))?;
                 Some(at(def, connection.entry.start))
             }
+            // At the second connection into it (else its instance, a slot's wire).
+            GraphError::FanIn { to, from } => self.connection_or_instance(from.get(1)?, to),
             GraphError::ExclusiveInputs { from, to, .. } => {
                 let (def, connection) = self.connection(from, to)?;
                 Some(at(def, connection.entry.start))

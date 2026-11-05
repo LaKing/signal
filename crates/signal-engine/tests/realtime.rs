@@ -25,32 +25,40 @@ const RATE: u32 = 1_000;
 const SEED: u64 = 42;
 const FRAMES: u64 = 3_000;
 
-/// Version 0: a tone and a constant into a sink with `gain` 0.5.
+/// Version 0: a tone (through the `test.add` version 1 sums it in) and a
+/// constant into a sink with `gain` 0.5.
 fn v0() -> ExecutionPlan {
     let mut plan = plan(
         vec![
             inst_with("osc", "test.osc", &[("freq", 110.0)]),
             inst("dc", "test.dc"),
+            inst("sum", "test.add"),
             inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
         ],
-        vec![conn("osc.out", "out.l"), conn("dc.out", "out.r")],
+        vec![
+            conn("osc.out", "sum.a"),
+            conn("sum.out", "out.l"),
+            conn("dc.out", "out.r"),
+        ],
     );
     plan.version = 0;
     plan
 }
 
-/// Version 1: a second tone added.
+/// Version 1: a second tone added, on `sum.b`.
 fn v1() -> ExecutionPlan {
     let mut plan = plan(
         vec![
             inst_with("osc", "test.osc", &[("freq", 110.0)]),
             inst_with("osc2", "test.osc", &[("freq", 230.0)]),
             inst("dc", "test.dc"),
+            inst("sum", "test.add"),
             inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
         ],
         vec![
-            conn("osc.out", "out.l"),
-            scaled("osc2.out", "out.l", 0.5),
+            conn("osc.out", "sum.a"),
+            scaled("osc2.out", "sum.b", 0.5),
+            conn("sum.out", "out.l"),
             conn("dc.out", "out.r"),
         ],
     );

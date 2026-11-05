@@ -14,7 +14,8 @@ import { exampleProjects } from '../../scripts/board-metrics.mjs';
 
 /** `level: [crossings, bends, maxBends, over2, length]`. */
 const BOUNDS = {
-  'kick (top)': [8, 42, 6, 8, 4400],
+  // 2026-11-05: its beats and ghost notes meet in a std.merge (ADR 0054 phase 2): a card more, 6 → 10 crossings.
+  'kick (top)': [13, 42, 6, 8, 4400],
   'kick /drums (drums)': [2, 11, 4, 1, 300],
   'kick /drums/kick (kick)': [4, 15, 6, 1, 1900],
   'pulse (top)': [48, 172, 16, 17, 15900],

@@ -6,7 +6,8 @@
 //! (`panel.check`), which refuses an editable control on a parameter that
 //! `commit` cannot write (AC8). AC6: a project without `ui/main.html` is
 //! served the generated panel, whose scope is on the audio sink's input: a
-//! scope on a signal input shows the sum of its sources. Each scenario runs
+//! scope on a signal input shows what its one connection carries (ADR 0054),
+//! there the `std.add` of two sources. Each scenario runs
 //! in process (here) and over TCP (the operator's twin: a sandbox cannot
 //! bind loopback).
 
@@ -249,9 +250,10 @@ both!(
 );
 
 /// The generated panel's scope is on the audio sink's input: in the tone
-/// project `/out.l` receives `/a.out` + `/b.out`, and a scope on it shows
-/// that sum, not either source.
-fn a_scope_on_the_sinks_input_shows_the_sum_of_its_sources(transport: Transport) {
+/// project `/out.l` takes `/sum.out`, the `std.add` of `/a.out` and `/b.out`
+/// (ADR 0054: one connection per input), and a scope on it shows that sum,
+/// not either source.
+fn a_scope_on_the_sinks_input_shows_the_sum_it_takes(transport: Transport) {
     let mut rig = rig(
         "sink-scope",
         Options {
@@ -301,7 +303,7 @@ fn a_scope_on_the_sinks_input_shows_the_sum_of_its_sources(transport: Transport)
     rig.finish();
 }
 
-both!(a_scope_on_the_sinks_input_shows_the_sum_of_its_sources);
+both!(a_scope_on_the_sinks_input_shows_the_sum_it_takes);
 
 /// AC6 over HTTP (TCP only, the operator's): `/project/main.html` is the
 /// project's panel, else the generated one from the UI library.

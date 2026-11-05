@@ -88,7 +88,7 @@ fn faults(render: &Render) -> Vec<String> {
 }
 
 /// AC6: at 44.1 and 192 kHz, 1 s each, the ladder at resonance 1 and
-/// drive 10, its input a saw plus a constant 10⁶ and its cutoff swept by a
+/// drive 10, its input a saw plus a constant just under 10⁶ (a `std.add`, at the bound) and its cutoff swept by a
 /// 1 kHz sine across `[1, 0.45·sr]` (an audio-rate LFO), runs without a
 /// fault: the engine checks every output value for being finite and within
 /// 10⁶. So does a saw alone at resonance 1, where the filter self-oscillates,
@@ -102,9 +102,11 @@ fn stays_within_the_bound_through_the_engine() {
             "saw = { module = \"std.osc\", shape = 1, freq = 110 }\n\
              top = { module = \"std.const\", value = 1000000 }\n\
              lfo = { module = \"std.sine_osc\", freq = 1000 }\n\
+             sum = { module = \"std.add\" }\n\
              ladder = { module = \"std.ladder\", cutoff_hz = 20000, resonance = 1, drive = 10 }",
-            "{ from = \"saw.out\", to = \"ladder.in\" },\n\
-             { from = \"top.out\", to = \"ladder.in\" },\n\
+            "{ from = \"saw.out\", to = \"sum.a\" },\n\
+             { from = \"top.out\", to = \"sum.b\", scale = 0.999999 },\n\
+             { from = \"sum.out\", to = \"ladder.in\" },\n\
              { from = \"lfo.out\", to = \"ladder.cutoff_hz\", scale = 20000 },\n",
         ),
         (

@@ -36,8 +36,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// **Formula:** `out[n] = a[n] + b[n]`. Stateless; constant work per frame.
 ///
 /// **Operands:** ordered ports `a` and `b`; the sum is commutative, so
-/// swapping them never changes the output (several sources into one port sum
-/// first, in canonical source order, `docs/semantics.md` §3).
+/// swapping them never changes the output (each port takes one connection,
+/// ADR 0054).
 #[derive(Clone, Debug, Default)]
 pub struct Add;
 

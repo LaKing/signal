@@ -165,7 +165,6 @@ fn core_results_beyond_the_bound_are_clamped_without_a_fault() {
             inst("seven", "std.const", &[("value", 7.0)]),
             inst("pole", "std.const", &[("value", pi_2)]),
             inst("top", "std.const", &[("value", 1e6)]),
-            inst("top2", "std.const", &[("value", 1e6)]),
             inst("div", "std.div", &[]),
             inst("div_neg", "std.div", &[]),
             inst("exp", "std.exp", &[]),
@@ -187,8 +186,8 @@ fn core_results_beyond_the_bound_are_clamped_without_a_fault() {
             conn("seven.out", "pow_neg.b"),
             conn("pole.out", "tan.in"),
             // Two sources sum to 2e6 at the input.
-            conn("top.out", "neg.in"),
-            conn("top2.out", "neg.in"),
+            // 2e6 at the input (one connection per input, ADR 0054: by its scale).
+            scaled("top.out", "neg.in", 2.0),
             conn("div.out", "out.l"),
             conn("neg.out", "out.r"),
         ],
@@ -217,7 +216,7 @@ fn core_results_beyond_the_bound_are_clamped_without_a_fault() {
 /// M2.10-2 AC10, AC11: core set II rendered past the bound through the
 /// engine, with no fault and nothing muted. A counter stepping 1e5 per
 /// trigger (1.25e7 in all), an integrator of 1e6 at gain 1e5, a buffer write
-/// of a fan-in sum of 2e6, a table's Hermite overshoot (its elements within
+/// of 2e6 (1e6 at scale 2), a table's Hermite overshoot (its elements within
 /// ±10⁵ since ADR 0043: 1.125e5), a random value within ±10⁵, the vector sum
 /// of 1024 elements of 1e6, vadd and vmul of them, a phasor at 1e5 Hz (its
 /// range's end, 100 times the rate), a latch and a route of an external
@@ -226,7 +225,6 @@ fn core_results_beyond_the_bound_are_clamped_without_a_fault() {
 fn core_set_two_stays_within_the_bound() {
     let instances = vec![
         inst("top", "std.const", &[("value", 1e6)]),
-        inst("top2", "std.const", &[("value", 1e6)]),
         inst("one", "std.const", &[("value", 1.0)]),
         inst("half", "std.const", &[("value", 1.5)]),
         inst("clk", "std.phasor", &[("freq", 250.0)]),
@@ -257,8 +255,7 @@ fn core_set_two_stays_within_the_bound() {
         conn("clk.wrap", "cnt.trigger"),
         conn("clk.wrap", "rnd.trigger"),
         conn("top.out", "int.in"),
-        conn("top.out", "buf.value"),
-        conn("top2.out", "buf.value"),
+        scaled("top.out", "buf.value", 2.0),
         conn("one.out", "buf.gate"),
         conn("half.out", "tab.pos"),
         conn("pk.out", "red.in"),
@@ -269,8 +266,7 @@ fn core_set_two_stays_within_the_bound() {
         conn("vs.out", "ixs.in"),
         conn("vm.out", "ixm.in"),
         conn("rt.b", "lrt.in"),
-        conn("top.out", "te.in"),
-        conn("top2.out", "te.in"),
+        scaled("top.out", "te.in", 2.0),
         conn("te.out", "lte.in"),
         conn("cnt.count", "out.l"),
         conn("fast.phase", "out.r"),
@@ -324,9 +320,9 @@ fn core_set_two_stays_within_the_bound() {
     }
 }
 
-/// Review item 3, through the engine: `std.pack2` of fan-in sums of ±2e6
-/// clamps its elements to ±1e6; `std.unpack2` of two vectors meeting at its
-/// input ([2e6, −2e6]) clamps its outputs; a `std.buffer1k` holding
+/// Review item 3, through the engine: `std.pack2` of ±2e6 (±1e6 at scale 2)
+/// clamps its elements to ±1e6; `std.unpack2` of the clamped vector at scale
+/// 2 ([2e6, −2e6]) clamps its outputs; a `std.buffer1k` holding
 /// [0, 1e6, 1e6, 0] (written from a wrapping table of [0, 1e5, 1e5, 0],
 /// scaled by 10 on its way, index modulo 4) read at
 /// 1.5 with Hermite overshoots to 1.125e6 and is clamped to 1e6. No fault,
@@ -336,14 +332,11 @@ fn pack_unpack_and_a_buffer_overshoot_stay_within_the_bound() {
     let plan = plan(
         vec![
             inst("top", "std.const", &[("value", 1e6)]),
-            inst("top2", "std.const", &[("value", 1e6)]),
             inst("neg", "std.const", &[("value", -1e6)]),
-            inst("neg2", "std.const", &[("value", -1e6)]),
             inst("one", "std.const", &[("value", 1.0)]),
             inst("half", "std.const", &[("value", 1.5)]),
             inst("n", "std.frames", &[]),
             inst("pa", "std.pack2", &[]),
-            inst("pb", "std.pack2", &[]),
             inst("ua", "std.unpack2", &[]),
             inst("ub", "std.unpack2", &[]),
             inst(
@@ -355,16 +348,11 @@ fn pack_unpack_and_a_buffer_overshoot_stay_within_the_bound() {
             inst("out", "std.audio_out", &[]),
         ],
         vec![
-            conn("top.out", "pa.e0"),
-            conn("top2.out", "pa.e0"),
-            conn("neg.out", "pa.e1"),
-            conn("neg2.out", "pa.e1"),
-            conn("top.out", "pb.e0"),
-            conn("neg.out", "pb.e1"),
-            // pa clamps to [1e6, −1e6]; with pb, ub receives [2e6, −2e6].
+            scaled("top.out", "pa.e0", 2.0),
+            scaled("neg.out", "pa.e1", 2.0),
+            // pa clamps to [1e6, −1e6]; at scale 2, ub receives [2e6, −2e6].
             conn("pa.out", "ua.in"),
-            conn("pa.out", "ub.in"),
-            conn("pb.out", "ub.in"),
+            scaled("pa.out", "ub.in", 2.0),
             conn("n.lo", "tab.pos"),
             conn("n.lo", "buf.index"),
             scaled("tab.out", "buf.value", 10.0),
@@ -387,7 +375,7 @@ fn pack_unpack_and_a_buffer_overshoot_stay_within_the_bound() {
     ] {
         assert_eq!(output(&engine, port), expected, "{port}");
     }
-    for name in ["pa", "pb", "ua", "ub", "tab", "buf"] {
+    for name in ["pa", "ua", "ub", "tab", "buf"] {
         let address: InstanceAddress = format!("/{name}").parse().unwrap();
         assert_eq!(engine.is_muted(&address), Some(false), "{name}");
     }
@@ -431,12 +419,11 @@ fn random_holds_its_value_when_the_bounds_change() {
     assert!((5e4..1e5).contains(&drawn), "{drawn}");
 }
 
-/// M2.10-2 AC4, AC8: `Set` events that meet in one event input on one frame
-/// apply in canonical order, by source address (ADR 0016 §3), so the later
-/// address wins in a latch, whichever is connected first; route keeps that
-/// order.
+/// M2.10-2 AC4, AC8: `Set` events that meet on one frame apply in the order
+/// of the `std.merge` they meet in (ADR 0054: `a`'s before `b`'s), so `b`'s
+/// wins in a latch, whatever the sources' addresses; route keeps that order.
 #[test]
-fn same_frame_sets_meet_in_canonical_order() {
+fn same_frame_sets_meet_in_the_merges_order() {
     let plan = plan(
         vec![
             inst("one", "std.const", &[("value", 1.0)]),
@@ -445,6 +432,8 @@ fn same_frame_sets_meet_in_canonical_order() {
             inst("tb", "std.to_events", &[]),
             inst("tc", "std.to_events", &[]),
             inst("td", "std.to_events", &[]),
+            inst("m1", "std.merge", &[]),
+            inst("m2", "std.merge", &[]),
             inst("l1", "std.latch", &[]),
             inst("l2", "std.latch", &[]),
             inst("gate", "std.const", &[("value", 1.0)]),
@@ -457,13 +446,14 @@ fn same_frame_sets_meet_in_canonical_order() {
             conn("two.out", "tb.in"),
             conn("two.out", "tc.in"),
             conn("one.out", "td.in"),
-            // Connected in the other order: the addresses decide.
-            conn("tb.out", "l1.in"),
-            conn("ta.out", "l1.in"),
-            conn("td.out", "l2.in"),
-            conn("tc.out", "l2.in"),
-            conn("tb.out", "rt.in"),
-            conn("ta.out", "rt.in"),
+            // The ports decide, not the addresses: /tc.out sorts before /td.out, yet on b it is later.
+            conn("ta.out", "m1.a"),
+            conn("tb.out", "m1.b"),
+            conn("td.out", "m2.a"),
+            conn("tc.out", "m2.b"),
+            conn("m1.out", "l1.in"),
+            conn("m2.out", "l2.in"),
+            conn("m1.out", "rt.in"),
             conn("gate.out", "rt.gate"),
             conn("rt.a", "lr.in"),
             conn("l1.out", "out.l"),
@@ -472,23 +462,15 @@ fn same_frame_sets_meet_in_canonical_order() {
     );
     let mut engine = engine(&plan);
     assert_eq!(run_until(&mut engine, 4), []);
-    assert_eq!(
-        output(&engine, "/l1.out"),
-        2.0,
-        "/tb.out sorts after /ta.out"
-    );
-    assert_eq!(
-        output(&engine, "/l2.out"),
-        1.0,
-        "/td.out sorts after /tc.out"
-    );
+    assert_eq!(output(&engine, "/l1.out"), 2.0, "/tb.out on b, after a");
+    assert_eq!(output(&engine, "/l2.out"), 2.0, "/tc.out on b, after a");
     assert_eq!(output(&engine, "/lr.out"), 2.0);
 }
 
 /// M2.10-2 AC6, AC10 (finding auditor-1-vector-premature-clamping): index and
-/// reduce compute from the elements as received, a fan-in sum beyond the
-/// bound included, and clamp only their results. Two `std.pack2` of
-/// [1e6, −5e5] sum to [2e6, −1e6] at the inputs: sum 1e6, mean 5e5, min
+/// reduce compute from the elements as received, beyond the bound included,
+/// and clamp only their results. A `std.pack2` of [1e6, −5e5] at scale 2 is
+/// [2e6, −1e6] at the inputs: sum 1e6, mean 5e5, min
 /// −1e6, max 2e6 clamped to 1e6, index(0.5) 5e5; no fault, nothing muted.
 #[test]
 fn vector_results_come_from_the_elements_as_received() {
@@ -498,7 +480,6 @@ fn vector_results_come_from_the_elements_as_received() {
             inst("neg", "std.const", &[("value", -5e5)]),
             inst("half", "std.const", &[("value", 0.5)]),
             inst("pa", "std.pack2", &[]),
-            inst("pb", "std.pack2", &[]),
             inst("red", "std.reduce2", &[]),
             inst("ix", "std.index2", &[]),
             inst("out", "std.audio_out", &[]),
@@ -506,12 +487,8 @@ fn vector_results_come_from_the_elements_as_received() {
         vec![
             conn("top.out", "pa.e0"),
             conn("neg.out", "pa.e1"),
-            conn("top.out", "pb.e0"),
-            conn("neg.out", "pb.e1"),
-            conn("pa.out", "red.in"),
-            conn("pb.out", "red.in"),
-            conn("pa.out", "ix.in"),
-            conn("pb.out", "ix.in"),
+            scaled("pa.out", "red.in", 2.0),
+            scaled("pa.out", "ix.in", 2.0),
             conn("half.out", "ix.pos"),
             conn("red.sum", "out.l"),
             conn("ix.out", "out.r"),

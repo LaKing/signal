@@ -48,7 +48,7 @@ fn kick_pulse_and_physical_av_are_described_as_written(transport: Transport) {
     assert_eq!(g["project"], "kick");
     assert_eq!(
         names(&g["top"]),
-        ["transport", "drums", "lfo", "accent", "out"]
+        ["transport", "drums", "trigger", "lfo", "accent", "out"]
     );
     assert_eq!(g["top"]["instances"][1]["composite"], true);
     let keys: Vec<_> = g["composites"].as_object().unwrap().keys().collect();
@@ -168,9 +168,11 @@ fn a_structural_reload_pushes_graph(transport: Transport) {
             "out = { module",
             "extra = { module = \"std.sine_osc\", freq = 330 }\nout = { module",
         )
+        // `out.r` takes `extra` instead of `drums` (ADR 0054: one connection
+        // per input).
         .replace(
             "  { from = \"drums.out\", to = \"out.r\" },",
-            "  { from = \"drums.out\", to = \"out.r\" },\n  { from = \"extra.out\", to = \"out.r\", scale = 0.1 },",
+            "  { from = \"extra.out\", to = \"out.r\", scale = 0.1 },",
         );
     fs::write(&path, text).unwrap();
     let g = pushed(&mut rig, &mut ws, "graph after the swap", |g| {
@@ -181,7 +183,7 @@ fn a_structural_reload_pushes_graph(transport: Transport) {
         "pushed once the swap committed: {}",
         g["planVersion"]
     );
-    assert_eq!(names(&g["top"])[4], "extra", "in source order");
+    assert_eq!(names(&g["top"])[5], "extra", "in source order");
     let last = g["top"]["connections"]
         .as_array()
         .unwrap()
@@ -453,7 +455,7 @@ fn an_edit_of_the_positions_file_pushes_graph(transport: Transport) {
         g["layout"]["error"].is_string()
     });
     assert_eq!(g["layout"]["positions"], json!({}));
-    assert_eq!(names(&g["top"]).len(), 5);
+    assert_eq!(names(&g["top"]).len(), 6);
     rig.finish();
 }
 

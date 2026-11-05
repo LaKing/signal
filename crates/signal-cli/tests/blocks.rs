@@ -32,8 +32,10 @@ const PROJECT_FRAMES: u64 = 200_000;
 
 /// (audio FNV, log FNV) of the per-frame engine at 72886ec, recorded with
 /// `signal --json render projects/<p> --frames 200000` built from the
-/// unmodified worktree, before any edit of M2.6-1.
-const KICK_PER_FRAME: (&str, &str) = ("bb216fac2da73b75", "0da70e67fa22289f");
+/// unmodified worktree, before any edit of M2.6-1. The kick's log since its
+/// beats and ghost notes meet in a `std.merge` (ADR 0054, 2026-11-05): the
+/// merge's own deliveries are logged too; the audio is unchanged.
+const KICK_PER_FRAME: (&str, &str) = ("bb216fac2da73b75", "8e9f1dc5e7a6ea47");
 const PULSE_PER_FRAME: (&str, &str) = ("d449c12fda759cbd", "a0635e895edc5db3");
 /// The same for the scripted session, recorded with [`session_script`] driven
 /// by `render_with` (the per-frame driver) in a `git archive 72886ec` extract.
@@ -500,7 +502,7 @@ fn eighty_kick_voices_get_every_thread() {
 /// default), the projects whose serial estimate fits in `SERIAL_SHARE` of
 /// the block's period (the studio, kick, pulse, physical-av, 4 kick voices)
 /// get one thread, so no worker is woken for them, while 80 kick voices
-/// still get every thread on 2, 8, 12 and 18; also after a swap from the
+/// still get every thread on 2, 8 and 12 (17 or 18 on 18); also after a swap from the
 /// kick to the 80 voices, as `prepare_swap` builds the budget again.
 #[test]
 fn in_real_time_light_projects_run_alone_and_eighty_voices_get_every_thread() {
@@ -526,9 +528,14 @@ fn in_real_time_light_projects_run_alone_and_eighty_voices_get_every_thread() {
     let (four, rate, seed) = voices(4);
     assert_eq!(budget(&four, rate, seed, 12), 1, "4 voices");
     let (eighty, rate, seed) = voices(80);
-    for threads in [2, 8, 12, 18] {
+    for threads in [2, 8, 12] {
         assert_eq!(budget(&eighty, rate, seed, threads), threads, "80 voices");
     }
+    // On 18 the last thread is at the margin: the beats and the ghost notes
+    // reach the voices through one `std.merge` (ADR 0054), a step every voice
+    // waits for, so the 18th shortens the estimated block by less than it costs.
+    let most = budget(&eighty, rate, seed, 18);
+    assert!(most >= 17, "80 voices on 18 threads: {most}");
     let (kick, rate, seed) = voices(1);
     let mut engine = Engine::new(&kick, &registry, config(rate, seed, 12), Vec::new()).unwrap();
     assert_eq!(engine.schedule_stats().worker_budget, 1);
@@ -736,7 +743,8 @@ fn a_graph_of_core_types_is_bit_identical_in_blocks_and_on_threads() {
 /// reset by another's wrap), a counter, an integrator, a buffer written and
 /// read by moving taps (Hermite), a wrapping table, two `std.random`s (one
 /// triggered through a `std.clock_div`), `std.to_events` into latches
-/// directly and through `std.route`, two to_events meeting in one latch, and
+/// directly and through `std.route`, two to_events meeting in one latch
+/// through a `std.merge`, the outputs summed by `std.mix` and `std.add`, and
 /// pack, vadd, vmul, reduce, index and unpack; with values set mid-block,
 /// among them the buffer's `size` (64 to 8 at frame 1 001), which it reads
 /// on every frame.
@@ -767,6 +775,13 @@ fn a_graph_of_core_set_two_is_bit_identical_in_blocks_and_on_threads() {
          red = { module = \"std.reduce4\" }\n\
          ix = { module = \"std.index4\" }\n\
          up = { module = \"std.unpack4\" }\n\
+         lm = { module = \"std.merge\" }\n\
+         l1 = { module = \"std.mix\" }\n\
+         l2 = { module = \"std.mix\" }\n\
+         l = { module = \"std.add\" }\n\
+         r1 = { module = \"std.mix\" }\n\
+         r2 = { module = \"std.mix\" }\n\
+         r = { module = \"std.add\" }\n\
          out = { module = \"std.audio_out\" }\n",
         "  { from = \"clk.wrap\", to = \"fast.reset\" },\n\
          \x20 { from = \"clk.wrap\", to = \"cnt.trigger\" },\n\
@@ -785,8 +800,9 @@ fn a_graph_of_core_set_two_is_bit_identical_in_blocks_and_on_threads() {
          \x20 { from = \"clk.wrap\", to = \"te.trigger\" },\n\
          \x20 { from = \"fast.phase\", to = \"te2.in\" },\n\
          \x20 { from = \"clk.wrap\", to = \"te2.trigger\" },\n\
-         \x20 { from = \"te.out\", to = \"lat.in\" },\n\
-         \x20 { from = \"te2.out\", to = \"lat.in\" },\n\
+         \x20 { from = \"te.out\", to = \"lm.a\" },\n\
+         \x20 { from = \"te2.out\", to = \"lm.b\" },\n\
+         \x20 { from = \"lm.out\", to = \"lat.in\" },\n\
          \x20 { from = \"te.out\", to = \"rt.in\" },\n\
          \x20 { from = \"rnd.out\", to = \"rt.gate\" },\n\
          \x20 { from = \"rt.a\", to = \"la.in\" },\n\
@@ -803,22 +819,28 @@ fn a_graph_of_core_set_two_is_bit_identical_in_blocks_and_on_threads() {
          \x20 { from = \"vs.out\", to = \"ix.in\" },\n\
          \x20 { from = \"fast.phase\", to = \"ix.pos\", scale = 3 },\n\
          \x20 { from = \"vm.out\", to = \"up.in\" },\n\
-         \x20 { from = \"buf.out0\", to = \"out.l\", scale = 0.1 },\n\
-         \x20 { from = \"buf.out1\", to = \"out.l\", scale = 0.1 },\n\
-         \x20 { from = \"tab.out\", to = \"out.l\", scale = 0.1 },\n\
-         \x20 { from = \"lat.out\", to = \"out.l\", scale = 0.1 },\n\
-         \x20 { from = \"la.out\", to = \"out.l\", scale = 0.05 },\n\
-         \x20 { from = \"red.sum\", to = \"out.l\", scale = 0.01 },\n\
-         \x20 { from = \"ix.out\", to = \"out.l\", scale = 0.05 },\n\
-         \x20 { from = \"up.e3\", to = \"out.l\", scale = 0.01 },\n\
-         \x20 { from = \"integ.out\", to = \"out.r\", scale = 0.1 },\n\
-         \x20 { from = \"rnd.out\", to = \"out.r\", scale = 0.1 },\n\
-         \x20 { from = \"rnd2.out\", to = \"out.r\", scale = 0.1 },\n\
-         \x20 { from = \"lb.out\", to = \"out.r\", scale = 0.05 },\n\
-         \x20 { from = \"red.mean\", to = \"out.r\", scale = 0.05 },\n\
-         \x20 { from = \"red.min\", to = \"out.r\", scale = 0.05 },\n\
-         \x20 { from = \"red.max\", to = \"out.r\", scale = 0.05 },\n\
-         \x20 { from = \"cnt.count\", to = \"out.r\", scale = 0.01 },\n",
+         \x20 { from = \"buf.out0\", to = \"l1.a\", scale = 0.1 },\n\
+         \x20 { from = \"buf.out1\", to = \"l1.b\", scale = 0.1 },\n\
+         \x20 { from = \"tab.out\", to = \"l1.c\", scale = 0.1 },\n\
+         \x20 { from = \"lat.out\", to = \"l1.d\", scale = 0.1 },\n\
+         \x20 { from = \"la.out\", to = \"l2.a\", scale = 0.05 },\n\
+         \x20 { from = \"red.sum\", to = \"l2.b\", scale = 0.01 },\n\
+         \x20 { from = \"ix.out\", to = \"l2.c\", scale = 0.05 },\n\
+         \x20 { from = \"up.e3\", to = \"l2.d\", scale = 0.01 },\n\
+         \x20 { from = \"integ.out\", to = \"r1.a\", scale = 0.1 },\n\
+         \x20 { from = \"rnd.out\", to = \"r1.b\", scale = 0.1 },\n\
+         \x20 { from = \"rnd2.out\", to = \"r1.c\", scale = 0.1 },\n\
+         \x20 { from = \"lb.out\", to = \"r1.d\", scale = 0.05 },\n\
+         \x20 { from = \"red.mean\", to = \"r2.a\", scale = 0.05 },\n\
+         \x20 { from = \"red.min\", to = \"r2.b\", scale = 0.05 },\n\
+         \x20 { from = \"red.max\", to = \"r2.c\", scale = 0.05 },\n\
+         \x20 { from = \"cnt.count\", to = \"r2.d\", scale = 0.01 },\n\
+         \x20 { from = \"l1.out\", to = \"l.a\" },\n\
+         \x20 { from = \"l2.out\", to = \"l.b\" },\n\
+         \x20 { from = \"l.out\", to = \"out.l\" },\n\
+         \x20 { from = \"r1.out\", to = \"r.a\" },\n\
+         \x20 { from = \"r2.out\", to = \"r.b\" },\n\
+         \x20 { from = \"r.out\", to = \"out.r\" },\n",
     );
     let plan = project.plan(&registry()).unwrap().plan;
     let events = [

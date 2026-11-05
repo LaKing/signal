@@ -38,18 +38,20 @@ fn wire(from: &str, to: &str, scale: Option<f64>) -> ConnectionDef {
 /// `deck` (133 bpm on its own) following `follow` (`None`: nothing) with
 /// that host's jumps; a `std.prefer` `pf` of `prefer` (else the deck's
 /// position); counters of the deck's jumps and of `pf.switched`; all heard
-/// on the sink, scaled down.
+/// on the sink, scaled down, through a `std.mix` per channel (ADR 0054).
 fn plan(follow: Option<&str>, prefer: Option<&str>, version: u64) -> ExecutionPlan {
     let mut connections = vec![
-        wire("deck.position", "out.l", Some(1e-3)),
+        wire("deck.position", "ml.a", Some(1e-3)),
         wire("deck.jump", "jumps.trigger", None),
         wire("pf.switched", "switches.trigger", None),
         wire("deck.position", "pf.b", None),
-        wire("jumps.count", "out.r", Some(1e-2)),
-        wire("switches.count", "out.r", Some(1e-1)),
-        wire("pf.out", "out.r", Some(1e-3)),
-        wire("deck.tempo", "out.r", Some(1e-5)),
-        wire("deck.running", "out.l", Some(1e-2)),
+        wire("jumps.count", "mr.a", Some(1e-2)),
+        wire("switches.count", "mr.b", Some(1e-1)),
+        wire("pf.out", "mr.c", Some(1e-3)),
+        wire("deck.tempo", "mr.d", Some(1e-5)),
+        wire("deck.running", "ml.b", Some(1e-2)),
+        wire("ml.out", "out.l", None),
+        wire("mr.out", "out.r", None),
     ];
     if let Some(host) = follow {
         connections.push(wire(&format!("{host}.position"), "deck.follow", None));
@@ -67,6 +69,8 @@ fn plan(follow: Option<&str>, prefer: Option<&str>, version: u64) -> ExecutionPl
             instance("pf", "std.prefer", &[]),
             instance("jumps", "std.counter", &[]),
             instance("switches", "std.counter", &[]),
+            instance("ml", "std.mix", &[]),
+            instance("mr", "std.mix", &[]),
             instance("out", "std.audio_out", &[]),
         ],
         connections,

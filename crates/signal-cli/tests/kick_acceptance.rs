@@ -191,6 +191,7 @@ fn v2_every_primitive_used_has_contract_tests() {
             "std.dc_block",
             "std.exp_env",
             "std.lfo",
+            "std.merge",
             "std.mul",
             "std.sine_osc",
             "std.tanh_shaper",
@@ -220,15 +221,19 @@ fn v3_triggers_on_the_integer_grid_and_first_onset() {
     let beats: Vec<u64> = (0..64).map(|k| beat(k, RATE)).collect();
     let ghosts = expected_ghosts(42, RATE, frames);
     assert!(!ghosts.is_empty());
+    // The beats and the ghosts meet in the `trigger` merge (ADR 0054), which
+    // passes each on its own frame to both envelopes.
+    assert_eq!(event_frames(&lines, "/transport.beat", "/trigger.a"), beats);
+    assert_eq!(
+        event_frames(&lines, "/transport.ghost", "/trigger.b"),
+        ghosts
+    );
+    let mut both = [beats.clone(), ghosts.clone()].concat();
+    both.sort_unstable();
     for target in KICK_TRIGGERS {
         assert_eq!(
-            event_frames(&lines, "/transport.beat", target),
-            beats,
-            "{target}"
-        );
-        assert_eq!(
-            event_frames(&lines, "/transport.ghost", target),
-            ghosts,
+            event_frames(&lines, "/trigger.out", target),
+            both,
             "{target}"
         );
     }
@@ -241,7 +246,7 @@ fn v3_triggers_on_the_integer_grid_and_first_onset() {
     assert!(lines.iter().all(|l| l["type"] == "event"));
     assert_eq!(
         lines.len(),
-        2 * (beats.len() + ghosts.len()) + accents.len()
+        3 * (beats.len() + ghosts.len()) + accents.len()
     );
 
     let samples = as_f32(&rendered);
@@ -261,20 +266,19 @@ fn v4_seed_changes_only_ghosts() {
     let frames = bars(4, RATE);
     let (a, b) = (render_kick(42, frames), render_kick(43, frames));
     let (la, lb) = (log_lines(&a.log), log_lines(&b.log));
-    let target = KICK_TRIGGERS[0];
     assert_eq!(
-        event_frames(&la, "/transport.beat", target),
-        event_frames(&lb, "/transport.beat", target)
+        event_frames(&la, "/transport.beat", "/trigger.a"),
+        event_frames(&lb, "/transport.beat", "/trigger.a")
     );
     assert_eq!(
         event_frames(&la, "/transport.accent", "/accent.trigger"),
         event_frames(&lb, "/transport.accent", "/accent.trigger")
     );
     let (ga, gb): (BTreeSet<u64>, BTreeSet<u64>) = (
-        event_frames(&la, "/transport.ghost", target)
+        event_frames(&la, "/transport.ghost", "/trigger.b")
             .into_iter()
             .collect(),
-        event_frames(&lb, "/transport.ghost", target)
+        event_frames(&lb, "/transport.ghost", "/trigger.b")
             .into_iter()
             .collect(),
     );
@@ -576,11 +580,7 @@ fn v8_pitch_at_every_rate() {
         assert_eq!(output.status.code(), Some(0), "{rate} Hz: {output:?}");
 
         let log = std::fs::read(out.join("log.jsonl")).unwrap();
-        let mut triggers: Vec<u64> = ["/transport.beat", "/transport.ghost"]
-            .iter()
-            .flat_map(|source| event_frames(&log_lines(&log), source, KICK_TRIGGERS[0]))
-            .collect();
-        triggers.sort_unstable();
+        let triggers = event_frames(&log_lines(&log), "/trigger.out", KICK_TRIGGERS[0]);
         let (trigger, next) = (triggers[0] as usize, triggers[1] as usize);
         let start = trigger + (0.25 * f64::from(rate) + 0.5).floor() as usize;
         assert!(

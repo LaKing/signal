@@ -715,19 +715,29 @@ fn the_muted_note_lists_eight_then_counts(transport: Transport) {
     ));
     let _ = fs::remove_dir_all(&source);
     fs::create_dir_all(&source).unwrap();
-    // Eleven scales of one sine, each muted by the same `mul`.
+    // Eleven scales of one sine, each muted by the same `mul`, summed by a
+    // tree of `std.mix` (ADR 0054: one connection per input): `z0`..`z2`
+    // take four each, scaled by 0.001 so that no mix reaches the bound
+    // before its sources, and `z3` the three.
     let mut text = String::from(
         "schema_version = 1\n\n[project]\nname = \"many\"\nsample_rate = 48000\nseed = 1\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\nk = { module = \"std.const\", value = 1 }\nout = { module = \"std.audio_out\", gain = 0.25 }\n",
     );
     let mut wires = String::new();
+    for z in 0..4 {
+        text.push_str(&format!("z{z} = {{ module = \"std.mix\" }}\n"));
+    }
     for n in 0..11 {
         text.push_str(&format!(
             "s{n:02} = {{ module = \"std.scale\", mul = 0.5 }}\n"
         ));
+        let (mix, input) = (n / 4, ["a", "b", "c", "d"][n % 4]);
         wires.push_str(&format!(
-            "  {{ from = \"osc.out\", to = \"s{n:02}.in\", scale = 20 }},\n  {{ from = \"k.out\", to = \"s{n:02}.mul\" }},\n  {{ from = \"s{n:02}.out\", to = \"out.l\" }},\n"
+            "  {{ from = \"osc.out\", to = \"s{n:02}.in\", scale = 20 }},\n  {{ from = \"k.out\", to = \"s{n:02}.mul\" }},\n  {{ from = \"s{n:02}.out\", to = \"z{mix}.{input}\", scale = 0.001 }},\n"
         ));
     }
+    wires.push_str(
+        "  { from = \"z0.out\", to = \"z3.a\" },\n  { from = \"z1.out\", to = \"z3.b\" },\n  { from = \"z2.out\", to = \"z3.c\" },\n  { from = \"z3.out\", to = \"out.l\" },\n",
+    );
     text.push_str(&format!("\n[wiring]\nconnections = [\n{wires}]\n"));
     fs::write(source.join("project.toml"), text).unwrap();
     let mut rig = app_rig("muted-many", transport, Some(&source));
@@ -2340,7 +2350,7 @@ fn graph_while_stopped(transport: Transport) {
     let graph = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
     assert_eq!(
         graph_names(&graph),
-        ["transport", "drums", "lfo", "accent", "out"]
+        ["transport", "drums", "trigger", "lfo", "accent", "out"]
     );
     assert_eq!(graph["planVersion"], Value::Null, "stopped");
     let path = rig.dir.join("project.toml");
@@ -2442,14 +2452,19 @@ fn voices_project(name: &str, voices: usize) -> PathBuf {
          lfo = { module = \"std.lfo\", freq_hz = 0.034 }\n\
          accent = { module = \"std.exp_env\", decay_ms = 200 }\n",
     );
-    let mut connections =
-        String::from("  { from = \"transport.accent\", to = \"accent.trigger\" },\n");
+    // The beats and the ghost notes meet in one `std.merge` (ADR 0054), which
+    // every voice's trigger takes.
+    instances.push_str("trigger = { module = \"std.merge\" }\n");
+    let mut connections = String::from(
+        "  { from = \"transport.accent\", to = \"accent.trigger\" },\n\
+         \x20 { from = \"transport.beat\", to = \"trigger.a\" },\n\
+         \x20 { from = \"transport.ghost\", to = \"trigger.b\" },\n",
+    );
     let mut outputs = Vec::new();
     for i in 0..voices {
         instances.push_str(&format!("drums_{i} = {{ module = \"drums\" }}\n"));
         connections.push_str(&format!(
-            "  {{ from = \"transport.beat\", to = \"drums_{i}.trigger\" }},\n\
-             \x20 {{ from = \"transport.ghost\", to = \"drums_{i}.trigger\" }},\n\
+            "  {{ from = \"trigger.out\", to = \"drums_{i}.trigger\" }},\n\
              \x20 {{ from = \"lfo.out\", to = \"drums_{i}.kick_decay\", scale = 120 }},\n\
              \x20 {{ from = \"accent.out\", to = \"drums_{i}.kick_drive\", scale = 1.5 }},\n"
         ));
@@ -2613,8 +2628,8 @@ fn the_4096_voice_graph_reaches_the_client_and_it_stays_open(transport: Transpor
     let mut rig = app_rig("graph-4096", transport, Some(&source));
     let (mut ws, _) = rig.client();
     let graph = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
-    // transport, lfo, accent, 4096 voices, 1365 mixers, out.
-    assert_eq!(graph["top"]["instances"].as_array().unwrap().len(), 5465);
+    // transport, lfo, accent, trigger, 4096 voices, 1365 mixers, out.
+    assert_eq!(graph["top"]["instances"].as_array().unwrap().len(), 5466);
     assert!(
         graph.to_string().len() > 4 << 20,
         "larger than the write buffer"

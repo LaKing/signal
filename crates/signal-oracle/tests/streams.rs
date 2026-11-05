@@ -1,6 +1,7 @@
 //! ADR 0035 §4: the oracle derives an instance's random stream from its
 //! stream key, as the engine does, so oracle parity holds on a plan with
-//! scope roots (a project including another, which draws noise).
+//! scope roots (a project including another, which draws noise). Sources
+//! that meet on a channel meet in a `std.add` (ADR 0054).
 
 mod common;
 
@@ -18,11 +19,13 @@ seed = 21
 [instances]
 a = { module = "std.noise" }
 z = { module = "std.noise" }
+sum = { module = "std.add" }
 out = { module = "std.audio_out", gain = 0.5 }
 [wiring]
 connections = [
-  { from = "a.out", to = "out.l", scale = 0.3 },
-  { from = "z.out", to = "out.l", scale = 0.2 },
+  { from = "a.out", to = "sum.a", scale = 0.3 },
+  { from = "z.out", to = "sum.b", scale = 0.2 },
+  { from = "sum.out", to = "out.l" },
   { from = "z.out", to = "out.r" },
 ]
 "#;
@@ -34,12 +37,14 @@ seed = 99
 [instances]
 m = { project = "noisy" }
 own = { module = "std.noise" }
+sum = { module = "std.add" }
 out = { module = "std.audio_out" }
 [wiring]
 connections = [
   { from = "m.l", to = "out.l" },
-  { from = "m.r", to = "out.r" },
-  { from = "own.out", to = "out.r", scale = 0.1 },
+  { from = "m.r", to = "sum.a" },
+  { from = "own.out", to = "sum.b", scale = 0.1 },
+  { from = "sum.out", to = "out.r" },
 ]
 "#;
 

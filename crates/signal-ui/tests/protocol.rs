@@ -480,9 +480,10 @@ fn a_plan_swap_updates_describe(transport: Transport) {
             "out = { module",
             "c = { module = \"std.sine_osc\", freq = 330 }\nout = { module",
         )
+        // `out.r` takes `c` instead of `a` (ADR 0054: one connection per input).
         .replace(
             "  { from = \"a.out\", to = \"out.r\" },",
-            "  { from = \"a.out\", to = \"out.r\" },\n  { from = \"c.out\", to = \"out.r\" },",
+            "  { from = \"c.out\", to = \"out.r\" },",
         );
     fs::write(&path, text).unwrap();
     let swapped = rig.wait(&mut ws, "describe after the swap", |got| {

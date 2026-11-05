@@ -46,11 +46,14 @@ fn runner_process_with_scopes_allocates_and_frees_nothing() {
         instances: vec![
             instance("a", "std.sine_osc", Some(440.0)),
             instance("b", "std.sine_osc", Some(220.0)),
+            // ADR 0054: the two meet in a `std.add`, not at `out.l`.
+            instance("sum", "std.add", None),
             instance("out", "std.audio_out", None),
         ],
         connections: vec![
-            connection("a.out", "out.l"),
-            connection("b.out", "out.l"),
+            connection("a.out", "sum.a"),
+            connection("b.out", "sum.b"),
+            connection("sum.out", "out.l"),
             connection("a.out", "out.r"),
         ],
         exports: Exports::default(),

@@ -11,6 +11,8 @@ seed = 42
 [instances]
 transport = { module = "std.transport", bpm = 132, ghost_probability = 0.15, ghost_offset_ms = 6, accent_every = 3 }
 drums = { module = "drums" }
+# The beats and the ghost notes on one trigger (ADR 0054: events meet in a merge).
+trigger = { module = "std.merge" }
 # 1/29.1 Hz: one cycle every 29.1 s.
 lfo = { module = "std.lfo", freq_hz = 0.034364261168384876 }
 accent = { module = "std.exp_env", decay_ms = 200 }
@@ -19,8 +21,9 @@ out = { module = "std.audio_out", gain = 0.75 }
 
 [wiring]
 connections = [
-  { from = "transport.beat", to = "drums.trigger" },
-  { from = "transport.ghost", to = "drums.trigger" },
+  { from = "transport.beat", to = "trigger.a" },
+  { from = "transport.ghost", to = "trigger.b" },
+  { from = "trigger.out", to = "drums.trigger" },
   { from = "transport.accent", to = "accent.trigger" },
   # decay 420 ms ± 120 ms.
   { from = "lfo.out", to = "drums.kick_decay", scale = 120 },

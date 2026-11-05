@@ -368,7 +368,8 @@ fn plans(files: &[(&str, &str)]) -> bool {
 }
 
 /// Two connections between the same ports: the non-finite scale is reported at
-/// the connection that has it (line 13), not at the first one.
+/// the connection that has it (line 13), not at the first one; with a finite
+/// scale, the two are a fan-in.
 #[test]
 fn non_finite_scale_on_a_repeated_connection() {
     let text = r#"schema_version = 1
@@ -390,7 +391,9 @@ connections = [
         "non_finite_scale_on_a_repeated_connection",
         project_errors(text)
     );
-    assert!(plans(&[("project.toml", &text.replace("nan", "1.0"))]));
+    // With a finite scale the two are a fan-in (ADR 0054).
+    let fan_in = project_errors(&text.replace("nan", "1.0"));
+    assert!(fan_in.contains("2 connections into one input"), "{fan_in}");
 }
 
 /// Two exported parameters alias one inner parameter. Values are assigned in

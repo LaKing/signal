@@ -18,7 +18,7 @@ use signal_core::{
     RateDivisor, Registry,
 };
 use signal_engine::Engine;
-use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, build_plan};
+use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, GraphError, build_plan};
 
 const fn port(name: &'static str, direction: Direction, shape: PortShape) -> PortDescriptor {
     PortDescriptor {
@@ -94,6 +94,14 @@ fn watch_registry() -> Registry {
 /// A watch `w` (and `w2` when `second`) with `connections` (from, to,
 /// scale) among two `test.const`s `c`, `d` and a `test.trigger` `t`.
 fn plan(connections: &[(&str, &str, Option<f64>)], second: bool) -> ExecutionPlan {
+    try_plan(connections, second).unwrap()
+}
+
+/// [`plan`], or the graph's errors.
+fn try_plan(
+    connections: &[(&str, &str, Option<f64>)],
+    second: bool,
+) -> Result<ExecutionPlan, Vec<GraphError>> {
     let mut instances = vec![
         inst("w", "test.watch"),
         inst("c", "test.const"),
@@ -116,7 +124,7 @@ fn plan(connections: &[(&str, &str, Option<f64>)], second: bool) -> ExecutionPla
             .collect(),
         exports: Exports::default(),
     };
-    build_plan(&root, &[], &watch_registry(), 0).unwrap()
+    build_plan(&root, &[], &watch_registry(), 0)
 }
 
 /// (seen_in, seen_ev) of `watch` per frame over `frames`, swapping from
@@ -180,7 +188,6 @@ fn a_rewired_input_is_seen_once_at_the_swap() {
     let c_in = plan(&[("c.out", "w.in", None)], false);
     let d_in = plan(&[("d.out", "w.in", None)], false);
     let c_half = plan(&[("c.out", "w.in", Some(0.5))], false);
-    let both = plan(&[("c.out", "w.in", None), ("d.out", "w.in", None)], false);
     let events = plan(&[("c.out", "w.in", None), ("t.out", "w.ev", None)], false);
     let none = plan(&[], false);
     let expect = |at: usize, seen: (f64, f64)| {
@@ -200,30 +207,24 @@ fn a_rewired_input_is_seen_once_at_the_swap() {
                 expect(13, (1.0, 0.0)),
                 "another scale"
             );
-            assert_eq!(case(&c_in, &both), expect(13, (1.0, 0.0)), "one more");
             assert_eq!(case(&c_in, &none), expect(13, (1.0, 0.0)), "none left");
             assert_eq!(case(&none, &c_in), expect(13, (1.0, 0.0)), "the first");
             assert_eq!(case(&c_in, &events), expect(13, (0.0, 1.0)), "events");
             assert_eq!(case(&c_in, &c_in), vec![(0.0, 0.0); 40], "the same");
-            // Duplicate connections from one source with other scales are
-            // allowed; their canonical order is by scale (total order),
-            // whatever order the file writes them in, so the same set
-            // written otherwise is no change, and another scale is.
-            let twice = plan(
-                &[("c.out", "w.in", Some(-2.0)), ("c.out", "w.in", Some(0.5))],
-                false,
-            );
-            let swapped = plan(
-                &[("c.out", "w.in", Some(0.5)), ("c.out", "w.in", Some(-2.0))],
-                false,
-            );
-            let other = plan(
-                &[("c.out", "w.in", Some(0.5)), ("c.out", "w.in", Some(-1.0))],
-                false,
-            );
-            assert_eq!(case(&twice, &swapped), vec![(0.0, 0.0); 40], "reordered");
-            assert_eq!(case(&twice, &other), expect(13, (1.0, 0.0)), "rescaled");
         }
+    }
+    // A second source into `w.in`, or one source twice at other scales (once
+    // ordered by scale, so that the same set written otherwise was no
+    // change), no longer plans: an input takes one connection (ADR 0054).
+    for connections in [
+        [("c.out", "w.in", None), ("d.out", "w.in", None)],
+        [("c.out", "w.in", Some(-2.0)), ("c.out", "w.in", Some(0.5))],
+    ] {
+        let errors = try_plan(&connections, false).unwrap_err();
+        assert!(
+            matches!(errors.as_slice(), [GraphError::FanIn { to, .. }] if to.to_string() == "/w.in"),
+            "{errors:?}"
+        );
     }
     // An added instance has its own first frame: it reads false.
     let added = plan(&[("c.out", "w.in", None), ("d.out", "w2.in", None)], true);

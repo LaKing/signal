@@ -43,7 +43,10 @@ fn kick_is_described_as_written_with_its_nested_composites() {
     let s = structure("kick");
     let top = &s["top"];
     // Source order, not the name order the loader keeps.
-    assert_eq!(names(top), ["transport", "drums", "lfo", "accent", "out"]);
+    assert_eq!(
+        names(top),
+        ["transport", "drums", "trigger", "lfo", "accent", "out"]
+    );
     let drums = &top["instances"][1];
     assert_eq!(drums["address"], "/drums");
     assert_eq!(drums["module"], "drums");
@@ -79,12 +82,14 @@ fn kick_is_described_as_written_with_its_nested_composites() {
         .collect();
     assert_eq!(parameters, ["/drums.kick_decay", "/drums.kick_drive"]);
     let connections = top["connections"].as_array().unwrap();
-    assert_eq!(connections.len(), 7);
+    assert_eq!(connections.len(), 8);
     assert_eq!(connections[0]["from"], "/transport.beat");
-    assert_eq!(connections[0]["to"], "/drums.trigger");
-    assert_eq!(connections[3]["to"], "/drums.kick_decay");
-    assert_eq!(connections[3]["scale"], 120.0);
-    assert_eq!(connections[5]["scale"], Value::Null);
+    assert_eq!(connections[0]["to"], "/trigger.a");
+    assert_eq!(connections[2]["from"], "/trigger.out");
+    assert_eq!(connections[2]["to"], "/drums.trigger");
+    assert_eq!(connections[4]["to"], "/drums.kick_decay");
+    assert_eq!(connections[4]["scale"], 120.0);
+    assert_eq!(connections[6]["scale"], Value::Null);
 
     let composites: Vec<_> = s["composites"].as_object().unwrap().keys().collect();
     assert_eq!(composites, ["drums", "kick"]);

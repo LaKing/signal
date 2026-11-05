@@ -14,7 +14,7 @@ use signal_engine::{Engine, EngineConfig, ExternalEvent, Schedule};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 
 use Direction::{In, Out};
-use PortKind::{Audio, Control, Trigger};
+use PortKind::{Audio, Control, Generic, Trigger};
 use PortShape::{Events, Signal};
 
 const fn port(
@@ -483,6 +483,51 @@ direct!(Flood, FLOOD, {}, |_s, _ctx| {}, |_p, inputs, outputs| {
     }
 });
 
+/// `out = a + b + c + d`, summed from 0 in port order (ADR 0054: one input
+/// takes one connection, so signals meet here). Sources on `a`, `b`, … in the
+/// order the engine used to sum a fan-in give the same bits.
+pub const ADD: ModuleDescriptor = descriptor(
+    "test.add",
+    &[
+        port("a", In, Signal, Generic),
+        port("b", In, Signal, Generic),
+        port("c", In, Signal, Generic),
+        port("d", In, Signal, Generic),
+        port("out", Out, Signal, Generic),
+    ],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+direct!(Add, ADD, {}, |_s, _ctx| {}, |_p, inputs, outputs| {
+    let sum = (0..4).fold(0.0, |sum, k| sum + first(inputs.signal(k)));
+    write(outputs, 0, sum);
+});
+
+/// Every event of `a`, `b`, `c` and `d` onto `out`, in a frame `a`'s first,
+/// then `b`'s, `c`'s and `d`'s, each in its own order (ADR 0054, as
+/// `std.merge`).
+pub const MERGE: ModuleDescriptor = descriptor(
+    "test.merge",
+    &[
+        port("a", In, Events, Generic),
+        port("b", In, Events, Generic),
+        port("c", In, Events, Generic),
+        port("d", In, Events, Generic),
+        port("out", Out, Events, Generic),
+    ],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+direct!(Merge, MERGE, {}, |_s, _ctx| {}, |_p, inputs, outputs| {
+    for k in 0..4 {
+        for event in inputs.events(k) {
+            push(outputs, 0, event.payload);
+        }
+    }
+});
+
 /// The audio sink: two inputs, declared `zeta` before `alpha`, so channel order
 /// (port order) differs from alphabetical order.
 pub const RECORDER: ModuleDescriptor = descriptor(
@@ -752,6 +797,8 @@ pub fn registry() -> Registry {
         direct_type::<Faulty>(),
         direct_type::<Loud>(),
         direct_type::<Flood>(),
+        direct_type::<Add>(),
+        direct_type::<Merge>(),
         direct_type::<Recorder>(),
         direct_type::<GainedRecorder>(),
         direct_type::<Fail>(),
@@ -790,8 +837,10 @@ fn leak<T>(items: Vec<T>) -> &'static [T] {
 /// and parameter at *d*), and the vector types `test.v<kind>.n<N>.d<d>` for
 /// every size and divisor: `spread` (a signal to N elements, element *e*
 /// weighted (e + 1) / N, times `gain`), `gain` (each element times `gain`),
-/// `mix` (the elements summed in order, times `gain`) and `delay` (a
-/// state-output unit delay per element).
+/// `mix` (the elements summed in order, times `gain`), `delay` (a
+/// state-output unit delay per element) and `add` (vectors `a` and `b`
+/// summed element by element, from 0, `a` first: ADR 0054's sum of two
+/// vector sources).
 fn register_rates(registry: &mut Registry) {
     let rated = |d: u32| RateDivisor::new(d).unwrap();
     for t in [
@@ -843,7 +892,7 @@ fn register_rates(registry: &mut Registry) {
                 rate: rated(d),
                 ..param("gain", -2.0, 2.0, 1.0, Combine::Add)
             };
-            let kinds: [VectorKind; 4] = [
+            let kinds: [VectorKind; 5] = [
                 (
                     "spread",
                     vec![
@@ -888,6 +937,17 @@ fn register_rates(registry: &mut Registry) {
                         }))
                     },
                 ),
+                (
+                    "add",
+                    vec![
+                        at(port("a", In, v, Control)),
+                        at(port("b", In, v, Control)),
+                        at(port("out", Out, v, Control)),
+                    ],
+                    false,
+                    Feedthrough::Direct,
+                    || Primitive::Direct(Box::new(VAdd)),
+                ),
             ];
             for (kind, ports, has_gain, feedthrough, create) in kinds {
                 let type_name = Box::leak(format!("test.v{kind}.n{n}.d{d}").into_boxed_str());
@@ -906,43 +966,50 @@ fn register_rates(registry: &mut Registry) {
 }
 
 /// M2.8-6: a plan with instances at divisors 1, 3, 64 and 1600, vectors of
-/// 4 and 256 elements (a gain and a delay in a feedback loop at 64), holds
-/// and decimates, into `test.gained_recorder` `/out`. `second` replaces the
-/// connection `o64.out -> out.r` with `o3.out -> out.r`: a converter removed
-/// (`/o64/out_d1` stays for `osc.freq`) and one added (`/o3/out_d1`).
+/// 4 and 256 elements (a gain and a delay in a feedback loop at 64, meeting
+/// the spread in a `test.vadd`), holds and decimates, summed by `test.add`s
+/// (ADR 0054) into `test.gained_recorder` `/out`. `second` replaces the
+/// connection `o64.out -> sum_r.b` with `o3.out -> sum_r.b`: a converter
+/// removed (`/o64/out_d1` stays for `osc.freq`) and one added (`/o3/out_d1`).
 pub fn rates_plan(second: bool) -> ExecutionPlan {
     let instances = vec![
         inst_with("osc", "test.osc", &[("freq", 110.0)]),
         inst_with("o3", "d3.test.osc", &[("freq", 50.0)]),
         inst_with("o64", "d64.test.osc", &[("freq", 2.0)]),
         inst("vs", "test.vspread.n256.d64"),
+        inst("va", "test.vadd.n256.d64"),
         inst_with("vg", "test.vgain.n256.d64", &[("gain", 0.5)]),
         inst("vd", "test.vdelay.n256.d64"),
         inst("vm", "test.vmix.n256.d64"),
         inst("v4", "test.vspread.n4.d1600"),
         inst("m4", "test.vmix.n4.d1600"),
         inst("ud", "d3.test.unit_delay"),
+        inst("sum_l", "test.add"),
+        inst("sum_r", "test.add"),
         inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
     ];
     let mut connections = vec![
         conn("osc.out", "vs.in"),
-        conn("vs.out", "vg.in"),
-        scaled("vd.out", "vg.in", 0.25),
+        scaled("vd.out", "va.a", 0.25),
+        conn("vs.out", "va.b"),
+        conn("va.out", "vg.in"),
         conn("vg.out", "vd.in"),
         conn("vd.out", "vm.in"),
         conn("o64.out", "v4.in"),
         conn("v4.out", "m4.in"),
         conn("o3.out", "ud.in"),
         scaled("o64.out", "osc.freq", 10.0),
-        conn("osc.out", "out.l"),
-        scaled("vm.out", "out.l", 0.01),
-        conn("ud.out", "out.l"),
-        conn("m4.out", "out.r"),
+        conn("osc.out", "sum_l.a"),
+        conn("ud.out", "sum_l.b"),
+        scaled("vm.out", "sum_l.c", 0.01),
+        conn("sum_l.out", "out.l"),
+        conn("m4.out", "sum_r.a"),
+        conn("sum_r.out", "out.r"),
     ];
     connections.push(if second {
-        conn("o3.out", "out.r")
+        conn("o3.out", "sum_r.b")
     } else {
-        conn("o64.out", "out.r")
+        conn("o64.out", "sum_r.b")
     });
     plan(instances, connections)
 }
@@ -1005,6 +1072,27 @@ impl DirectPrimitive for VMix {
                 sum += inputs.signal(e)[t];
             }
             *out = sum * g[t];
+        }
+    }
+}
+
+/// Vectors `a` and `b` summed element by element: element `e` is
+/// `0 + a[e] + b[e]`.
+struct VAdd;
+
+impl DirectPrimitive for VAdd {
+    fn describe() -> ModuleDescriptor {
+        descriptor("test.vadd", &[], &[], Feedthrough::Direct, None)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let n = outputs.signals().count();
+        for (e, row) in outputs.signals().enumerate() {
+            let (a, b) = (inputs.signal(e), inputs.signal(n + e));
+            for (out, (a, b)) in row.iter_mut().zip(a.iter().zip(b)) {
+                *out = 0.0 + a + b;
+            }
         }
     }
 }

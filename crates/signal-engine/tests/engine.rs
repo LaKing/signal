@@ -43,7 +43,8 @@ fn prepare_gets_rate_k1_and_derived_rng_stream() {
     }
 }
 
-/// y[n] = gain[n] · (impulse[n] + delay[n]), delay[n] = y[n − 1], with an external
+/// y[n] = gain[n] · (impulse[n] + delay[n]) (the sum a `test.add`), delay[n] =
+/// y[n − 1], with an external
 /// `set(0.5)` on the gain at frame 3. It shows external input before process
 /// (the set acts at frame 3), emit before process (the gain reads the delay's
 /// frame-n output), and absorb after process (the delay's output at n + 1 is
@@ -53,12 +54,14 @@ fn frame_phases_run_in_adr_order() {
     let plan = plan(
         vec![
             inst("impulse", "test.impulse"),
+            inst("sum", "test.add"),
             inst("loop", "test.gain"),
             inst("delay", "test.unit_delay"),
         ],
         vec![
-            conn("impulse.out", "loop.in"),
-            conn("delay.out", "loop.in"),
+            conn("impulse.out", "sum.a"),
+            conn("delay.out", "sum.b"),
+            conn("sum.out", "loop.in"),
             conn("loop.out", "delay.in"),
         ],
     );
@@ -228,7 +231,7 @@ fn magnitude_over_1e6_is_a_fault() {
 }
 
 /// 17 events in one frame overflow a sink: a fault. Its events are not
-/// delivered; a source of exactly 16 is fine.
+/// delivered; a source of exactly 16 (into a counter of its own) is fine.
 #[test]
 fn event_sink_overflow_is_a_fault() {
     let plan = plan(
@@ -236,12 +239,14 @@ fn event_sink_overflow_is_a_fault() {
             inst_with("f", "test.flood", &[("count", 17.0)]),
             inst_with("ok", "test.flood", &[("count", 16.0)]),
             inst("c", "test.counter"),
+            inst("c_ok", "test.counter"),
         ],
-        vec![conn("f.out", "c.in"), conn("ok.out", "c.in")],
+        vec![conn("f.out", "c.in"), conn("ok.out", "c_ok.in")],
     );
     let mut engine = engine(&plan, 48_000, vec![]);
-    let counts = output_trace(&mut engine, 2, "/c.out");
+    let counts = output_trace(&mut engine, 2, "/c_ok.out");
     assert_eq!(counts, [16.0, 32.0]);
+    assert_eq!(engine.signal_output(&port_addr("/c.out")), Some(0.0));
     assert_eq!(engine.is_muted(&addr("/f")), Some(true));
     assert_eq!(engine.is_muted(&addr("/ok")), Some(false));
 

@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::{addr, composite, conn, errors, input, inst, inst_with, nested, output, port_addr};
+use common::{
+    addr, composite, conn, errors, input, inst, inst_with, nested, output, param, port_addr,
+};
 use signal_core::{Direction, PortShape, RateDivisor};
 use signal_graph::{CompositeDef, ConnectionDef, Exports, GraphError, GraphWarning};
 
@@ -326,6 +328,62 @@ fn a_driven_parameters_base_is_an_offset_never_clamped() {
     };
     assert_eq!(freq("/driven"), Some(-100.0));
     assert_eq!(freq("/alone"), Some(0.0));
+}
+
+/// ADR 0054 §1: an export (a control) onto an inner parameter a connection
+/// drives is an error, at the export; an export onto one nothing drives is not.
+#[test]
+fn a_control_and_a_connection_on_one_parameter() {
+    let voice = CompositeDef {
+        exports: Exports {
+            outputs: vec![output("out", "osc.out")],
+            parameters: vec![
+                param("pitch", &["osc.freq"]),
+                param("rate", &["env.attack"]),
+            ],
+            ..Exports::default()
+        },
+        ..composite(
+            "voice",
+            vec![inst("env", "test.env"), inst("osc", "test.osc")],
+            vec![conn("env.out", "osc.freq")],
+        )
+    };
+    let project = composite(
+        "project",
+        vec![inst("v", "voice"), inst("spk", "test.out")],
+        vec![conn("v.out", "spk.in")],
+    );
+    let errors = errors(&project, &[voice]);
+    assert_eq!(
+        errors,
+        [GraphError::ControlAndConnection {
+            scope: Some(addr("/v")),
+            composite: "voice".to_owned(),
+            name: "pitch".to_owned(),
+            parameter: "osc.freq".to_owned(),
+        }]
+    );
+    assert!(errors[0].to_string().contains("std.const into a std.add"));
+
+    // An exported input onto the parameter an export sets: a connection from outside.
+    let voice = CompositeDef {
+        exports: Exports {
+            inputs: vec![input("mod", &["osc.freq"])],
+            outputs: vec![output("out", "osc.out")],
+            parameters: vec![param("pitch", &["osc.freq"])],
+        },
+        ..composite("voice", vec![inst("osc", "test.osc")], vec![])
+    };
+    assert_eq!(
+        common::errors(&project, &[voice]),
+        [GraphError::ControlAndConnection {
+            scope: Some(addr("/v")),
+            composite: "voice".to_owned(),
+            name: "pitch".to_owned(),
+            parameter: "osc.freq".to_owned(),
+        }]
+    );
 }
 
 #[test]

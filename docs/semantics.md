@@ -28,15 +28,15 @@ A feedback loop must pass through a state-output instance (for example a unit de
 
 ## 3. Signals
 
-A signal input's value is the sum of its connections' values, in **canonical source order** (byte-wise order of the source port address; several connections from one source, which are allowed, by their scale in IEEE 754 total order, `f64::total_cmp`), each multiplied by the connection's scale, starting from +0:
+**One connection per input** (ADR 0054): every input port and every parameter takes at most one connection; a plan with more is not built (a fan-in error, its sources named), and summing belongs to a module, `std.add` or `std.mix`, merging events to `std.merge`, whose ports fix the order. A signal input's value is its connection's value multiplied by the connection's scale, added to +0:
 
-`in = ((0 + s₁·x₁) + s₂·x₂) + …`
+`in = 0 + s·x`
 
 An input its library restricts (ADR 0024) has at most one connection, at scale 1, from the output it names; a plan that connects it otherwise is not built.
 
-**One connection per input** (ADR 0054, phase 1): an input or a parameter with more than one connection still sums them as above (events merge, §4), with a `fan_in` warning; editors refuse to make one, and summing belongs to `std.add` or `std.mix`, merging events to `std.merge`; a parameter takes its control or one connection, and the base of a parameter a connection drives is an offset, not corrected to its range (its effective value is clamped, §4). Phase 2 makes it an error.
+A parameter takes its control or one connection, never both: a composite's export onto an inner parameter a connection drives is not built (an error at the export); a knob and a modulation meet in a `std.const` (the knob sets its `value`) into a `std.add`. The base of a parameter a connection drives is an offset, not corrected to its range (its effective value is clamped, §5).
 
-An unconnected input reads 0; whether an input has a connection at all is a property of the plan that a primitive may ask (`Inputs::is_connected`, ADR 0033), constant between swaps; what a library signals between its own primitives, such as a seek (`std.playhead.jump`), is an ordinary event. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so the fixed order is what makes sums bit-stable.
+An unconnected input reads 0; whether an input has a connection at all is a property of the plan that a primitive may ask (`Inputs::is_connected`, ADR 0033), constant between swaps; what a library signals between its own primitives, such as a seek (`std.playhead.jump`), is an ordinary event. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so a sum's order is fixed by the module that makes it (its ports' order), which is what makes it bit-stable.
 
 ## 4. Events
 
@@ -56,10 +56,9 @@ An event output keeps at most **16 events per frame**. A 17th is an overflow, wh
 The events reaching one input port in one frame are applied in this order:
 
 1. **External events**, by sequence number (each external event carries a unique one).
-2. **Module events**, by source port address, byte-wise.
-3. Within one source, in the order it emitted them.
+2. **Module events** from its one connection (ADR 0054), in the order the source emitted them.
 
-Example: `/drums/kick/env.out` sorts before `/lfo.out`, because `d` sorts before `l`. Two setters `/a` and `/b` send `set(0.25)` and `set(0.75)` to `/p.value` in the same frame. `/a.out` < `/b.out`, so `/b`'s set applies last and the base is 0.75. Rename `/a` to `/c`: now `/b.out` < `/c.out`, and the base is 0.25. The order depends only on addresses and sequence numbers, never on the schedule.
+Events from several sources meet in a `std.merge`, which passes a frame's events of its input `a` first, then `b`'s, `c`'s and `d`'s, each in its own order. Example: two setters `/a` and `/b` send `set(0.25)` and `set(0.75)` in the same frame, `/a` into a merge's `a` and `/b` into its `b`, the merge into `/p.value`: `/b`'s set applies last and the base is 0.75, whatever the setters are named. The order depends only on ports and sequence numbers, never on the schedule.
 
 ## 5. Parameters
 
@@ -332,7 +331,7 @@ Two renders with the same inputs produce byte-identical `audio.wav`, `log.jsonl`
 
 The rounding rules:
 - everything is computed in f64;
-- sums are taken in canonical order (§3);
+- sums are taken in their modules' port order (§3);
 - ramp and fade gains divide first, then multiply once (§5, §6, §7);
 - ends of ramps and fades are assigned;
 - f64 is converted to f32 only for `audio.wav`, rounding to nearest, ties to even.
@@ -438,7 +437,7 @@ The log holds one block. Draining it yields the block's frames in order, each fr
 
 ### Threads
 
-ADR 0019 §2 (M2.6-2). A segment may run on several threads (`EngineConfig::threads`, `--threads`, the Setup's "CPU workers"; `docs/realtime-rules.md` "Worker threads"). The units are grouped into **tasks**: runs of consecutive units in the order above, a unit joining the previous one's task only if that one feeds it and the task is still estimated cheap (`docs/benchmarks.md`). A task becomes ready when the tasks it reads have completed. A task writes only its own instances' outputs, inputs, parameters and event stores; every sum, modulation and event merge is still computed by the receiving instance in canonical source order (§3, §4), never in the order tasks complete; each task logs into its own log, and the logs are joined in task order, which is unit order, after the segment. **The thread count, like *k*, is a performance setting: for every thread count and every timing, the audio, the log, the parameter values and every counter are bit-identical to one thread**, and so to the per-frame engine. The determinism matrix runs threads 1, 2, 3, 4 and 8 at *k* = 1, 64 and 256 through the offline driver and the real-time runner.
+ADR 0019 §2 (M2.6-2). A segment may run on several threads (`EngineConfig::threads`, `--threads`, the Setup's "CPU workers"; `docs/realtime-rules.md` "Worker threads"). The units are grouped into **tasks**: runs of consecutive units in the order above, a unit joining the previous one's task only if that one feeds it and the task is still estimated cheap (`docs/benchmarks.md`). A task becomes ready when the tasks it reads have completed. A task writes only its own instances' outputs, inputs, parameters and event stores; every modulation is still computed by the receiving instance, and every sum and event merge by its module in its ports' order (§3, §4), never in the order tasks complete; each task logs into its own log, and the logs are joined in task order, which is unit order, after the segment. **The thread count, like *k*, is a performance setting: for every thread count and every timing, the audio, the log, the parameter values and every counter are bit-identical to one thread**, and so to the per-frame engine. The determinism matrix runs threads 1, 2, 3, 4 and 8 at *k* = 1, 64 and 256 through the offline driver and the real-time runner.
 
 ## 14. Failures
 
@@ -499,7 +498,7 @@ M2.8-6 (ADR 0005; ADR 0023 §5). A port runs at an integer **rate divisor** *d* 
 ### Vectors
 
 - A port of shape `Vector(N)`, 1 ≤ *N* ≤ 4096 (`MAX_VECTOR_WIDTH`, "Limits" below), carries *N* `f64` per tick, as *N* rows (its elements, in order).
-- A vector connection joins equal shapes only, element by element: element *e* of the target sums element *e* of each source, in canonical source order (§3), each times the connection's scale. A vector never connects to a signal or a parameter; parameters are scalar.
+- A vector connection joins equal shapes only, element by element: element *e* of the target is element *e* of its one source (§3) times the connection's scale. A vector never connects to a signal or a parameter; parameters are scalar.
 - Faults are found and faded per element, and name the vector port (§7); `audio` vector outputs fade per element (§6).
 
 ### Converters

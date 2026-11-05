@@ -32,6 +32,10 @@ mod add {
     signal_contract::contract_tests!(super::std_type("std.add"));
 }
 
+mod merge {
+    signal_contract::contract_tests!(super::std_type("std.merge"));
+}
+
 mod tanh_shaper {
     signal_contract::contract_tests!(super::std_type("std.tanh_shaper"));
 }

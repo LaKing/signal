@@ -76,7 +76,8 @@ export function planChannels({ count, colOf, spans, wires, params = [], side = (
     for (let c = c0; c <= c1; c++) if (!columnFree(c, y)) return false;
     return claimFree(s0, s1, y, net);
   };
-  // The verticals of different nets into one input pin (a sum) share a track (`key`): they may run on one another into it.
+  // The verticals of different nets into one input pin share a track (`key`): they may run on one another into it (a fan-in,
+  // which ADR 0054 refuses since phase 2).
   const nets = new Map();
   for (const w of wires) if (w.into) (nets.get(w.into) ?? nets.set(w.into, new Set()).get(w.into)).add(w.net);
   const vert = (ch, y0, y1, net, ends, last = false) => {

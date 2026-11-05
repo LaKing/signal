@@ -113,28 +113,34 @@ fn blocks_and_swaps(threads: usize) {
             inst("c2", "test.counter"),
             inst("x", "test.faulty"),
             inst("u", "test.unit_delay"),
+            inst("sum", "test.add"),
             inst("g", "test.gain"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ]
     };
     let wiring = || {
         vec![
-            conn("o.out", "rec.zeta"),
-            conn("d.out", "rec.alpha"),
+            conn("o.out", "zeta.a"),
+            conn("x.out", "zeta.b"),
+            conn("zeta.out", "rec.zeta"),
+            conn("d.out", "alpha.a"),
+            conn("alpha.out", "rec.alpha"),
             conn("d.out", "pm.value"),
             conn("t.out", "c.in"),
             conn("flood.out", "c2.in"),
-            conn("x.out", "rec.zeta"),
             conn("g.out", "u.in"),
-            conn("u.out", "g.in"),
-            scaled("o.out", "g.in", 0.5),
+            scaled("o.out", "sum.a", 0.5),
+            conn("u.out", "sum.b"),
+            conn("sum.out", "g.in"),
         ]
     };
     let a = plan(base(), wiring());
     let mut with_noise = base();
     with_noise.push(inst("n", "test.noise"));
     let mut noise_wiring = wiring();
-    noise_wiring.push(conn("n.out", "rec.alpha"));
+    noise_wiring.push(conn("n.out", "alpha.b"));
     let b = plan(with_noise, noise_wiring);
 
     let mut engine = engine_threads(
@@ -287,12 +293,17 @@ fn version(n: u64) -> ExecutionPlan {
     let mut instances = vec![
         inst_with("osc", "test.osc", &[("freq", 110.0)]),
         inst("dc", "test.dc"),
+        inst("sum", "test.add"),
         inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
     ];
-    let mut connections = vec![conn("osc.out", "out.l"), conn("dc.out", "out.r")];
+    let mut connections = vec![
+        conn("osc.out", "sum.a"),
+        conn("sum.out", "out.l"),
+        conn("dc.out", "out.r"),
+    ];
     if n % 2 == 1 {
         instances.push(inst_with("osc2", "test.osc", &[("freq", 230.0)]));
-        connections.push(scaled("osc2.out", "out.l", 0.5));
+        connections.push(scaled("osc2.out", "sum.b", 0.5));
     }
     let mut plan = plan(instances, connections);
     plan.version = n;

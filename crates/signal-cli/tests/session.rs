@@ -204,7 +204,8 @@ fn live_session() -> (Render, SessionRecorder) {
                 else {
                     unreachable!()
                 };
-                assert_eq!(added, vec![addr("/osc2")]);
+                // The second oscillator and the sum it meets the first in (ADR 0054).
+                assert_eq!(added, vec![addr("/left"), addr("/osc2")]);
                 assert!(removed.is_empty());
                 assert_eq!(sets.len(), 1, "the file changed /osc.freq");
                 send(
@@ -226,7 +227,7 @@ fn live_session() -> (Render, SessionRecorder) {
                 let ProjectEdit::Structural { removed, .. } = edit else {
                     unreachable!()
                 };
-                assert_eq!(removed, vec![addr("/osc2")]);
+                assert_eq!(removed, vec![addr("/left"), addr("/osc2")]);
             }
             _ => {}
         }

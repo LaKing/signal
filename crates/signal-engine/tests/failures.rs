@@ -104,16 +104,22 @@ fn faults(log: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The audit's plan: two constants summed into the sink's `zeta` input, the
-/// first (0.25) failing at its first frame, the second 0.5.
+/// The audit's plan: two constants summed (by a `test.add`, ADR 0054) into
+/// the sink's `zeta` input, the first (0.25) failing at its first frame, the
+/// second 0.5.
 fn summed_sources() -> ExecutionPlan {
     plan(
         vec![
             inst_with("a", "test.fail", &[("value", 0.25), ("at", 0.0)]),
             inst_with("b", "test.const", &[("value", 0.5)]),
+            inst("sum", "test.add"),
             inst("rec", "test.recorder"),
         ],
-        vec![conn("a.out", "rec.zeta"), conn("b.out", "rec.zeta")],
+        vec![
+            conn("a.out", "sum.a"),
+            conn("b.out", "sum.b"),
+            conn("sum.out", "rec.zeta"),
+        ],
     )
 }
 
@@ -219,12 +225,14 @@ fn a_panic_inside_a_feedback_cycle() {
             vec![
                 inst_with("dc", "test.dc", &[("value", 0.75)]),
                 inst_with("f", "test.fail", &[("at", 37.0), ("nan", nan)]),
+                inst("sum", "test.add"),
                 inst("delay", "test.unit_delay"),
                 inst("rec", "test.recorder"),
             ],
             vec![
-                conn("dc.out", "f.in"),
-                scaled("delay.out", "f.in", 0.5),
+                conn("dc.out", "sum.a"),
+                scaled("delay.out", "sum.b", 0.5),
+                conn("sum.out", "f.in"),
                 conn("f.out", "delay.in"),
                 conn("f.out", "rec.zeta"),
                 conn("delay.out", "rec.alpha"),

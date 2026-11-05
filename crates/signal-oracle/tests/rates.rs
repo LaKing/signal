@@ -122,6 +122,8 @@ struct Generator<'r> {
     /// beyond divisor 1), and the vector fixtures.
     types: Vec<String>,
     next_rank: usize,
+    /// The next summing module's number (`s0`, `s1`, …).
+    next_sum: usize,
 }
 
 impl Generator<'_> {
@@ -219,6 +221,9 @@ impl Generator<'_> {
         found
     }
 
+    /// Connects each input and parameter of `node` to 0–2 sources; two
+    /// distinct sources meet in a module ([`Generator::sum`]), never at the
+    /// input (ADR 0054: one connection per input).
     fn wire(&mut self, spec: &mut Spec, node: &Node) {
         for port in self.ports(node, Direction::In) {
             let count = match self.rng.below(10) {
@@ -227,13 +232,83 @@ impl Generator<'_> {
                 _ => 2,
             };
             let candidates = self.sources(spec, node, &port);
+            let mut picked: Vec<String> = Vec::new();
             for _ in 0..count {
                 let Some(from) = self.rng.pick(&candidates).cloned() else {
                     break;
                 };
-                self.connect(spec, from, format!("{}.{}", node.name, port.name));
+                if !picked.contains(&from) {
+                    picked.push(from);
+                }
+            }
+            let to = format!("{}.{}", node.name, port.name);
+            match <[String; 2]>::try_from(picked) {
+                Ok([a, b]) => self.sum(spec, node, &port, a, b, to),
+                Err(picked) => {
+                    if let Some(from) = picked.into_iter().next() {
+                        self.connect(spec, from, to);
+                    }
+                }
             }
         }
+    }
+
+    /// Two sources `a` and `b` of `to` (`port` of `target`) through a
+    /// module of their own at `port`'s divisor (ADR 0054): signals into a
+    /// `std.add` (re-rated) or onto two of a `std.mix`'s inputs, vectors
+    /// into a `vec.add` of their size, events onto two of a `std.merge`'s
+    /// (events join at divisor 1 only), in a drawn order. A cross-rate
+    /// source is converted into the module as it was into `to`. The module
+    /// takes `target`'s rank, so it reads only what `target` may read. A
+    /// signal and events (a parameter takes both) cannot meet: `a` alone.
+    fn sum(
+        &mut self,
+        spec: &mut Spec,
+        target: &Node,
+        port: &Port,
+        a: String,
+        b: String,
+        to: String,
+    ) {
+        const FOUR: [&str; 4] = ["a", "b", "c", "d"];
+        if self.exclusive_taken(spec, &to) {
+            return;
+        }
+        let shape = |g: &Self, from: &str| g.port(spec, from, Direction::Out).map(|p| p.shape);
+        let (type_name, ports) = match (shape(self, &a), shape(self, &b), port.shape) {
+            (Some(PortShape::Events), Some(PortShape::Events), _) => {
+                let i = self.rng.below(4);
+                let j = (i + 1 + self.rng.below(3)) % 4;
+                ("std.merge".to_owned(), [FOUR[i], FOUR[j]])
+            }
+            (Some(PortShape::Vector(n)), Some(PortShape::Vector(_)), _) => {
+                (vector_type("add", n, port.rate), ["a", "b"])
+            }
+            (Some(PortShape::Signal), Some(PortShape::Signal), _) if self.rng.chance(50) => {
+                (divided_type("std.add", port.rate), ["a", "b"])
+            }
+            (Some(PortShape::Signal), Some(PortShape::Signal), _) => {
+                let i = self.rng.below(4);
+                let j = (i + 1 + self.rng.below(3)) % 4;
+                (divided_type("std.mix", port.rate), [FOUR[i], FOUR[j]])
+            }
+            _ => {
+                self.connect(spec, a, to);
+                return;
+            }
+        };
+        if self.registry.get(&type_name).is_none() {
+            self.connect(spec, a, to);
+            return;
+        }
+        let name = format!("s{}", self.next_sum);
+        self.next_sum += 1;
+        let mut node = self.node(name.clone(), type_name);
+        node.rank = target.rank;
+        spec.nodes.push(node);
+        self.connect(spec, a, format!("{name}.{}", ports[0]));
+        self.connect(spec, b, format!("{name}.{}", ports[1]));
+        self.connect(spec, format!("{name}.out"), to);
     }
 
     fn connect(&mut self, spec: &mut Spec, from: String, to: String) {
@@ -455,6 +530,7 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         rng: Rng(SplitMix64::new(draw.seed)),
         types,
         next_rank: 0,
+        next_sum: 0,
     };
     let fade = ((u64::from(draw.rate) * 5 + 500) / 1000).max(1);
     let mut notes = Notes::default();
@@ -729,7 +805,10 @@ proptest! {
 /// both feedthrough classes above divisor 1, feedback through a divided
 /// state-output instance, converters added by a swap and removed (suspended
 /// first, and directly), a removed source of a converter above divisor 1,
-/// and suspends of divided instances.
+/// suspends of divided instances, and two sources meeting in a module
+/// above divisor 1 (ADR 0054). Two vector sources of one size into one
+/// input are too rare at these sizes to require; the fixed graph below
+/// sums vectors in a `vec.add`.
 #[test]
 fn the_rate_generator_covers_its_dimensions() {
     let registry = registry();
@@ -773,6 +852,14 @@ fn the_rate_generator_covers_its_dimensions() {
                 }
                 if i.type_name.starts_with("core.hold") {
                     seen.insert("hold");
+                }
+                let fed = plan
+                    .sources
+                    .keys()
+                    .filter(|to| to.instance() == i.address)
+                    .count();
+                if i.address.to_string().starts_with("/s") && fed >= 2 && d > 1 {
+                    seen.insert("signals meeting in a divided module");
                 }
                 if i.type_name.starts_with("core.decimate") {
                     seen.insert("decimate");
@@ -854,6 +941,7 @@ fn the_rate_generator_covers_its_dimensions() {
         "feedback through a divided state-output",
         "shared converter",
         "suspend of a divided instance",
+        "signals meeting in a divided module",
     ] {
         assert!(seen.contains(what), "the generator made no {what}");
     }
@@ -904,7 +992,8 @@ fn matches(registry: &Registry, spec: &Spec, script: &Script, setups: &[Setup]) 
 /// One graph with every divisor of AC1 and every vector size: oscillators at
 /// 1, 2, 3, 64 and 1600; spreads to vectors of 1, 4 and 256 elements, a gain
 /// and a delay in a feedback loop at 64, mixes back to signals; holds into
-/// the probe and into parameters (shared), decimates into the vectors; events
+/// the probe and into parameters (shared), decimates into the vectors (the
+/// loop's input and the spread meet in a `vec.add`, ADR 0054); events
 /// at frames that are no tick; a suspended and resumed divided instance.
 /// Every block size, two partitions and one and four threads.
 #[test]
@@ -924,6 +1013,7 @@ fn one_graph_with_every_divisor_and_size_matches_in_every_configuration() {
             node("v1", &vector_type("spread", 1, 2), &[]),
             node("v4", &vector_type("spread", 4, 64), &[]),
             node("v256", &vector_type("spread", 256, 1600), &[]),
+            node("sum4", &vector_type("add", 4, 64), &[]),
             node("g4", &vector_type("gain", 4, 64), &[("gain", 0.5)]),
             node("dl4", &vector_type("delay", 4, 64), &[]),
             node("m1", &vector_type("mix", 1, 2), &[]),
@@ -936,8 +1026,9 @@ fn one_graph_with_every_divisor_and_size_matches_in_every_configuration() {
             wire("osc.out", "v1.in", None),
             wire("s2.out", "v4.in", None),
             wire("l64.out", "v256.in", None),
-            wire("v4.out", "g4.in", None),
-            wire("dl4.out", "g4.in", Some(0.25)),
+            wire("v4.out", "sum4.a", None),
+            wire("dl4.out", "sum4.b", Some(0.25)),
+            wire("sum4.out", "g4.in", None),
             wire("l1600.out", "g4.gain", Some(0.5)),
             wire("g4.out", "dl4.in", None),
             wire("v1.out", "m1.in", None),

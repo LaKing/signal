@@ -112,13 +112,14 @@ expression: plan
         "shape": "signal"
       }
     ],
-    "/drums/mix.cv": [],
-    "/drums/mix.in": [
+    "/drums/mix.cv": [
       {
         "from": "/drums/echo.out",
         "scale": 0.5,
         "shape": "signal"
-      },
+      }
+    ],
+    "/drums/mix.in": [
       {
         "from": "/drums/kick/vca.out",
         "scale": 1.0,
@@ -136,12 +137,11 @@ expression: plan
   },
   "warnings": [
     {
-      "warning": "fan_in",
-      "to": "/drums/mix.in",
-      "from": [
-        "/drums/echo.out",
-        "/drums/kick/vca.out"
-      ]
+      "warning": "kind_mismatch",
+      "from": "/drums/echo.out",
+      "to": "/drums/mix.cv",
+      "from_kind": "audio",
+      "to_kind": "control"
     },
     {
       "warning": "no_sink_reachable",

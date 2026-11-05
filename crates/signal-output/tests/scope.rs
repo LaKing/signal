@@ -1,6 +1,6 @@
 //! M2.8-1: the scope adapter. The engine's per-frame output rows are each
-//! output's own values (two oscillators summed into one sink input are told
-//! apart); a scope stream is the same whatever the callback sizes and thread
+//! output's own values (two oscillators summed by a `std.add` into one sink
+//! input are told apart); a scope stream is the same whatever the callback sizes and thread
 //! count; scopes leave the audio as it was; a swap keeps a slot whose port
 //! remains and unbinds one whose port is gone; a stopped slot's blocks are
 //! dropped.
@@ -21,8 +21,9 @@ fn registry() -> Registry {
     registry
 }
 
-/// `a` (440 Hz) into both inputs, `b` (220 Hz) into the left one too; with
-/// `with_b` false, no `b`.
+/// `a` (440 Hz) into both inputs, `b` (220 Hz) into the left one too, the
+/// two summed by `sum` (a `std.add`, ADR 0054: one connection per input);
+/// with `with_b` false, no `b` and no `sum`, `a` straight into both.
 fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
     let instance = |name: &str, module: &str, parameters: &[(&str, f64)]| InstanceDef {
         name: name.to_owned(),
@@ -42,10 +43,15 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
         instance("a", "std.sine_osc", &[("freq", 440.0)]),
         instance("out", "std.audio_out", &[("gain", 0.5)]),
     ];
-    let mut connections = vec![connection("a.out", "out.l"), connection("a.out", "out.r")];
+    let mut connections = vec![connection("a.out", "out.r")];
     if with_b {
         instances.push(instance("b", "std.sine_osc", &[("freq", 220.0)]));
-        connections.push(connection("b.out", "out.l"));
+        instances.push(instance("sum", "std.add", &[]));
+        connections.push(connection("a.out", "sum.a"));
+        connections.push(connection("b.out", "sum.b"));
+        connections.push(connection("sum.out", "out.l"));
+    } else {
+        connections.push(connection("a.out", "out.l"));
     }
     let root = CompositeDef {
         name: "project".to_owned(),
@@ -186,10 +192,12 @@ fn a_scope_stream_is_its_outputs_values_whatever_the_callback_sizes() {
     assert_eq!(counts, [78 * SCOPE_POINTS, 11 * SCOPE_POINTS]);
 }
 
-/// M2.8-3: a scope on a signal input shows what the instance receives: the
-/// sum of its sources (here `/out.l` = a + b), whatever the partition.
+/// M2.8-3: a scope on a signal input shows what the instance receives: what
+/// its one connection carries (here `/out.l` is `sum`'s a + b, `/out.r` is
+/// `a`), whatever the partition. (Before ADR 0054 `/out.l` summed `a` and
+/// `b` itself; the sum is now a `std.add`, the same bits.)
 #[test]
-fn a_scope_on_a_signal_input_is_the_sum_of_its_sources() {
+fn a_scope_on_a_signal_input_is_what_its_connection_carries() {
     let frames = 6_000;
     let scopes = [("/out.l", 1), ("/out.r", 5)];
     let (points, _) = capture(1, 1, &scopes, frames);

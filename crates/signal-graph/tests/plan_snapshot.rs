@@ -5,7 +5,7 @@
 mod common;
 
 use common::{addr, build, nested, port_addr};
-use signal_core::PortShape;
+use signal_core::{PortKind, PortShape};
 use signal_graph::{GraphWarning, Source};
 
 #[test]
@@ -55,13 +55,13 @@ fn connections_resolve_through_exports() {
     assert_eq!(
         plan.warnings,
         [
-            // The mix sums the voice and the echo's return by a fan-in (ADR 0054 phase 1: a warning).
-            GraphWarning::FanIn {
-                to: port_addr("/drums/mix.in"),
-                from: vec![
-                    port_addr("/drums/echo.out"),
-                    port_addr("/drums/kick/vca.out")
-                ],
+            // The echo's return on the mix's cv (one connection per input,
+            // ADR 0054): an audio output into a control input.
+            GraphWarning::KindMismatch {
+                from: port_addr("/drums/echo.out"),
+                to: port_addr("/drums/mix.cv"),
+                from_kind: PortKind::Audio,
+                to_kind: PortKind::Control,
             },
             GraphWarning::NoSinkReachable {
                 instance: addr("/drums/kick/pitch_env")

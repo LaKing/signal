@@ -169,7 +169,7 @@ Each is a histogram, eight buckets per octave, with the exact maximum (so a medi
 
 **A panic in a block** (M2.7-3, `docs/semantics.md` §14) never ends a thread and never passes silently. A primitive's panic is caught at its call, on whichever thread ran it, and mutes that instance (a `panic` fault); the block goes on. Anything else that unwinds in a task (engine code, or the test hook) is caught in the job, fails the task on the task board and stops the engine with an error (`Engine::failure`; the runner then outputs silence and reports it). Catching allocates, locks and blocks nothing; the panic itself allocates its payload and the default hook prints to stderr, the cost of the broken contract. After a failure the calling thread waits only for the claims already made, each settled by one completion, so it never hangs; the pool keeps every worker (`schedule_stats().task_failures` counts the failed tasks). The calling thread no longer unwinds out of a parallel segment; the job's close guard still waits for every joined worker to leave before `serve` returns or unwinds.
 
-**Determinism.** A task writes only its own instances' rows; every sum and event merge is computed by the consumer in canonical source order; the tasks' logs are joined in task order after the segment. The output and the log are the same bit for bit for every thread count (`docs/semantics.md` §13).
+**Determinism.** A task writes only its own instances' rows; every modulation is computed by the consumer, every sum and event merge by its module in its ports' order; the tasks' logs are joined in task order after the segment. The output and the log are the same bit for bit for every thread count (`docs/semantics.md` §13).
 
 ## Real-time workers (M2.6-3)
 

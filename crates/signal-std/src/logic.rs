@@ -134,7 +134,7 @@ impl DirectPrimitive for Compare {
 ///
 /// **Formula:** `out[n] = a[n]` if `gate[n] > 0`, else `b[n]`, clamped to
 /// `±1e6` ([`SIGNAL_BOUND`](crate::SIGNAL_BOUND), which only an input that a
-/// fan-in sum or a connection scale took beyond it reaches), so the type
+/// connection scale took beyond it reaches), so the type
 /// never faults on its own. Stateless; constant work per frame.
 ///
 /// **Operands:** ordered: `a` is chosen when the gate is open, `b` otherwise.

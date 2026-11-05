@@ -79,8 +79,9 @@ impl Write for Stream {
 
 pub type Ws = WebSocket<Stream>;
 
-/// Two oscillators summed into the left input of a stereo sink, the first
-/// also into the right; an envelope that reaches no sink (for `trigger`).
+/// Two oscillators summed by `sum` (a `std.add`, ADR 0054: one connection
+/// per input) into the left input of a stereo sink, the first also into the
+/// right; an envelope that reaches no sink (for `trigger`).
 pub const TONE: &str = r#"schema_version = 1
 
 [project]
@@ -92,12 +93,14 @@ seed = 1
 a = { module = "std.sine_osc", freq = 440 }
 b = { module = "std.sine_osc", freq = 220 }
 env = { module = "std.exp_env", decay_ms = 50 }
+sum = { module = "std.add" }
 out = { module = "std.audio_out", gain = 0.5 }
 
 [wiring]
 connections = [
-  { from = "a.out", to = "out.l" },
-  { from = "b.out", to = "out.l" },
+  { from = "a.out", to = "sum.a" },
+  { from = "b.out", to = "sum.b" },
+  { from = "sum.out", to = "out.l" },
   { from = "a.out", to = "out.r" },
 ]
 "#;

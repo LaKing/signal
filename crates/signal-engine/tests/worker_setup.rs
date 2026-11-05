@@ -19,20 +19,21 @@ use signal_output::{NullDriver, realtime, render};
 const RATE: u32 = 1_000;
 const LONG: Duration = Duration::from_secs(10);
 
-/// Several sources summed into the sink: tasks for the workers.
+/// Several sources summed (a `test.add`) into the sink: tasks for the
+/// workers.
 fn sources() -> ExecutionPlan {
     plan(
         vec![
             inst("o1", "test.osc"),
             inst("o2", "test.osc"),
             inst("n", "test.noise"),
-            inst("sum", "test.gain"),
+            inst("sum", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("o1.out", "sum.in"),
-            scaled("o2.out", "sum.in", 0.5),
-            scaled("n.out", "sum.in", 0.25),
+            scaled("n.out", "sum.a", 0.25),
+            conn("o1.out", "sum.b"),
+            scaled("o2.out", "sum.c", 0.5),
             conn("sum.out", "rec.zeta"),
         ],
     )

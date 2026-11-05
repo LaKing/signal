@@ -38,8 +38,9 @@ fn delivered(engine: &Engine, target: &str) -> Vec<String> {
 
 /// Signals, events into a parameter, modulation, a feedback loop through a
 /// state-output instance, a state-output event receiver, randomness, a
-/// disconnected instance, and an order-sensitive fan-in: `rec.alpha` sums ±10¹⁶
-/// with small values, so any other summation order would change its bits.
+/// disconnected instance, and order-sensitive sums: `sum` and `total` add
+/// ±10¹⁶ with small values (ADR 0054: through their ports, in order), so any
+/// other summation order would change `rec.alpha`'s bits.
 fn rich_plan() -> ExecutionPlan {
     plan(
         vec![
@@ -51,35 +52,47 @@ fn rich_plan() -> ExecutionPlan {
             inst_with("one", "test.const", &[("value", 1.0)]),
             inst_with("s1", "test.setter", &[("value", 0.25)]),
             inst_with("s2", "test.setter", &[("value", 0.75)]),
+            inst("sets", "test.merge"),
             inst("probe", "test.probe_add"),
+            inst("modulated", "test.probe_add"),
             inst_with("clock", "test.trigger", &[("period", 3.0)]),
             inst("count", "test.counter"),
             inst("later", "test.event_delay"),
             inst("impulse", "test.impulse"),
+            inst("feedback", "test.add"),
             inst("loop", "test.gain"),
             inst("delay", "test.unit_delay"),
             inst("lonely", "test.osc"),
+            inst("sum", "test.add"),
+            inst("total", "test.add"),
+            inst("mix", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("noise.out", "rec.zeta"),
+            conn("noise.out", "mix.c"),
             conn("osc.out", "gain.in"),
-            conn("gain.out", "rec.zeta"),
-            scaled("big.out", "rec.alpha", 1e16),
-            scaled("neg.out", "rec.alpha", 1e16),
-            conn("one.out", "rec.alpha"),
-            conn("s1.out", "probe.value"),
-            conn("s2.out", "probe.value"),
-            conn("osc.out", "probe.value"),
-            conn("probe.out", "rec.alpha"),
+            conn("gain.out", "mix.a"),
+            conn("mix.out", "rec.zeta"),
+            scaled("big.out", "sum.a", 1e16),
+            conn("count.out", "sum.b"),
+            conn("later.out", "sum.c"),
+            scaled("neg.out", "sum.d", 1e16),
+            conn("sum.out", "total.a"),
+            conn("one.out", "total.b"),
+            conn("probe.out", "total.c"),
+            conn("modulated.out", "total.d"),
+            conn("total.out", "rec.alpha"),
+            conn("s1.out", "sets.a"),
+            conn("s2.out", "sets.b"),
+            conn("sets.out", "probe.value"),
+            conn("osc.out", "modulated.value"),
             conn("clock.out", "count.in"),
             conn("clock.out", "later.in"),
-            conn("count.out", "rec.alpha"),
-            conn("later.out", "rec.alpha"),
-            conn("impulse.out", "loop.in"),
-            scaled("delay.out", "loop.in", 0.5),
+            scaled("delay.out", "feedback.a", 0.5),
+            conn("impulse.out", "feedback.b"),
+            conn("feedback.out", "loop.in"),
             conn("loop.out", "delay.in"),
-            conn("loop.out", "rec.zeta"),
+            conn("loop.out", "mix.b"),
         ],
     )
 }
@@ -160,19 +173,22 @@ fn cycle_without_state_output_is_rejected() {
     );
 }
 
-/// y[n] = x[n] + 0.5 · y[n − 1] with an impulse x: y[n] = 0.5ⁿ exactly.
+/// y[n] = x[n] + 0.5 · y[n − 1] with an impulse x: y[n] = 0.5ⁿ exactly (x and
+/// the feedback meet in a `test.add`, ADR 0054).
 #[test]
 fn feedback_through_unit_delay_matches_hand_computed_reference() {
     let plan = plan(
         vec![
             inst("impulse", "test.impulse"),
+            inst("sum", "test.add"),
             inst("loop", "test.gain"),
             inst("delay", "test.unit_delay"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("impulse.out", "loop.in"),
-            scaled("delay.out", "loop.in", 0.5),
+            conn("impulse.out", "sum.a"),
+            scaled("delay.out", "sum.b", 0.5),
+            conn("sum.out", "loop.in"),
             conn("loop.out", "delay.in"),
             conn("loop.out", "rec.zeta"),
         ],
@@ -214,36 +230,56 @@ fn disconnected_oscillator_advances_analytically() {
 
 // --- 4. Event ordering -------------------------------------------------------
 
-/// Two sources send conflicting `set`s in the same frame: the later in
-/// canonical order (by source port address) wins, so renaming a source flips it.
+/// Two sources send conflicting `set`s in the same frame. They meet in a
+/// `test.merge` (ADR 0054), whose port order decides: the set on `b` applies
+/// after the one on `a`, whatever the sources are called, so renaming a source
+/// no longer flips them; swapping the ports does. Two connections into the
+/// parameter itself are refused.
 #[test]
-fn conflicting_sets_follow_canonical_order_and_renaming_flips_them() {
-    let base_after_one_frame = |first: &str| {
+fn conflicting_sets_follow_the_merge_port_order_not_the_names() {
+    let base_after_one_frame = |first: &str, first_port: &str, second_port: &str| {
         let plan = plan(
             vec![
                 inst_with(first, "test.setter", &[("value", 0.25)]),
                 inst_with("b", "test.setter", &[("value", 0.75)]),
+                inst("m", "test.merge"),
                 inst("p", "test.probe_add"),
             ],
             vec![
-                conn(&format!("{first}.out"), "p.value"),
-                conn("b.out", "p.value"),
+                conn(&format!("{first}.out"), &format!("m.{first_port}")),
+                conn("b.out", &format!("m.{second_port}")),
+                conn("m.out", "p.value"),
             ],
         );
         let mut engine = engine(&plan, 48_000, vec![]);
         engine.run_frame();
         let base = engine.parameter(&port_addr("/p.value")).unwrap().base;
-        (base, delivered(&engine, "/p.value"))
+        assert_eq!(delivered(&engine, "/p.value"), ["/m.out", "/m.out"]);
+        base
     };
-    // /a.out < /b.out: b's set applies last.
+    // b's set is on m.b: it applies last.
+    assert_eq!(base_after_one_frame("a", "a", "b"), 0.75);
+    // Renamed to /c (after /b.out by address): still on m.a, still first.
+    assert_eq!(base_after_one_frame("c", "a", "b"), 0.75);
+    // The ports swapped: the 0.25 on m.b applies last.
+    assert_eq!(base_after_one_frame("a", "b", "a"), 0.25);
+
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst_with("a", "test.setter", &[("value", 0.25)]),
+            inst_with("b", "test.setter", &[("value", 0.75)]),
+            inst("p", "test.probe_add"),
+        ],
+        connections: vec![conn("a.out", "p.value"), conn("b.out", "p.value")],
+        exports: Exports::default(),
+    };
     assert_eq!(
-        base_after_one_frame("a"),
-        (0.75, vec!["/a.out".into(), "/b.out".into()])
-    );
-    // Renamed to /c: /b.out < /c.out, so c's set applies last.
-    assert_eq!(
-        base_after_one_frame("c"),
-        (0.25, vec!["/b.out".into(), "/c.out".into()])
+        build_plan(&root, &[], &registry(), 1).unwrap_err(),
+        [GraphError::FanIn {
+            to: port_addr("/p.value"),
+            from: vec![port_addr("/a.out"), port_addr("/b.out")],
+        }]
     );
 }
 
@@ -280,46 +316,64 @@ fn external_events_come_first_in_sequence_order() {
     );
 }
 
-/// A source connected twice to one input delivers every event twice, still in
-/// its emission order: `set(1)`, `set(1)`, `set(2)`, `set(2)`, not its list
-/// repeated. An order-sensitive receiver reads them as 1122 (the wrong order
-/// gives 1212), and `log.jsonl` records the same order, for an event input and
-/// for a parameter.
+/// A source fanned out to two ports of a `test.merge` arrives once per port,
+/// in the ports' order: `a`'s `set(1)`, `set(2)`, then `b`'s, which an
+/// order-sensitive receiver reads as 1212. `log.jsonl` records the same order
+/// for an event input and for a parameter the merge drives. Connecting the
+/// source twice to one input, which once delivered every event twice, is
+/// refused (ADR 0054).
 #[test]
-fn duplicate_event_connections_keep_emission_order() {
+fn a_source_fanned_into_two_merge_ports_arrives_in_port_order() {
     let plan = plan(
         vec![
             inst("src", "test.pair"),
+            inst("m", "test.merge"),
             inst("seq", "test.sequence"),
             inst("p", "test.probe_add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("src.out", "seq.in"),
-            scaled("src.out", "seq.in", 2.0),
-            conn("src.out", "p.value"),
-            conn("src.out", "p.value"),
+            conn("src.out", "m.a"),
+            conn("src.out", "m.b"),
+            conn("m.out", "seq.in"),
+            conn("m.out", "p.value"),
             conn("seq.out", "rec.zeta"),
         ],
     );
-    assert_eq!(plan.sources[&port_addr("/seq.in")].len(), 2);
-    assert_eq!(plan.sources[&port_addr("/p.value")].len(), 2);
+    assert_eq!(plan.sources[&port_addr("/seq.in")].len(), 1);
+    assert_eq!(plan.sources[&port_addr("/p.value")].len(), 1);
     let rendered = render(&mut engine(&plan, 48_000, vec![]), 1).unwrap();
-    assert_eq!(rendered.samples[0], 1122.0);
+    assert_eq!(rendered.samples[0], 1212.0);
 
-    let line = |target: &str, value: &str| {
+    let line = |target: &str, value: &str, source: &str| {
         format!(
-            r#"{{"type":"event","frame":0,"target":"{target}","payload":{{"set":{value}}},"source":{{"port":"/src.out"}}}}"#
+            r#"{{"type":"event","frame":0,"target":"{target}","payload":{{"set":{value}}},"source":{{"port":"{source}"}}}}"#
         )
     };
     let mut expected = String::new();
-    for target in ["/p.value", "/seq.in"] {
-        for value in ["1.0", "1.0", "2.0", "2.0"] {
-            expected.push_str(&line(target, value));
+    for (target, values, source) in [
+        ("/m.a", ["1.0", "2.0"].as_slice(), "/src.out"),
+        ("/m.b", &["1.0", "2.0"], "/src.out"),
+        ("/p.value", &["1.0", "2.0", "1.0", "2.0"], "/m.out"),
+        ("/seq.in", &["1.0", "2.0", "1.0", "2.0"], "/m.out"),
+    ] {
+        for value in values {
+            expected.push_str(&line(target, value, source));
             expected.push('\n');
         }
     }
     assert_eq!(String::from_utf8(rendered.log).unwrap(), expected);
+
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![inst("src", "test.pair"), inst("seq", "test.sequence")],
+        connections: vec![conn("src.out", "seq.in"), conn("src.out", "seq.in")],
+        exports: Exports::default(),
+    };
+    assert!(matches!(
+        build_plan(&root, &[], &registry(), 1).unwrap_err().as_slice(),
+        [GraphError::FanIn { to, .. }] if *to == port_addr("/seq.in")
+    ));
 }
 
 // --- 5. Base and modulation --------------------------------------------------

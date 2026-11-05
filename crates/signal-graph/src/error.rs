@@ -85,6 +85,21 @@ pub enum GraphError {
         /// The export name.
         name: String,
     },
+    /// ADR 0054 §1: an exported parameter (a control: its knob sets the
+    /// base) onto an inner parameter a connection drives too: an inner one,
+    /// or one from outside through an exported input onto it. A knob and a
+    /// modulation meet in a module: a `std.const` the knob sets into a
+    /// `std.add` with the modulation.
+    ControlAndConnection {
+        /// The composite instance (`None`: the project root).
+        scope: Option<InstanceAddress>,
+        /// The composite's name.
+        composite: String,
+        /// The export name.
+        name: String,
+        /// The inner parameter, `inst.param`.
+        parameter: String,
+    },
     /// ADR 0042: an exported parameter's own range is not inside the range
     /// of one of its targets.
     ExportRangeOutside {
@@ -190,6 +205,15 @@ pub enum GraphError {
         to: PortAddress,
         /// The scale.
         scale: f64,
+    },
+    /// ADR 0054: several connections into one input or parameter (a
+    /// fan-in). One input takes one connection: signals are summed by a
+    /// module (`std.add`, `std.mix`), events merged by `std.merge`.
+    FanIn {
+        /// The input port or parameter.
+        to: PortAddress,
+        /// Its sources, as connected, in canonical order.
+        from: Vec<PortAddress>,
     },
     /// A connection into a restricted input (ADR 0024,
     /// `Registry::restrict_input`) that is not its one connection, at scale
@@ -299,6 +323,16 @@ impl fmt::Display for GraphError {
                 "{}: composite `{composite}` exports `{name}` more than once",
                 scope(s)
             ),
+            GraphError::ControlAndConnection {
+                scope: s,
+                composite,
+                name,
+                parameter,
+            } => write!(
+                f,
+                "{}: composite `{composite}` exports `{name}` onto {parameter}, which a connection drives (an inner one, or one into an exported input): a parameter takes its control or one connection, never both; set the base with a std.const into a std.add with the connection (ADR 0054)",
+                scope(s)
+            ),
             GraphError::EmptyExport {
                 scope: s,
                 composite,
@@ -390,6 +424,18 @@ impl fmt::Display for GraphError {
             ),
             GraphError::NonFiniteScale { from, to, scale } => {
                 write!(f, "{from} -> {to}: scale {scale} is not finite")
+            }
+            GraphError::FanIn { to, from } => {
+                let sources = from
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "{to}: {} connections into one input ({sources}); one input takes one connection: sum with std.add or std.mix, merge events with std.merge (ADR 0054)",
+                    from.len()
+                )
             }
             GraphError::RestrictedInput {
                 from,
@@ -561,16 +607,6 @@ pub enum GraphWarning {
         /// The parameter's range.
         range: Range,
     },
-    /// ADR 0054 phase 1: several connections into one input or parameter (a
-    /// fan-in). It still sums (a signal) or merges (events) in canonical
-    /// source order; summing and merging belong to a module (`std.add`,
-    /// `std.mix`, `std.merge`), and phase 2 makes this an error.
-    FanIn {
-        /// The input port or parameter.
-        to: PortAddress,
-        /// Its sources, as connected, in canonical order.
-        from: Vec<PortAddress>,
-    },
     /// No sink instance is reachable from this instance, so its output is not
     /// observed. It still runs (ADR 0016 §1).
     NoSinkReachable {
@@ -619,18 +655,6 @@ impl fmt::Display for GraphWarning {
                 range.max,
                 effective.max(range.min).min(range.max)
             ),
-            GraphWarning::FanIn { to, from } => {
-                let sources = from
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(
-                    f,
-                    "{to}: {} connections into one input ({sources}); they are summed (events merged), but one input takes one connection: sum with std.add or std.mix, merge events with std.merge (ADR 0054)",
-                    from.len()
-                )
-            }
             GraphWarning::NoSinkReachable { instance } => {
                 write!(f, "{instance}: no sink is reachable; its output is unused")
             }

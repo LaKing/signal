@@ -5,7 +5,7 @@
 //! clamped to `±1e6` ([`SIGNAL_BOUND`](crate::SIGNAL_BOUND), the engine's
 //! magnitude bound, `docs/semantics.md` §7), so a type never faults on its
 //! own: that bounds `std.div`'s quotient, and the others' outputs on an input
-//! that a fan-in sum or a connection scale took beyond the bound.
+//! that a connection scale took beyond the bound.
 //!
 //! Ports: the two-operand types take ordered inputs `a`, `b`, the others
 //! `in`; each has one output `out`. All are generic, unbounded, direct, at
@@ -228,7 +228,7 @@ mod tests {
     }
 
     /// Every type's output is within ±1e6, also for inputs beyond it (a
-    /// fan-in sum or a connection scale can give those).
+    /// connection scale can give those).
     #[test]
     fn outputs_are_clamped_to_the_bound() {
         let big = [3e6, -3e6, 1e300];

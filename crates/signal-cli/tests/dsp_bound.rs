@@ -84,36 +84,46 @@ const STIMULUS: &str = "saw = { module = \"std.osc\", shape = 1, freq = 110 }\n\
                         lfo = { module = \"std.sine_osc\", freq = 1000 }\n";
 
 /// Each case: the instance under test `x` (with its extreme settings), its
-/// connections from the stimulus, and its outputs.
+/// connections from the stimulus, and its outputs. A signal and the constant
+/// meet in a `std.add` (ADR 0054), the constant scaled so that the sum is at
+/// the bound, never past it (`std.add` faults past it as every module).
 const CASES: [(&str, &str, &str); 6] = [
     (
-        "x = { module = \"std.biquad\", mode = 4, cutoff_hz = 20000, q = 40, gain_db = 48 }",
-        "{ from = \"saw.out\", to = \"x.in\" },\n\
-         { from = \"top.out\", to = \"x.in\" },\n\
+        "xin = { module = \"std.add\" }\n\
+         x = { module = \"std.biquad\", mode = 4, cutoff_hz = 20000, q = 40, gain_db = 48 }",
+        "{ from = \"saw.out\", to = \"xin.a\" },\n\
+         { from = \"top.out\", to = \"xin.b\", scale = 0.999999 },\n\
+         { from = \"xin.out\", to = \"x.in\" },\n\
          { from = \"lfo.out\", to = \"x.cutoff_hz\", scale = 20000 },\n\
          { from = \"lfo.out\", to = \"x.mode\", scale = 4 },\n\
          { from = \"lfo.out\", to = \"x.q\", scale = 40 },\n",
         "out",
     ),
     (
-        "x = { module = \"std.comb\", time_ms = 500, feedback = 0.999, damping_hz = 100000 }",
-        "{ from = \"saw.out\", to = \"x.in\" },\n\
-         { from = \"top.out\", to = \"x.in\" },\n\
+        "xin = { module = \"std.add\" }\n\
+         x = { module = \"std.comb\", time_ms = 500, feedback = 0.999, damping_hz = 100000 }",
+        "{ from = \"saw.out\", to = \"xin.a\" },\n\
+         { from = \"top.out\", to = \"xin.b\", scale = 0.999999 },\n\
+         { from = \"xin.out\", to = \"x.in\" },\n\
          { from = \"lfo.out\", to = \"x.time_ms\", scale = 500 },\n",
         "out",
     ),
     (
-        "x = { module = \"std.allpass_delay\", time_ms = 500, gain = 0.999 }",
-        "{ from = \"saw.out\", to = \"x.in\" },\n\
-         { from = \"top.out\", to = \"x.in\" },\n\
+        "xin = { module = \"std.add\" }\n\
+         x = { module = \"std.allpass_delay\", time_ms = 500, gain = 0.999 }",
+        "{ from = \"saw.out\", to = \"xin.a\" },\n\
+         { from = \"top.out\", to = \"xin.b\", scale = 0.999999 },\n\
+         { from = \"xin.out\", to = \"x.in\" },\n\
          { from = \"lfo.out\", to = \"x.time_ms\", scale = 500 },\n\
          { from = \"lfo.out\", to = \"x.gain\", scale = 2 },\n",
         "out",
     ),
     (
-        "x = { module = \"std.fdn_reverb\", size = 2, decay_s = 30, damping_hz = 100000, mix = 1 }",
-        "{ from = \"saw.out\", to = \"x.in_l\" },\n\
-         { from = \"top.out\", to = \"x.in_l\" },\n\
+        "xin = { module = \"std.add\" }\n\
+         x = { module = \"std.fdn_reverb\", size = 2, decay_s = 30, damping_hz = 100000, mix = 1 }",
+        "{ from = \"saw.out\", to = \"xin.a\" },\n\
+         { from = \"top.out\", to = \"xin.b\", scale = 0.999999 },\n\
+         { from = \"xin.out\", to = \"x.in_l\" },\n\
          { from = \"top.out\", to = \"x.in_r\" },\n\
          { from = \"lfo.out\", to = \"x.size\", scale = 2 },\n\
          { from = \"lfo.out\", to = \"x.predelay_ms\", scale = 500 },\n",
@@ -121,9 +131,11 @@ const CASES: [(&str, &str, &str); 6] = [
     ),
     (
         "m = { module = \"std.fm_op\", ratio = 7, feedback = 1 }\n\
+         xpm = { module = \"std.add\" }\n\
          x = { module = \"std.fm_op\", freq = 20000, ratio = 64, feedback = 1 }",
-        "{ from = \"m.out\", to = \"x.pm\", scale = 1000 },\n\
-         { from = \"top.out\", to = \"x.pm\" },\n\
+        "{ from = \"m.out\", to = \"xpm.a\", scale = 1000 },\n\
+         { from = \"top.out\", to = \"xpm.b\", scale = 0.999 },\n\
+         { from = \"xpm.out\", to = \"x.pm\" },\n\
          { from = \"lfo.out\", to = \"x.freq\", scale = 20000 },\n\
          { from = \"lfo.out\", to = \"x.feedback\" },\n",
         "out",
@@ -280,7 +292,8 @@ fn bit_identical_across_k_and_threads() {
          verb = { module = \"std.fdn_reverb\", size = 0.7, decay_s = 3, mix = 0.5 }\n\
          m = { module = \"std.fm_op\", ratio = 2, feedback = 0.3, level = 0.2 }\n\
          c = { module = \"std.fm_op\", freq = 220 }\n\
-         wt = { module = \"std.wavetable\", freq = 330, position = 2 }",
+         wt = { module = \"std.wavetable\", freq = 330, position = 2 }\n\
+         vin = { module = \"std.add\" }",
         "{ from = \"saw.out\", to = \"bq.in\" },\n\
          { from = \"audio.out\", to = \"bq.cutoff_hz\", scale = 1500 },\n\
          { from = \"bq.out\", to = \"comb.in\" },\n\
@@ -290,8 +303,9 @@ fn bit_identical_across_k_and_threads() {
          { from = \"slow.out\", to = \"wt.position\", scale = 3 },\n\
          { from = \"audio.out\", to = \"wt.freq\", scale = 100 },\n\
          { from = \"ap.out\", to = \"verb.in_l\", scale = 0.2 },\n\
-         { from = \"c.out\", to = \"verb.in_r\", scale = 0.3 },\n\
-         { from = \"wt.out\", to = \"verb.in_r\", scale = 0.3 },\n\
+         { from = \"c.out\", to = \"vin.a\", scale = 0.3 },\n\
+         { from = \"wt.out\", to = \"vin.b\", scale = 0.3 },\n\
+         { from = \"vin.out\", to = \"verb.in_r\" },\n\
          { from = \"verb.out_l\", to = \"out.l\" },\n\
          { from = \"verb.out_r\", to = \"out.r\" },\n",
     );

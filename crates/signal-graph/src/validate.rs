@@ -3,10 +3,10 @@
 //! neither of which is `Generic`, is only a warning; a rate mismatch
 //! left here is one no converter joins), except that a parameter accepts
 //! both a signal and events, and
-//! parameter values must lie in their declared range. Fan-in and fan-out are
-//! unrestricted: signals into one input are summed and events merged (ADR 0016
-//! §3, §4), except into an input the registry restricts ([`restricted`], ADR
-//! 0024).
+//! parameter values must lie in their declared range. Fan-out is
+//! unrestricted; an input or parameter takes one connection (ADR 0054: a sum
+//! or a merge is a module), and an input the registry restricts takes it
+//! from one source at scale 1 ([`restricted`], ADR 0024).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -205,7 +205,7 @@ pub(crate) fn validate(
         }
     }
 
-    // ADR 0054 phase 1: an input or parameter with several connections (connections are in canonical order).
+    // ADR 0054: an input or parameter takes one connection (connections are in canonical order).
     let mut into: BTreeMap<&PortAddress, Vec<PortAddress>> = BTreeMap::new();
     for connection in &graph.connections {
         let written = converted
@@ -217,7 +217,7 @@ pub(crate) fn validate(
     }
     for (to, from) in into {
         if from.len() > 1 {
-            warnings.push(GraphWarning::FanIn {
+            errors.push(GraphError::FanIn {
                 to: to.clone(),
                 from,
             });

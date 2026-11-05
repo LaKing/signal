@@ -97,10 +97,12 @@ fn example_loads_into_the_description_model() {
                 instance("high", "std.sine_osc", &[("freq", 441.0)]),
                 instance("low", "std.sine_osc", &[]),
                 instance("shaper", "std.tanh_shaper", &[]),
+                instance("sum", "std.add", &[]),
             ],
             connections: vec![
-                connection("low.out", "shaper.in", None),
-                connection("high.out", "shaper.in", Some(0.5)),
+                connection("low.out", "sum.a", None),
+                connection("high.out", "sum.b", Some(0.5)),
+                connection("sum.out", "shaper.in", None),
             ],
             exports: Exports {
                 inputs: vec![InputExport {
@@ -133,13 +135,7 @@ fn example_loads_into_the_description_model() {
 #[test]
 fn example_plans_without_warnings() {
     let planned = example().plan(&registry()).unwrap();
-    // But the voice's two oscillators summed into its shaper: a fan-in, kept as a fixture of the sum (ADR 0054 phase 1).
-    let (fan_ins, others): (Vec<_>, Vec<_>) = planned
-        .warnings
-        .iter()
-        .partition(|w| w.to_string().contains("connections into one input"));
-    assert!(others.is_empty(), "{others:?}");
-    assert_eq!(fan_ins.len(), 1, "{fan_ins:?}");
+    assert!(planned.warnings.is_empty(), "{:?}", planned.warnings);
     let addresses: Vec<_> = planned
         .plan
         .instances
@@ -148,7 +144,13 @@ fn example_plans_without_warnings() {
         .collect();
     assert_eq!(
         addresses,
-        ["/out", "/voice/high", "/voice/low", "/voice/shaper"]
+        [
+            "/out",
+            "/voice/high",
+            "/voice/low",
+            "/voice/shaper",
+            "/voice/sum"
+        ]
     );
     // The composite instance's `freq = 220` wins over the inner `freq = 441`.
     let high = &planned.plan.instances[1];

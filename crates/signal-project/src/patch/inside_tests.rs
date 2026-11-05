@@ -293,13 +293,15 @@ sample_rate = 48000
 [instances]
 pad = { slot = { outputs = { l = "audio", r = "audio" }, parameters = { pitch = {} } }, load = "voice", map = { l = "out", r = "out", pitch = "freq" }, pitch = 330 }
 other = { module = "voice" }
+mix = { module = "std.add" }
 out = { module = "std.audio_out" }
 
 [wiring]
 connections = [
-  { from = "pad.l", to = "out.l" },
+  { from = "pad.l", to = "mix.a" },
   { from = "pad.r", to = "out.r" },
-  { from = "other.out", to = "out.l", scale = 0.5 },
+  { from = "other.out", to = "mix.b", scale = 0.5 },
+  { from = "mix.out", to = "out.l" },
 ]
 "#;
 
@@ -391,7 +393,7 @@ fn the_interface_and_the_own_inside_move_together() {
         "{}",
         renamed["project.toml"]
     );
-    assert!(renamed["project.toml"].contains("{ from = \"pad.left\", to = \"out.l\" }"));
+    assert!(renamed["project.toml"].contains("{ from = \"pad.left\", to = \"mix.a\" }"));
     assert!(renamed["project.toml"].contains("hz = 330"));
     assert_eq!(patched.files.len(), 1);
     assert_eq!(plan_dump(&renamed), before);
@@ -673,7 +675,7 @@ fn export_ops_round_trip_on_every_form() {
         )
         .replace("other = { module = \"voice\" }\n", "")
         .replace(
-            "  { from = \"other.out\", to = \"out.l\", scale = 0.5 },\n",
+            "  { from = \"other.out\", to = \"mix.b\", scale = 0.5 },\n",
             "",
         ),
         &[("composites/voice.toml", &bare)],

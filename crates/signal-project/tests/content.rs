@@ -179,17 +179,21 @@ q = { module = "std.noise" }
 z = { module = "std.noise" }
 rnd = { module = "std.random" }
 p = { module = "std.particles" }
+left = { module = "std.mix" }
+right = { module = "std.add" }
 out = { module = "std.audio_out", gain = 0.5 }
 
 [wiring]
 connections = [
-  { from = "a.out", to = "out.l", scale = 0.3 },
-  { from = "q.out", to = "out.l", scale = 0.2 },
-  { from = "z.out", to = "out.l", scale = 0.1 },
-  { from = "p.lost", to = "out.l" },
+  { from = "a.out", to = "left.a", scale = 0.3 },
+  { from = "q.out", to = "left.b", scale = 0.2 },
+  { from = "z.out", to = "left.c", scale = 0.1 },
+  { from = "p.lost", to = "left.d" },
+  { from = "left.out", to = "out.l" },
   { from = "clock.tick", to = "rnd.trigger" },
-  { from = "rnd.out", to = "out.r" },
-  { from = "a.out", to = "out.r", scale = 0.1 },
+  { from = "rnd.out", to = "right.a" },
+  { from = "a.out", to = "right.b", scale = 0.1 },
+  { from = "right.out", to = "out.r" },
 ]
 "#;
 
@@ -229,10 +233,9 @@ connections = [
     dir
 }
 
-/// ADR 0035 test 3, with test 4's canonical order: included under `/m`,
-/// `noisy` draws the streams it draws alone and sums its sources in the
-/// same order (`/m/a` < `/m/p/lost_d1` < `/m/q` < `/m/z` exactly as alone),
-/// so its tap's outputs are its own audio bit for bit, on any partition and
+/// ADR 0035 test 3, with test 4's order: included under `/m`, `noisy`
+/// draws the streams it draws alone and sums its sources in the same order
+/// (its mixers' ports, ADR 0054), so its tap's outputs are its own audio bit for bit, on any partition and
 /// thread count. The host's seed (99, or another run seed) reaches none of
 /// it.
 #[test]

@@ -9,7 +9,10 @@
 //!   `vec.<kind>.n<N>.d<d>`: `spread` (a signal to a vector, element *e*
 //!   weighted (e + 1) / N), `gain` (a vector times its `gain`), `mix` (a
 //!   vector summed in element order) and `delay` (a state-output unit delay
-//!   per element). Each has a `gain` parameter except `delay`.
+//!   per element). Each has a `gain` parameter except `delay`. And `add`
+//!   (vectors `a` and `b` added element by element, no parameter), where two
+//!   vector sources meet (ADR 0054: one connection per input); the
+//!   generator draws it for no other reason.
 //! - `fail.d64`: a direct type at divisor 64 whose `process` panics when its
 //!   `arm` parameter reaches 1 at a tick of the call.
 
@@ -152,6 +155,27 @@ impl DirectPrimitive for Mix {
     }
 }
 
+/// Two vectors added element by element: `a`'s rows, then `b`'s; a
+/// missing input reads 0.
+struct Add;
+
+impl DirectPrimitive for Add {
+    fn describe() -> ModuleDescriptor {
+        descriptor("vec.add", Vec::new(), Vec::new(), Feedthrough::Direct)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let n = outputs.signals().count();
+        for (e, row) in outputs.signals().enumerate() {
+            let (a, b) = (inputs.signal(e), inputs.signal(n + e));
+            for (t, out) in row.iter_mut().enumerate() {
+                *out = a.get(t).copied().unwrap_or(0.0) + b.get(t).copied().unwrap_or(0.0);
+            }
+        }
+    }
+}
+
 /// A unit delay per element (state-output): each element's last input.
 struct Delay {
     state: Vec<f64>,
@@ -203,7 +227,7 @@ impl DirectPrimitive for Fail {
     }
 }
 
-/// The vector type `kind` (`spread`, `gain`, `mix`, `delay`) of `n`
+/// The vector type `kind` (`spread`, `gain`, `mix`, `delay`, `add`) of `n`
 /// elements at divisor `rate`.
 pub fn vector_type(kind: &str, n: u32, rate: u32) -> String {
     format!("vec.{kind}.n{n}.d{rate}")
@@ -271,7 +295,7 @@ pub fn register(registry: &mut Registry) {
     for &rate in &DIVISORS {
         for &n in &SIZES {
             let v = PortShape::Vector(n);
-            let types: [VectorKind; 4] = [
+            let types: [VectorKind; 5] = [
                 (
                     "spread",
                     vec![
@@ -311,6 +335,16 @@ pub fn register(registry: &mut Registry) {
                             state: vec![0.0; MOST],
                         }))
                     }),
+                ),
+                (
+                    "add",
+                    vec![
+                        port("a", Direction::In, v, rate),
+                        port("b", Direction::In, v, rate),
+                        port("out", Direction::Out, v, rate),
+                    ],
+                    false,
+                    direct(|| Primitive::Direct(Box::new(Add))),
                 ),
             ];
             for (kind, ports, has_gain, create) in types {

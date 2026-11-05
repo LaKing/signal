@@ -133,7 +133,10 @@ fn the_panel_lists_instances_parameters_and_effective_values() {
     let mut state = state(&dir, &setup);
     let view = state.view();
     let names: Vec<&str> = view.panel.iter().map(|i| i.name.as_str()).collect();
-    assert_eq!(names, ["accent", "drums", "lfo", "out", "transport"]);
+    assert_eq!(
+        names,
+        ["accent", "drums", "lfo", "out", "transport", "trigger"]
+    );
 
     let gain = parameter(&view, "out", "gain");
     assert_eq!((gain.base, gain.in_file, gain.editable), (0.75, true, true));

@@ -320,16 +320,20 @@ fn faults_act_exactly_from_their_frame() {
             inst("faulty", "test.faulty"),
             inst("loud", "test.loud"),
             inst_with("gain", "test.gain", &[("gain", 0.5)]),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
             conn("flood.out", "counter.in"),
             conn("reverse.out", "counter2.in"),
-            scaled("counter.out", "rec.zeta", 0.001),
-            scaled("counter2.out", "rec.alpha", 0.001),
-            conn("faulty.out", "rec.zeta"),
+            scaled("counter.out", "zeta.a", 0.001),
+            scaled("counter2.out", "alpha.a", 0.001),
+            conn("faulty.out", "zeta.b"),
             conn("loud.out", "gain.in"),
-            conn("gain.out", "rec.alpha"),
+            conn("gain.out", "alpha.b"),
+            conn("zeta.out", "rec.zeta"),
+            conn("alpha.out", "rec.alpha"),
         ],
     )];
     let upfront = vec![
@@ -376,9 +380,10 @@ fn faults_act_exactly_from_their_frame() {
     assert!(trace.log.contains("\"reason\":\"muted\""));
 }
 
-/// Events in canonical order at their frames inside blocks (up front, from
-/// modules, duplicated connections, late, pushed ahead), parameter sets,
-/// ramps and modulation per frame, and the sink's gain per frame.
+/// Events in order at their frames inside blocks (up front, from modules,
+/// through a merge's ports and a source on two of them, late, pushed ahead),
+/// parameter sets, ramps and modulation per frame, and the sink's gain per
+/// frame.
 #[test]
 fn events_and_parameters_land_at_their_frames() {
     let plans = vec![plan(
@@ -386,24 +391,32 @@ fn events_and_parameters_land_at_their_frames() {
             inst_with("trig", "test.trigger", &[("period", 3.0)]),
             inst_with("setter", "test.setter", &[("value", 2.0)]),
             inst("pair", "test.pair"),
+            inst("sets", "test.merge"),
             inst("seq", "test.sequence"),
+            inst("trigs", "test.merge"),
             inst("counter", "test.counter"),
             inst_with("osc", "test.osc", &[("freq", 440.0)]),
             inst_with("probe", "test.probe_add", &[("value", 0.2)]),
             inst("mul", "test.probe_mul"),
+            inst("l", "test.add"),
+            inst("r", "test.add"),
             inst_with("rec", "test.gained_recorder", &[("gain", 0.5)]),
         ],
         vec![
-            conn("pair.out", "seq.in"),
-            conn("setter.out", "seq.in"),
-            conn("trig.out", "counter.in"),
-            conn("trig.out", "counter.in"),
+            conn("pair.out", "sets.a"),
+            conn("setter.out", "sets.b"),
+            conn("sets.out", "seq.in"),
+            conn("trig.out", "trigs.a"),
+            conn("trig.out", "trigs.b"),
+            conn("trigs.out", "counter.in"),
             scaled("osc.out", "probe.value", 0.5),
             conn("setter.out", "mul.value"),
-            scaled("seq.out", "rec.l", 0.0001),
-            scaled("counter.out", "rec.r", 0.01),
-            conn("probe.out", "rec.r"),
-            conn("mul.out", "rec.l"),
+            conn("mul.out", "l.a"),
+            scaled("seq.out", "l.b", 0.0001),
+            scaled("counter.out", "r.a", 0.01),
+            conn("probe.out", "r.b"),
+            conn("l.out", "rec.l"),
+            conn("r.out", "rec.r"),
         ],
     )];
     let upfront = vec![
@@ -458,15 +471,19 @@ fn suspension_fades_and_holds_inside_blocks() {
             inst_with("trig", "test.trigger", &[("period", 2.0)]),
             inst("counter", "test.counter"),
             inst("probe", "test.probe_add"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("dc.out", "rec.zeta"),
-            conn("cst.out", "rec.alpha"),
+            conn("dc.out", "zeta.a"),
+            conn("cst.out", "alpha.b"),
             scaled("frames.out", "probe.value", 0.001),
             conn("trig.out", "counter.in"),
-            scaled("counter.out", "rec.alpha", 0.01),
-            scaled("probe.out", "rec.zeta", 0.1),
+            scaled("counter.out", "alpha.a", 0.01),
+            scaled("probe.out", "zeta.b", 0.1),
+            conn("zeta.out", "rec.zeta"),
+            conn("alpha.out", "rec.alpha"),
         ],
     )];
     let scenario = Scenario {
@@ -512,13 +529,15 @@ fn swaps_and_a_removal_split_blocks() {
             inst("probe", "test.probe_add"),
             inst("dc", "test.dc"),
             inst("cst", "test.const"),
+            inst("zeta", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
             conn("osc.out", "probe.value"),
-            conn("dc.out", "rec.zeta"),
+            conn("cst.out", "zeta.a"),
+            conn("dc.out", "zeta.b"),
+            conn("zeta.out", "rec.zeta"),
             conn("probe.out", "rec.alpha"),
-            conn("cst.out", "rec.zeta"),
         ],
     );
     let mut v1 = plan(
@@ -527,12 +546,16 @@ fn swaps_and_a_removal_split_blocks() {
             inst("dc", "test.dc"),
             inst("cst", "test.const"),
             inst("noise", "test.noise"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("dc.out", "rec.zeta"),
-            conn("probe.out", "rec.alpha"),
-            scaled("noise.out", "rec.alpha", 0.25),
+            conn("dc.out", "zeta.b"),
+            conn("zeta.out", "rec.zeta"),
+            scaled("noise.out", "alpha.a", 0.25),
+            conn("probe.out", "alpha.b"),
+            conn("alpha.out", "rec.alpha"),
         ],
     );
     v1.version = 1;
@@ -541,12 +564,16 @@ fn swaps_and_a_removal_split_blocks() {
             inst("probe", "test.probe_add"),
             inst("cst", "test.const"),
             inst("noise", "test.noise"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("probe.out", "rec.alpha"),
-            scaled("noise.out", "rec.alpha", 0.25),
-            conn("cst.out", "rec.zeta"),
+            scaled("noise.out", "alpha.a", 0.25),
+            conn("probe.out", "alpha.b"),
+            conn("alpha.out", "rec.alpha"),
+            conn("cst.out", "zeta.a"),
+            conn("zeta.out", "rec.zeta"),
         ],
     );
     v2.version = 2;
@@ -577,6 +604,7 @@ fn a_cycle_runs_frame_by_frame_inside_blocks() {
     let plans = vec![plan(
         vec![
             inst("imp", "test.impulse"),
+            inst("sum", "test.add"),
             inst_with("gain", "test.gain", &[("gain", 0.9)]),
             inst("delay", "test.unit_delay"),
             inst_with("trig", "test.trigger", &[("period", 5.0)]),
@@ -584,8 +612,9 @@ fn a_cycle_runs_frame_by_frame_inside_blocks() {
             inst("rec", "test.recorder"),
         ],
         vec![
-            conn("imp.out", "gain.in"),
-            conn("delay.out", "gain.in"),
+            conn("delay.out", "sum.a"),
+            conn("imp.out", "sum.b"),
+            conn("sum.out", "gain.in"),
             conn("gain.out", "delay.in"),
             conn("gain.out", "rec.zeta"),
             conn("trig.out", "events.in"),
@@ -609,8 +638,8 @@ fn a_cycle_runs_frame_by_frame_inside_blocks() {
 
 /// M2.8-6 (AC1, AC6, `docs/semantics.md` §16): divided rates and vector
 /// ports in blocks. Instances at divisors 1, 2, 3, 64 and 1600, vectors of
-/// 1, 4 and 256 elements (a gain and a delay in a feedback loop at 64),
-/// inserted holds and decimates (shared, into parameters), a fault at a
+/// 1, 4 and 256 elements (a gain and a delay in a feedback loop at 64, with
+/// a vector `test.vadd`), sums through `test.add`s, inserted holds and decimates (shared, into parameters), a fault at a
 /// tick (`d3.test.faulty`, NaN from its 9th tick: frame 24), ramps and sets
 /// at frames that are no tick, a divided instance suspended and resumed
 /// mid-block, and a swap that replaces a cross-rate connection (one
@@ -628,6 +657,7 @@ fn divided_rates_and_vectors_run_in_blocks() {
             inst("vs1", "test.vspread.n1.d2"),
             inst("vs4", "test.vspread.n4.d64"),
             inst("vs256", "test.vspread.n256.d1600"),
+            inst("va4", "test.vadd.n4.d64"),
             inst_with("vg4", "test.vgain.n4.d64", &[("gain", 0.5)]),
             inst("vd4", "test.vdelay.n4.d64"),
             inst("vm1", "test.vmix.n1.d2"),
@@ -636,6 +666,9 @@ fn divided_rates_and_vectors_run_in_blocks() {
             inst("ud3", "d3.test.unit_delay"),
             inst("f3", "d3.test.faulty"),
             inst("g64", "d64.test.gain"),
+            inst("zeta", "test.add"),
+            inst("zeta2", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ]
     };
@@ -644,8 +677,9 @@ fn divided_rates_and_vectors_run_in_blocks() {
             conn("osc.out", "vs1.in"),
             conn("o2.out", "vs4.in"),
             conn("o64.out", "vs256.in"),
-            conn("vs4.out", "vg4.in"),
-            scaled("vd4.out", "vg4.in", 0.25),
+            scaled("vd4.out", "va4.a", 0.25),
+            conn("vs4.out", "va4.b"),
+            conn("va4.out", "vg4.in"),
             scaled("o1600.out", "vg4.gain", 0.5),
             conn("vg4.out", "vd4.in"),
             conn("vs1.out", "vm1.in"),
@@ -655,20 +689,23 @@ fn divided_rates_and_vectors_run_in_blocks() {
             conn("o64.out", "g64.in"),
             conn("osc.out", "g64.gain"),
             scaled("o64.out", "osc.freq", 10.0),
-            conn("osc.out", "rec.zeta"),
-            conn("vm1.out", "rec.zeta"),
-            scaled("vm4.out", "rec.zeta", 0.5),
-            conn("ud3.out", "rec.zeta"),
-            conn("f3.out", "rec.zeta"),
-            conn("vm256.out", "rec.alpha"),
-            conn("g64.out", "rec.alpha"),
-            scaled("o64.out", "rec.alpha", 0.25),
+            conn("f3.out", "zeta.a"),
+            conn("osc.out", "zeta.b"),
+            conn("ud3.out", "zeta.c"),
+            conn("vm1.out", "zeta.d"),
+            conn("zeta.out", "zeta2.a"),
+            scaled("vm4.out", "zeta2.b", 0.5),
+            conn("zeta2.out", "rec.zeta"),
+            conn("g64.out", "alpha.a"),
+            scaled("o64.out", "alpha.c", 0.25),
+            conn("vm256.out", "alpha.d"),
+            conn("alpha.out", "rec.alpha"),
         ]
     };
     let mut first = common();
-    first.push(conn("o2.out", "rec.alpha"));
+    first.push(conn("o2.out", "alpha.b"));
     let mut second = common();
-    second.push(conn("o3.out", "rec.alpha"));
+    second.push(conn("o3.out", "alpha.b"));
     let plans = vec![plan(instances(), first), plan(instances(), second)];
     let converters = |p: &ExecutionPlan| {
         p.instances

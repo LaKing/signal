@@ -266,7 +266,7 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true,
   // The channel planner's routes first (ui/lib/board-channels.js), each kept when it is clear of every box and every wire taken.
   const done = new Set();
   if (planned) {
-    // The wires into one input pin (a sum) may share their way into it.
+    // The wires into one input pin may share their way into it (a fan-in, which ADR 0054 refuses since phase 2).
     const into = new Map();
     for (const w of wires) {
       const key = `${w.b.x},${w.b.y}`;

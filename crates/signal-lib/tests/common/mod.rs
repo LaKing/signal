@@ -152,10 +152,12 @@ pub fn stimulus(name: &str) -> (&'static str, &'static str) {
         // to 0.5 and 0.125 at the defaults) on the left, the position (at
         // most 0.29 beats between rewinds) on the right.
         "transport" => (
-            "rewind_clock = { module = \"std.phasor\", freq = 7 }\n",
+            "rewind_clock = { module = \"std.phasor\", freq = 7 }\n\
+             left = { module = \"std.add\" }\n",
             "{ from = \"rewind_clock.wrap\", to = \"x.seek\" },\n\
-             { from = \"x.running\", to = \"out.l\", scale = 0.5 },\n\
-             { from = \"x.tempo\", to = \"out.l\", scale = 0.0010416666666666667 },\n\
+             { from = \"x.running\", to = \"left.a\", scale = 0.5 },\n\
+             { from = \"x.tempo\", to = \"left.b\", scale = 0.0010416666666666667 },\n\
+             { from = \"left.out\", to = \"out.l\" },\n\
              { from = \"x.position\", to = \"out.r\" },\n",
         ),
         other => panic!("no stimulus for lib.{other}: add one to tests/common/mod.rs"),

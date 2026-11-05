@@ -8,7 +8,7 @@
 //! ([`SIGNAL_BOUND`](crate::SIGNAL_BOUND), the engine's magnitude bound,
 //! `docs/semantics.md` §7), so a type never faults on its own: that bounds
 //! `std.exp`, `std.pow` and `std.tan`, which grow beyond it, and `std.sqrt` on
-//! an input beyond 10¹² (only a fan-in sum or a connection scale gives one).
+//! an input beyond 10¹² (only a connection scale gives one).
 //!
 //! **Subnormals.** No type here flushes a subnormal result: a result below the
 //! normal range is `libm`'s (a subnormal or 0), for `std.exp` and `std.pow`

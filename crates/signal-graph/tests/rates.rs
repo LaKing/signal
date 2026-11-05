@@ -38,11 +38,12 @@ fn a_hold_is_inserted_into_an_input_and_a_parameter() {
             inst("lfo", "test.slow64"),
             inst("osc", "test.osc"),
             inst("spk", "test.out"),
+            inst("spk2", "test.out"),
         ],
         vec![
             scaled("slow.out", "spk.in", 0.5),
             scaled("lfo.out", "osc.freq", 100.0),
-            conn("osc.out", "spk.in"),
+            conn("osc.out", "spk2.in"),
         ],
     );
     let plan = build(&project, &[]).unwrap();
@@ -60,6 +61,7 @@ fn a_hold_is_inserted_into_an_input_and_a_parameter() {
             ("/slow", "test.slow"),
             ("/slow/out_d1", "core.hold.d2.d1.signal.audio"),
             ("/spk", "test.out"),
+            ("/spk2", "test.out"),
         ]
     );
     let source = |from: &str, scale| Source {
@@ -73,7 +75,7 @@ fn a_hold_is_inserted_into_an_input_and_a_parameter() {
     );
     assert_eq!(
         plan.sources[&port_addr("/spk.in")],
-        [source("/osc.out", 1.0), source("/slow/out_d1.out", 0.5)]
+        [source("/slow/out_d1.out", 0.5)]
     );
     assert_eq!(
         plan.sources[&port_addr("/osc.freq")],

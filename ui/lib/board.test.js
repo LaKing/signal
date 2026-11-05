@@ -53,7 +53,8 @@ const LIMITS = {
   // kick 5 → 6 crossings, length 3 372 → 4 157 (its drums' clock); studio 57 → 61, 51 689 → 53 403 (its synth's connector and
   // the room for its ribbon); studio-transport 64 → 163, 59 230 → 93 424 (its ten labelled nets, the transport's clock among
   // them, across its approximated plate); physical-av 29 → 41, 11 573 → 13 247; library-demo as it was.
-  kick: { crossings: 8, length: 4600, labels: 0 },
+  // 2026-11-05: the kick's beats and ghost notes meet in a std.merge (ADR 0054 phase 2), a card more: 6 → 10 crossings.
+  kick: { crossings: 12, length: 4600, labels: 0 },
   studio: { crossings: 68, length: 58700, labels: 0 },
   'studio-transport': { crossings: 180, length: 103000, labels: 0 },
   'physical-av': { crossings: 46, length: 14600, labels: 0 },

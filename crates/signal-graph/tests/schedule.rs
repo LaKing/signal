@@ -109,48 +109,39 @@ fn disconnected_instance_is_scheduled_and_warned() {
 }
 
 #[test]
-fn fan_in_and_fan_out_are_allowed() {
+fn fan_out_is_allowed() {
     let project = composite(
         "project",
         vec![
             inst("a", "test.osc"),
-            inst("b", "test.osc"),
             inst("t1", "test.trig"),
-            inst("t2", "test.trig"),
             inst("env", "test.env"),
             inst("vca", "test.vca"),
             inst("spk", "test.out"),
+            inst("spk2", "test.out"),
         ],
         vec![
-            // Two signals into one signal input (summed).
             conn("a.out", "vca.in"),
-            conn("b.out", "vca.in"),
-            // Two event sources into one event input (merged).
-            conn("t2.out", "env.trig"),
             conn("t1.out", "env.trig"),
             // One output into two inputs.
             conn("env.out", "vca.cv"),
             conn("vca.out", "spk.in"),
-            conn("a.out", "spk.in"),
+            conn("vca.out", "spk2.in"),
         ],
     );
     let plan = build(&project, &[]).unwrap();
-    assert_eq!(
-        plan.sources[&port_addr("/vca.in")],
-        [source("/a.out", 1.0), source("/b.out", 1.0)]
-    );
+    assert_eq!(plan.sources[&port_addr("/vca.in")], [source("/a.out", 1.0)]);
     assert_eq!(
         plan.sources[&port_addr("/env.trig")],
-        [event_source("/t1.out"), event_source("/t2.out")]
+        [event_source("/t1.out")]
     );
-    assert_eq!(
-        plan.sources[&port_addr("/spk.in")],
-        [source("/a.out", 1.0), source("/vca.out", 1.0)]
-    );
+    for spk in ["/spk.in", "/spk2.in"] {
+        assert_eq!(plan.sources[&port_addr(spk)], [source("/vca.out", 1.0)]);
+    }
 }
 
 #[test]
-fn sources_are_in_canonical_order_with_scales() {
+fn sources_carry_their_scales() {
     let project = composite(
         "project",
         vec![
@@ -163,25 +154,29 @@ fn sources_are_in_canonical_order_with_scales() {
                 scale: Some(0.5),
                 ..conn("zed.out", "vca.in")
             },
-            conn("alpha.out", "vca.in"),
+            conn("alpha.out", "vca.cv"),
         ],
     );
     let plan = build(&project, &[]).unwrap();
     assert_eq!(
         plan.sources[&port_addr("/vca.in")],
-        [source("/alpha.out", 1.0), source("/zed.out", 0.5)]
+        [source("/zed.out", 0.5)]
+    );
+    assert_eq!(
+        plan.sources[&port_addr("/vca.cv")],
+        [source("/alpha.out", 1.0)]
     );
     // Every input port and parameter has an entry, connected or not.
-    assert!(plan.sources[&port_addr("/vca.cv")].is_empty());
+    assert!(plan.sources[&port_addr("/alpha.freq")].is_empty());
     assert!(plan.sources[&port_addr("/zed.freq")].is_empty());
     assert_eq!(plan.sources.len(), 4);
 }
 
-/// Operator note (M1-4): a parameter takes events (they change its base) and
-/// signals (they modulate it), both at once (ADR 0016 §4). The sources keep the
-/// two kinds apart in canonical order.
+/// Operator note (M1-4): a parameter takes events (they change its base) or
+/// a signal (it modulates it), ADR 0016 §4; one connection each since ADR
+/// 0054. The sources keep the two kinds apart.
 #[test]
-fn event_and_signal_sources_into_one_parameter() {
+fn event_and_signal_sources_into_parameters() {
     let project = composite(
         "project",
         vec![
@@ -189,12 +184,16 @@ fn event_and_signal_sources_into_one_parameter() {
             inst("lfo", "test.osc"),
             inst("clock", "test.trig"),
         ],
-        vec![conn("lfo.out", "osc.freq"), conn("clock.out", "osc.freq")],
+        vec![conn("lfo.out", "osc.freq"), conn("clock.out", "lfo.freq")],
     );
     let plan = build(&project, &[]).unwrap();
     assert_eq!(
         plan.sources[&port_addr("/osc.freq")],
-        [event_source("/clock.out"), source("/lfo.out", 1.0)]
+        [source("/lfo.out", 1.0)]
+    );
+    assert_eq!(
+        plan.sources[&port_addr("/lfo.freq")],
+        [event_source("/clock.out")]
     );
     // Both connections are dependency edges: the sources run first.
     assert_eq!(plan.schedule, [addr("/clock"), addr("/lfo"), addr("/osc")]);
@@ -281,11 +280,12 @@ fn a_generic_end_through_a_converter_is_not_a_kind_mismatch() {
             inst("slow", "test.slow"),
             inst("gen", "test.gen"),
             inst("spk", "test.out"),
+            inst("spk2", "test.out"),
         ],
         vec![
             conn("src.out", "spk.in"),
             conn("slow.out", "gen.in"),
-            conn("gen.out", "spk.in"),
+            conn("gen.out", "spk2.in"),
         ],
     );
     let plan = build(&project, &[]).unwrap();
@@ -303,11 +303,11 @@ fn a_generic_end_through_a_converter_is_not_a_kind_mismatch() {
     assert_eq!(converters, 2, "{:?}", plan.warnings);
 }
 
-/// ADR 0054 phase 1: two connections into one signal input, into one
-/// parameter and into one event input are each a fan-in warning, its sources
-/// in canonical order; a fan-out is none.
+/// ADR 0054: two connections into one signal input, into one parameter and
+/// into one event input are each a fan-in error, its sources in canonical
+/// order; a fan-out is none.
 #[test]
-fn a_fan_in_is_a_warning_and_a_fan_out_is_none() {
+fn a_fan_in_is_an_error_and_a_fan_out_is_none() {
     let project = composite(
         "project",
         vec![
@@ -329,25 +329,19 @@ fn a_fan_in_is_a_warning_and_a_fan_out_is_none() {
             conn("t2.out", "env.trig"),
         ],
     );
-    let plan = build(&project, &[]).unwrap();
-    let fan_ins: Vec<_> = plan
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, GraphWarning::FanIn { .. }))
-        .cloned()
-        .collect();
+    let errors = errors(&project, &[]);
     assert_eq!(
-        fan_ins,
+        errors,
         [
-            GraphWarning::FanIn {
+            GraphError::FanIn {
                 to: port_addr("/b.freq"),
                 from: vec![port_addr("/a.out"), port_addr("/env.out")],
             },
-            GraphWarning::FanIn {
+            GraphError::FanIn {
                 to: port_addr("/env.trig"),
                 from: vec![port_addr("/t1.out"), port_addr("/t2.out")],
             },
-            GraphWarning::FanIn {
+            GraphError::FanIn {
                 to: port_addr("/spk.in"),
                 from: vec![port_addr("/a.out"), port_addr("/b.out")],
             },

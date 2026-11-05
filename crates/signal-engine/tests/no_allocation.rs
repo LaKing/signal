@@ -11,49 +11,57 @@ use signal_core::{EventPayload, Frame};
 use signal_engine::LogRecord;
 
 /// Every executor path runs inside the guard: external and module events,
-/// triggers sent to a parameter, ramps (running, paused and pending),
-/// modulation, a feedback loop, randomness, every suspension transition
-/// (one-frame, fade-in interrupted, fade-out interrupted, long), discards, a NaN
-/// fault and an overflow fault. Frame 20 is the maximal frame for `/c.in`:
-/// X = 3 externals plus 16 events from each of two sources, cap = 35.
+/// triggers sent to a parameter (through a merge), ramps (running, paused
+/// and pending), modulation, a feedback loop, sums, randomness, every
+/// suspension transition (one-frame, fade-in interrupted, fade-out
+/// interrupted, long), discards, a NaN fault and an overflow fault. Frame 20
+/// is the maximal frame for `/c.in`: X = 3 externals plus 16 events from its
+/// one source (ADR 0054), cap = 19.
 #[test]
 fn executor_allocates_nothing_after_instantiation() {
     assert!(alloc_counter::is_installed());
     let plan = plan(
         vec![
             inst_with("f1", "test.flood", &[("count", 16.0)]),
-            inst_with("f2", "test.flood", &[("count", 16.0)]),
             inst("c", "test.counter"),
             inst_with("over", "test.flood", &[("count", 17.0)]),
             inst("c2", "test.counter"),
             inst_with("s", "test.setter", &[("value", 0.25)]),
             inst_with("k", "test.const", &[("value", 0.125)]),
+            inst("m", "test.merge"),
             inst("p", "test.probe_add"),
+            inst("q", "test.probe_add"),
             inst_with("t", "test.trigger", &[("period", 2.0)]),
             inst("e", "test.event_delay"),
             inst("impulse", "test.impulse"),
+            inst("sum", "test.add"),
             inst("loop", "test.gain"),
             inst("delay", "test.unit_delay"),
             inst("d", "test.dc"),
             inst("x", "test.faulty"),
             inst("n", "test.noise"),
+            inst("zeta", "test.add"),
+            inst("alpha", "test.add"),
             inst("rec", "test.recorder"),
         ],
         vec![
             conn("f1.out", "c.in"),
-            conn("f2.out", "c.in"),
             conn("over.out", "c2.in"),
-            conn("s.out", "p.value"),
-            conn("k.out", "p.value"),
-            conn("t.out", "p.value"),
+            conn("s.out", "m.a"),
+            conn("t.out", "m.b"),
+            conn("m.out", "p.value"),
+            conn("k.out", "q.value"),
             conn("t.out", "e.in"),
-            conn("impulse.out", "loop.in"),
-            scaled("delay.out", "loop.in", 0.5),
+            scaled("delay.out", "sum.a", 0.5),
+            conn("impulse.out", "sum.b"),
+            conn("sum.out", "loop.in"),
             conn("loop.out", "delay.in"),
-            conn("d.out", "rec.zeta"),
-            conn("x.out", "rec.zeta"),
-            conn("n.out", "rec.alpha"),
-            conn("loop.out", "rec.alpha"),
+            conn("d.out", "zeta.a"),
+            conn("x.out", "zeta.b"),
+            conn("zeta.out", "rec.zeta"),
+            conn("loop.out", "alpha.a"),
+            conn("n.out", "alpha.b"),
+            conn("alpha.out", "rec.alpha"),
         ],
     );
     let external = vec![
@@ -98,12 +106,12 @@ fn executor_allocates_nothing_after_instantiation() {
     drop(guard);
 
     assert!(counts.is_zero(), "the executor allocated: {counts:?}");
-    assert_eq!(maximal, 35);
+    assert_eq!(maximal, 19);
     assert_eq!(engine.log_overflows(), 0);
     assert_eq!(engine.input_overflows(), 0);
     assert_eq!(engine.is_muted(&addr("/x")), Some(true));
     assert_eq!(engine.is_muted(&addr("/over")), Some(true));
-    assert_eq!(engine.discards(&addr("/c")), Some(2 * 32 + 1));
+    assert_eq!(engine.discards(&addr("/c")), Some(2 * 16 + 1));
     assert_eq!(engine.signal_output(&port_addr("/d.out")), Some(0.75));
 }
 
@@ -122,13 +130,15 @@ fn swaps_and_pushed_input_allocate_nothing() {
             inst("pm", "test.probe_mul"),
             inst_with("t", "test.trigger", &[("period", 3.0)]),
             inst("c", "test.counter"),
+            inst("sum", "test.add"),
             inst("rec", "test.recorder"),
         ]
     };
     let wiring = || {
         vec![
             conn("o.out", "rec.zeta"),
-            conn("d.out", "rec.alpha"),
+            conn("d.out", "sum.a"),
+            conn("sum.out", "rec.alpha"),
             conn("d.out", "pm.value"),
             conn("t.out", "c.in"),
         ]
@@ -137,14 +147,15 @@ fn swaps_and_pushed_input_allocate_nothing() {
     let mut with_noise = base();
     with_noise.push(inst("n", "test.noise"));
     let mut noise_wiring = wiring();
-    noise_wiring.push(conn("n.out", "rec.alpha"));
+    noise_wiring.push(conn("n.out", "sum.b"));
     let b = plan(with_noise.clone(), noise_wiring);
     with_noise.retain(|i| i.name != "d");
     let c = plan(
         with_noise.clone(),
         vec![
             conn("o.out", "rec.zeta"),
-            conn("n.out", "rec.alpha"),
+            conn("n.out", "sum.b"),
+            conn("sum.out", "rec.alpha"),
             conn("t.out", "c.in"),
         ],
     );
@@ -152,7 +163,8 @@ fn swaps_and_pushed_input_allocate_nothing() {
         with_noise,
         vec![
             conn("n.out", "rec.zeta"),
-            conn("o.out", "rec.alpha"),
+            conn("o.out", "sum.a"),
+            conn("sum.out", "rec.alpha"),
             conn("o.out", "pm.value"),
             conn("t.out", "c.in"),
         ],

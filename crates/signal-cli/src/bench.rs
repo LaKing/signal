@@ -1515,6 +1515,12 @@ fn stimulus_graph() -> CompositeDef {
                 "std.transport",
                 &[("bpm", 132.0), ("ghost_probability", 0.15)],
             ),
+            // The beats and the ghost notes on one output (ADR 0054: events meet in a merge).
+            instance("beats", "std.merge", &[]),
+        ],
+        connections: vec![
+            connection("transport.beat", "beats.a", None),
+            connection("transport.ghost", "beats.b", None),
         ],
         ..CompositeDef::default()
     }
@@ -1522,7 +1528,7 @@ fn stimulus_graph() -> CompositeDef {
 
 /// The stimulus and [`INSTANCES`] instances of `type_name`, each input fed by
 /// it: signals by the saw (phase inputs scaled to 0.05 cycles), gates by the
-/// LFO, the first event input by the beats and ghost notes, any other by the
+/// LFO, the first event input by the beats and ghost notes (merged), any other by the
 /// accents, a `std.count` reading (the event bridge of the visual-rate
 /// types, M2.8-7) by one counter of the beats, and any other vector of N by
 /// one `std.pack<N>` of the saw, both shared by the instances; the second of
@@ -1603,7 +1609,7 @@ fn primitive_graph(
                 (PortShape::Events, _) => {
                     events += 1;
                     if events == 1 {
-                        &[("transport.beat", None), ("transport.ghost", None)]
+                        &[("beats.out", None)]
                     } else {
                         &[("transport.accent", None)]
                     }

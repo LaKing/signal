@@ -15,12 +15,14 @@ name = "voice"
 [instances]
 low = { module = "std.sine_osc" }
 high = { module = "std.sine_osc", freq = 441 }
+sum = { module = "std.add" }
 shaper = { module = "std.tanh_shaper" }
 
 [wiring]
 connections = [
-  { from = "low.out", to = "shaper.in" },
-  { from = "high.out", to = "shaper.in", scale = 0.5 },
+  { from = "low.out", to = "sum.a" },
+  { from = "high.out", to = "sum.b", scale = 0.5 },
+  { from = "sum.out", to = "shaper.in" },
 ]
 
 [exports]
@@ -238,7 +240,7 @@ fn adding_an_instance_is_structural() {
             )
             .replace(
                 "  { from = \"tone.out\"",
-                "  { from = \"tone2.out\", to = \"out.r\" },\n  { from = \"tone.out\"",
+                "  { from = \"tone2.out\", to = \"tone.pm\" },\n  { from = \"tone.out\"",
             ),
     );
     let (removed, added, sets) = structural(edit_of(&new));
@@ -281,7 +283,10 @@ fn retyping_removes_and_adds_the_same_address() {
 #[test]
 fn rewiring_is_structural_with_no_instance_changes() {
     for new in [
-        edited("to = \"out.r\", scale = 0.5", "to = \"out.l\", scale = 0.5"),
+        edited(
+            "to = \"out.r\", scale = 0.5",
+            "to = \"voice.pm\", scale = 0.5",
+        ),
         edited("scale = 0.5 }", "scale = 0.25 }"),
     ] {
         let (removed, added, sets) = structural(edit_of(&new));
@@ -300,7 +305,7 @@ fn a_structural_edit_sets_only_survivors_whose_value_changed() {
             )
             .replace(
                 "  { from = \"tone.out\"",
-                "  { from = \"tone2.out\", to = \"out.r\" },\n  { from = \"tone.out\"",
+                "  { from = \"tone2.out\", to = \"tone.pm\" },\n  { from = \"tone.out\"",
             ),
     );
     let (_, added, sets) = structural(edit_of(&new));

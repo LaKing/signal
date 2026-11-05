@@ -2,8 +2,8 @@
 //! `lib.modal_voice` with every parameter modulated at audio rate (a 1 kHz
 //! sine on each, the bank's vector inputs from a `std.pack64` of sines), at
 //! 44.1, 48, 96 and 192 kHz, run without a fault or a mute and with every
-//! sample finite (AC6, AC10); so do inputs scaled to 10³⁰⁸ or beyond (±∞)
-//! and a parameter made NaN by two opposite such connections; and a project
+//! sample finite (AC6, AC10); so do inputs scaled to 10³⁰⁸ or beyond (+∞);
+//! and a project
 //! of all three renders bit-identically for k = 1, 64 and 256 on 1, 2, 4
 //! and 8 threads (AC10). The projects are written by the tests.
 
@@ -134,7 +134,8 @@ fn instances(kind: u32) -> String {
         "{}e = {{ module = \"std.exciter\", kind = {kind}, duration_ms = 30 }}\n\
          x = {{ module = \"std.modal\", freq = 2200, material = 2.5, modes = 64, decay_s = 30, \
          position = 0.45, ratio_3 = 50 }}\n\
-         v = {{ module = \"lib.modal_voice\", exciter_kind = {kind}, decay = 30, modes = 64 }}\n",
+         v = {{ module = \"lib.modal_voice\", exciter_kind = {kind}, decay = 30, modes = 64 }}\n\
+         hz = {{ module = \"std.add\" }}\n",
         modulators()
     )
 }
@@ -148,8 +149,9 @@ fn connections() -> String {
               { from = \"rows.out\", to = \"x.mode_freq\", scale = 0.5 },\n\
               { from = \"rows.out\", to = \"x.mode_gain\", scale = 4 },\n\
               { from = \"rows.out\", to = \"x.mode_decay\", scale = 8 },\n\
-              { from = \"lfo.out\", to = \"v.hz\", scale = 200 },\n\
-              { from = \"half.out\", to = \"v.hz\", scale = 600 },\n\
+              { from = \"lfo.out\", to = \"hz.a\", scale = 200 },\n\
+              { from = \"half.out\", to = \"hz.b\", scale = 600 },\n\
+              { from = \"hz.out\", to = \"v.hz\" },\n\
               { from = \"clock.phase\", to = \"v.gate\", scale = 2 },\n\
               { from = \"half.out\", to = \"v.velocity\", scale = 2 },\n\
               { from = \"rows.out\", to = \"v.mode_gain\" },\n";
@@ -210,19 +212,17 @@ fn every_parameter_at_audio_rate_stays_within_the_bound() {
     }
 }
 
-/// Inputs scaled to 10³⁰⁸ (finite) and beyond (+∞ from a sum of two), and
-/// a parameter made NaN by two opposite such connections (∞ − ∞), into the
-/// bank's input, its `decay_s` and `gain` and a row, the exciter's
+/// Inputs scaled to 10³⁰⁸ (finite) and beyond (+∞: 10 scaled by 10³⁰⁸),
+/// each the target's one connection in place of the one it had (ADR 0054),
+/// into the bank's input, its `decay_s` and `gain` and a row, the exciter's
 /// `velocity` and `level`, and the voice's `hz`, `velocity`, `gate` and a
-/// row: nothing faults or is muted and every sample is finite.
+/// row: nothing faults or is muted and every sample is finite. (A NaN no
+/// longer reaches an input: one connection carries a source's finite output
+/// times a finite scale, which overflows to ±∞ at most.)
 #[test]
 fn huge_and_non_finite_inputs_never_fault() {
     let huge = "{ from = \"one.out\", to = \"TARGET\", scale = 1e308 },\n";
-    let infinite = format!("{huge}{huge}");
-    let nan = format!(
-        "{infinite}{{ from = \"one.out\", to = \"TARGET\", scale = -1e308 }},\n\
-         {{ from = \"one.out\", to = \"TARGET\", scale = -1e308 }},\n"
-    );
+    let infinite = "{ from = \"ten.out\", to = \"TARGET\", scale = 1e308 },\n";
     let targets = [
         "x.in",
         "x.decay_s",
@@ -235,10 +235,11 @@ fn huge_and_non_finite_inputs_never_fault() {
         "v.gate",
         "v.mode_decay",
     ];
-    for (what, lines) in [("1e308", huge.to_owned()), ("∞", infinite), ("NaN", nan)] {
+    for (what, lines) in [("1e308", huge), ("∞", infinite)] {
         for target in targets {
             let instances = format!(
                 "{}one = {{ module = \"std.const\", value = 1 }}\n\
+                 ten = {{ module = \"std.const\", value = 10 }}\n\
                  big = {{ module = \"std.pack64\" }}\n",
                 instances(3)
             );
@@ -250,7 +251,13 @@ fn huge_and_non_finite_inputs_never_fault() {
                 ),
                 false => lines.replace("TARGET", target),
             };
-            let text = project_text(48_000, &instances, &format!("{}{extra}", connections()));
+            // The target's own connection gives way to the extreme one.
+            let own: String = connections()
+                .lines()
+                .filter(|l| !l.contains(&format!("to = \"{target}\"")))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let text = project_text(48_000, &instances, &format!("{own}{extra}"));
             let (rendered, engine) = render(&project(&text), 24_000, 64, 1);
             assert_eq!(
                 faults(&rendered),

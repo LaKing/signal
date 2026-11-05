@@ -318,8 +318,8 @@ pub struct Vmul<const N: usize>;
 /// elements), `out` (signal out, generic); unconnected inputs read 0.
 /// **Parameters:** none. **Feedthrough:** direct.
 ///
-/// **Formula** (`x_e = in[e][n]`, the element as received, a fan-in sum
-/// included): `p = clamp(pos[n], 0, N − 1)`, `i = ⌊p⌋`, `t = p − i`,
+/// **Formula** (`x_e = in[e][n]`, the element as received, beyond the
+/// bound included): `p = clamp(pos[n], 0, N − 1)`, `i = ⌊p⌋`, `t = p − i`,
 /// `out[n] = clamp((1 − t)·x_i + t·x_{min(i+1, N−1)}, ±1e6)`, and exactly
 /// `clamp(x_i, ±1e6)` at an integer position (`t = 0`). Each weighted term
 /// is at most its element in magnitude, so finite elements never overflow on
@@ -338,8 +338,8 @@ pub struct Index<const N: usize>;
 /// `min`, `max`, `mean` (signal out, generic). **Parameters:** none.
 /// **Feedthrough:** direct.
 ///
-/// **Formula** (`x_e = in[e][n]`, the element as received, a fan-in sum
-/// included; folded in element order `e = 0 … N − 1`, so the result never
+/// **Formula** (`x_e = in[e][n]`, the element as received, beyond the
+/// bound included; folded in element order `e = 0 … N − 1`, so the result never
 /// depends on anything else): `s = ((x_0 + x_1) + …) + x_{N−1}`;
 /// `sum[n] = clamp(s, ±1e6)`, `mean[n] = clamp(s / N, ±1e6)`, `min[n]` and
 /// `max[n]` the smallest and largest `x_e`, clamped. Only the results are
@@ -530,7 +530,7 @@ mod tests {
     fn reduce_sums_in_element_order_and_clamps() {
         let out = run("std.reduce4", 1, &[1.0, -2.0, 4.0, 0.5], &[]);
         assert_eq!(out, [3.5, -2.0, 4.0, 0.875]);
-        // Elements beyond the bound (a fan-in sum) count as received; only
+        // Elements beyond the bound (a connection scale) count as received; only
         // the results are clamped (auditor-1-vector-premature-clamping).
         let out = run("std.reduce2", 1, &[2e6, -1e6], &[]);
         assert_eq!(out, [1e6, -1e6, 1e6, 5e5]);

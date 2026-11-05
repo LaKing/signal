@@ -1,7 +1,6 @@
 //! `std.latch`, `std.to_events` and `std.route`: the core set's value events
-//! (ADR 0027 §1, "Events"). Merging is event fan-in: several sources into
-//! one event input arrive merged in the canonical order of ADR 0016 §3, so
-//! there is no merge type. Direct, at rate divisor 1, category `core`. Every
+//! (ADR 0027 §1, "Events"). Events from several sources meet in a
+//! `std.merge` (ADR 0054: one connection per input). Direct, at rate divisor 1, category `core`. Every
 //! value they output or emit is clamped to `±1e6`, the engine's magnitude
 //! bound (`docs/semantics.md` §7 checks emitted `set` and `ramp` values too),
 //! so they never fault on their own.

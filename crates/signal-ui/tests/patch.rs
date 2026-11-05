@@ -131,7 +131,7 @@ fn every_op_round_trips_on_kick_pulse_physical_av_and_a_composite(transport: Tra
             {"op": "connection.scale", "from": "lfo.out", "to": "drums.kick_decay", "scale": 60},
             {"op": "connection.scale", "from": "accent.out", "to": "drums.kick_drive", "scale": 1},
             {"op": "instance.remove", "name": "accent"},
-            {"op": "connection.remove", "from": "transport.beat", "to": "drums.trigger"}]),
+            {"op": "connection.remove", "from": "transport.beat", "to": "trigger.a"}]),
     );
     round_trip(
         transport,
@@ -232,13 +232,23 @@ fn the_errors_write_nothing(transport: Transport) {
             ),
             "bad-value",
         ),
+        // A connection already made.
+        (
+            patch(
+                "",
+                &current,
+                json!([{"op": "connection.add", "from": "a.out", "to": "out.r"}]),
+            ),
+            "bad-value",
+        ),
+        // A second connection into an input (ADR 0054): `out.l` takes `sum.out`.
         (
             patch(
                 "",
                 &current,
                 json!([{"op": "connection.add", "from": "a.out", "to": "out.l"}]),
             ),
-            "bad-value",
+            "fan-in",
         ),
         (
             patch(

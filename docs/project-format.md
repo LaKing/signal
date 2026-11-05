@@ -161,7 +161,7 @@ connections = [ { from = "a.out", to = "b.in", scale = 1.0 } ]
 | `to` | An input port or a parameter, `instance.port` (for a composite instance, an exported input or parameter). |
 | `scale` | Optional, default 1, must be finite. It multiplies a signal source. Events are delivered unscaled (`semantics.md` §10.1). |
 
-Several connections into one input are summed (signals) or merged (events). One output may feed many inputs. Connections into a parameter modulate it (signals) or set its base (events) (ADR 0016 §3, §4).
+An input takes at most one connection (ADR 0054): several sources meet in a `std.add` or `std.mix` (signals) or a `std.merge` (events). One output may feed many inputs. Connections into a parameter modulate it (signals) or set its base (events) (ADR 0016 §3, §4).
 
 ## 6. Validation
 

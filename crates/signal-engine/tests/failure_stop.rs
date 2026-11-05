@@ -162,7 +162,8 @@ fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 
 /// `a` → `g` → the sink: `a` is the only task without predecessors, so a
 /// failure of its task leaves no other task runnable. With `wide`, eight
-/// more sources beside it, so that workers join the jobs.
+/// more sources beside it, so that workers join the jobs, summed by
+/// `test.add`s into `rec.alpha` (ADR 0054).
 fn chain(wide: bool) -> ExecutionPlan {
     let mut instances = vec![
         inst_with("a", "test.const", &[("value", 0.25)]),
@@ -170,10 +171,17 @@ fn chain(wide: bool) -> ExecutionPlan {
         inst("rec", "test.recorder"),
     ];
     let mut connections = vec![conn("a.out", "g.in"), conn("g.out", "rec.zeta")];
+    if wide {
+        for (sum, to) in [("m0", "m.a"), ("m1", "m.b"), ("m", "rec.alpha")] {
+            instances.push(inst(sum, "test.add"));
+            connections.push(conn(&format!("{sum}.out"), to));
+        }
+    }
     for n in 0..if wide { 8 } else { 0 } {
         let name = format!("o{n}");
         instances.push(inst_with(&name, "test.osc", &[("freq", 10.0 + n as f64)]));
-        connections.push(conn(&format!("{name}.out"), "rec.alpha"));
+        let port = ["a", "b", "c", "d"][n % 4];
+        connections.push(conn(&format!("{name}.out"), &format!("m{}.{port}", n / 4)));
     }
     plan(instances, connections)
 }

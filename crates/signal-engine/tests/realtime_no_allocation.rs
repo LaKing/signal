@@ -30,12 +30,17 @@ fn version(n: u64) -> ExecutionPlan {
     let mut instances = vec![
         inst_with("osc", "test.osc", &[("freq", 110.0)]),
         inst("dc", "test.dc"),
+        inst("sum", "test.add"),
         inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
     ];
-    let mut connections = vec![conn("osc.out", "out.l"), conn("dc.out", "out.r")];
+    let mut connections = vec![
+        conn("osc.out", "sum.a"),
+        conn("sum.out", "out.l"),
+        conn("dc.out", "out.r"),
+    ];
     if n % 2 == 1 {
         instances.push(inst_with("osc2", "test.osc", &[("freq", 230.0)]));
-        connections.push(scaled("osc2.out", "out.l", 0.5));
+        connections.push(scaled("osc2.out", "sum.b", 0.5));
     }
     let mut plan = plan(instances, connections);
     plan.version = n;
