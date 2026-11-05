@@ -110,7 +110,7 @@ function fits(lanes, reserved) {
 }
 
 /** One pass of `layLevel`: `reserve` the lanes kept above and below the cards (`{over, feedback, binds}`), or null for as many as might be needed. */
-function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), edgeKinds = new Map(), frame = area, joinEdges = false, binds = [], bindFrom = 'top', bindY = area.y, bindWired = false }, reserve) {
+function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = new Map(), edgeKinds = new Map(), frame = area, joinEdges = false, taps = [], binds = [], bindFrom = 'top', bindY = area.y, bindWired = false }, reserve) {
   const all = level?.instances ?? [];
   const wanted = names ? new Set(names) : null;
   const instances = all.filter((i) => !wanted || wanted.has(i.name));
@@ -164,7 +164,18 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   const spell = (a) => String(a ?? '').replace(/^\//, '');
   const connectedIns = new Set([...internal.map((c) => c.to), ...entering.keys(), ...legs.map((l) => l.address)].map(spell));
   const bound = new Set(legs.map((l) => spell(l.address)));
-  const connectedOuts = new Set([...internal.map((c) => c.from), ...leaving.keys()].map(spell));
+  // Automation sources inside a chip (`taps`, the package's right-edge pins): a pin of their own on the chip's right, named by
+  // the way into it (`env_amt.out`), wired out to the frame's right edge at the tap's height.
+  const tapsOf = new Map();
+  for (const t of taps) {
+    const text = spell(t.address);
+    const cut = text.indexOf('/');
+    if (cut < 0 || !inside.has(text.slice(0, cut))) continue;
+    const name = text.slice(0, cut);
+    if (!tapsOf.has(name)) tapsOf.set(name, []);
+    tapsOf.get(name).push({ name: text.slice(cut + 1), address: t.address, y: t.y, direction: 'out', shape: 'signal', tap: true });
+  }
+  const connectedOuts = new Set([...internal.map((c) => c.from), ...leaving.keys(), ...[...tapsOf.values()].flat().map((t) => t.address)].map(spell));
   // Wired legs into one card in the order that keeps them apart (the leftmost source the lowest row from above, the highest from below).
   const rank = new Map();
   // From the left (a chip's pins), the upper pin the upper row.
@@ -178,7 +189,7 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     const params = (i.parameters ?? []).filter((q) => !ports.some((p) => p.name === q.name)).map((q, j) => ({ q, j, r: rank.get(spell(q.address ?? `${i.name}.${q.name}`)) ?? Infinity }));
     params.sort((a, b) => a.r - b.r || a.j - b.j);
     const ins = [...ports, ...params.map(({ q }) => ({ ...q, direction: 'in', shape: 'signal' }))];
-    const outs = (i.ports ?? []).filter((p) => p.direction === 'out');
+    const outs = [...(i.ports ?? []).filter((p) => p.direction === 'out'), ...(tapsOf.get(i.name) ?? [])];
     const h = HEADER + ROW * Math.max(1, ins.length, outs.length) + PAD;
     // A chip as wide as its rows are tall and then some (`CHIP_ASPECT`): its inside, laid out wide by signal flow, has room in its body.
     const w = Math.max(nodeBy.get(i.name)?.w ?? 96, i.composite ? CHIP_ASPECT * h : 0);
@@ -193,6 +204,7 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     ...[...leaving.values()].map((c) => ({ c, a: columnOf.get(nodeOf(c.from)), b: n, edge: 'out' })),
     // From a chip's pin on its left edge (the owner's, 2026-11-04: as the Wiring wires): a wire entering, each pin one net.
     ...(fromLeft ? legs : []).map((l, i) => ({ c: { index: connections.length + i, from: `@${l.export ?? ''}`, to: l.address }, a: -1, b: columnOf.get(nodeOf(l.address)), edge: 'in', leg: l })),
+    ...[...tapsOf].flatMap(([name, ts]) => ts.map((t, i) => ({ c: { index: connections.length + legs.length + i, from: t.address, to: '@automation' }, a: columnOf.get(name), b: n, edge: 'out', tap: t }))),
   ].sort((p, q) => p.c.index - q.c.index || (p.edge ?? '').localeCompare(q.edge ?? ''));
   // Channel i lies right of column i (-1: the left edge's, n - 1: the right edge's). Its nets, an upper bound on its tracks.
   const nets = new Map();
@@ -288,8 +300,9 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
           name: p.name,
           address,
           side,
-          kind: parameter ? 'control' : portKind(p),
+          kind: parameter || p.tap ? 'control' : portKind(p),
           parameter,
+          tap: Boolean(p.tap),
           connected: side === 'in' ? connectedIns.has(spell(address)) : connectedOuts.has(spell(address)),
           bind: side === 'in' && bound.has(spell(address)),
           x: side === 'in' ? cx : cx + w,
@@ -320,7 +333,7 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   for (const w of wires) {
     // A wire entering keeps the kind it has outside (one net across the edge, one colour), unless that says nothing.
     const outside = w.edge === 'in' && !w.leg ? edgeKinds.get(w.c.to) : null;
-    w.kind = w.leg ? 'control' : outside && outside !== 'generic' ? outside : kindOf(w.c, portAt);
+    w.kind = w.leg || w.tap || String(w.c.to).startsWith('@automation') ? 'control' : outside && outside !== 'generic' ? outside : kindOf(w.c, portAt);
     if (w.leg) w.P = { x: frame.x, y: w.leg.y };
     else if (w.edge === 'in') {
       const y = edgeIns.has(w.c.to) ? edgeIns.get(w.c.to) : clampY(nextIn());
@@ -328,7 +341,7 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
       edges.push({ id: `edge in ${w.c.to}`, side: 'in', address: w.c.to, from: w.c.from, x: frame.x, y });
     } else w.P = pinOf.get(`out ${w.c.from}`) ?? pinOf.get(`out ${addressOf(w.c.from, byName)}`);
     if (w.edge === 'out') {
-      const y = edgeOuts.has(w.c.from) ? edgeOuts.get(w.c.from) : clampY(nextOut());
+      const y = w.tap ? w.tap.y : edgeOuts.has(w.c.from) ? edgeOuts.get(w.c.from) : clampY(nextOut());
       w.Q = { x: frame.x + frame.w, y };
       edges.push({ id: `edge out ${w.c.from}`, side: 'out', address: w.c.from, to: w.c.to, x: frame.x + frame.w, y });
     } else w.Q = pinOf.get(`in ${w.c.to}`) ?? pinOf.get(`in ${addressOf(w.c.to, byName)}`);
@@ -603,7 +616,7 @@ export function engineLayout({ entry, rect, pkg = null, names = [], graph, title
   const top = pkg?.connector !== 'bottom';
   const binds = (pkg?.params ?? []).map((p) => ({ address: p.address, x: p.x }));
   const bindTo = pkg ? { binds, bindFrom: top ? 'top' : 'bottom', bindY: top ? pkg.body.y : pkg.y + pkg.h, bindWired: true } : {};
-  const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, edgeKinds, frame, ...bindTo }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0, binds: 0 }, binds: [] };
+  const laid = names.length ? layLevel({ level, names, area, edgeIns, edgeOuts, edgeKinds, frame, taps: (pkg?.autos ?? []).map((a) => ({ address: a.address, y: a.y })), ...bindTo }) : { scale: 1, cards: [], pins: [], wires: [], edges: [], lanes: { over: 0, feedback: 0, binds: 0 }, binds: [] };
   const card = { id: `package ${entry}`, package: true, composite: true, name: title, module: null, ...frame, body: area, reveal: packageReveal(area, laid.scale) };
   return { entry, rect, pkg, frame, area, title, card, ...laid };
 }
@@ -667,6 +680,7 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
   // `binds`): a pin row of its own on each target's card, wired from the pin; one a signal connection drives (and no control) is
   // wired on as an input is.
   const sources = [];
+  const taps = [];
   for (const p of mine) {
     if (p.side === 'in' && p.parameter && (p.bind || !p.connected)) {
       for (const to of def.parameters?.find((x) => x.name === p.name)?.to ?? []) sources.push({ address: to, y: p.y, export: p.name });
@@ -675,6 +689,13 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
         connections.push({ from: `@inputs.${p.name}`, to });
         if (!edgeIns.has(to)) edgeIns.set(to, p.y);
         if (p.kind && !edgeKinds.has(to)) edgeKinds.set(to, p.kind);
+      }
+    } else if (p.tap) {
+      // An automation source's tap: deeper on, or from its inner output out to the edge at the tap's height.
+      if (String(p.name).includes('/')) taps.push({ address: p.name, y: p.y });
+      else {
+        connections.push({ from: p.name, to: `@automation.${p.name}` });
+        if (!edgeOuts.has(p.name)) edgeOuts.set(p.name, p.y);
       }
     } else {
       const out = def.outputs?.find((x) => x.name === p.name);
@@ -690,7 +711,7 @@ export function insideOf({ graph, card, pins = [], scale = 1 }) {
   const right = Math.min(LABEL_SHARE * b.w, Math.max(0, labels('out') - (card.x + card.w - (b.x + b.w))));
   const area = { x: b.x + left, y: b.y, w: Math.max(1e-6, b.w - left - right), h: Math.max(1e-6, b.h) };
   const frame = { x: card.x, y: card.y, w: card.w, h: card.h };
-  const laid = layLevel({ level: { instances: def.instances ?? [], connections }, area, edgeIns, edgeOuts, edgeKinds, frame, joinEdges: true, binds: sources, bindFrom: 'left' });
+  const laid = layLevel({ level: { instances: def.instances ?? [], connections }, area, edgeIns, edgeOuts, edgeKinds, frame, joinEdges: true, taps, binds: sources, bindFrom: 'left' });
   // The chip's pins named inside too, at the inside's scale (the owner's, 2026-11-04: the chip's pins hand their names on).
   const names = mine.map((p) => ({ side: p.side, text: String(p.name), address: p.address, x: p.side === 'in' ? frame.x : frame.x + frame.w, y: p.y }));
   return { module: card.module, area, frame, ...laid, names };

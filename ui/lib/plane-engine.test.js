@@ -458,6 +458,21 @@ test('inside a composite a parameter goes on from its pin on the card’s left, 
   assert.deepEqual(laid.names.map((n) => [n.side, n.text, n.x, n.y]), [['in', 'in', 0, 60], ['in', 'cutoff', 0, 80], ['in', 'reso', 0, 100], ['in', 'drive', 0, 120], ['out', 'out', 400, 60]]);
 });
 
+test('an automation source inside a chip: a tap pin on the chip’s right, wired out to the package’s pin, and inside from its source', () => {
+  const graph = { composites: { voice: { instances: [lagOf('env', []), lagOf('f', ['p'])], connections: [{ from: 'env.out', to: 'f.p' }], parameters: [], inputs: [], outputs: [{ name: 'out', from: 'f.out' }] } } };
+  const level = { instances: [{ name: 'v', module: 'voice', composite: true, ports: [{ name: 'out', direction: 'out', shape: 'signal', address: '/v.out' }], parameters: [] }], connections: [] };
+  const laid = layLevel({ level, area: { x: 10, y: 10, w: 500, h: 300 }, frame: { x: 0, y: 0, w: 520, h: 320 }, taps: [{ address: '/v/env.out', y: 200 }] });
+  const tap = laid.pins.find((p) => p.tap);
+  assert.deepEqual([tap.address, tap.name, tap.side, tap.connected, tap.kind], ['/v/env.out', 'env.out', 'out', true, 'control']);
+  const out = laid.wires.find((w) => w.from === '/v/env.out');
+  assert.deepEqual(out.points[0], { x: tap.x, y: tap.y });
+  assert.deepEqual(out.points.at(-1), { x: 520, y: 200 }, 'to the package’s pin');
+  const inner = insideOf({ graph, card: laid.cards[0], pins: laid.pins, scale: laid.scale });
+  const way = inner.wires.find((w) => w.from === 'env.out' && w.to === '@automation.env.out');
+  assert.equal(way.kind, 'control');
+  assert.deepEqual(way.points.at(-1), { x: laid.cards[0].x + laid.cards[0].w, y: tap.y }, 'inside, from its source to the tap');
+});
+
 test('an address located at the Engine: its card, laid inside its chips as they are drawn', () => {
   const { engines } = studio();
   const synth = engines.find((e) => e.cards.some((c) => c.name === 'synth'));

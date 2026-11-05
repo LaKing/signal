@@ -187,7 +187,8 @@ test('the Engine’s inside lies in the package’s body, its edges at the packa
     const pkg = s.packages.get(e.entry);
     for (const c of e.cards) assert.ok(c.x >= pkg.body.x - 1e-6 && c.x + c.w <= pkg.body.x + pkg.body.w + 1e-6 && c.y >= pkg.body.y - 1e-6 && c.y + c.h <= pkg.body.y + pkg.body.h + 1e-6, `${c.name} in the body`);
     for (const edge of e.edges) {
-      const pin = pinOf(pkg, edge.side, edge.address);
+      // An automation source's tap ends at the package's automation pin.
+      const pin = pinOf(pkg, edge.side, edge.address) ?? pkg.autos.find((a) => a.address === edge.address && edge.side === 'out');
       assert.ok(pin, `${edge.id}: the package has its pin`);
       assert.deepEqual([edge.x, edge.y], [pin.x, pin.y], `${edge.id} at its pin`);
     }
