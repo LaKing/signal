@@ -1469,6 +1469,12 @@ export class SignalPlane extends HTMLElement {
           card.style.visibility = hidden;
           card.toggleAttribute('data-faded', Boolean(hidden));
         }
+        // Faded to the surround (the Engine under it), it takes no press: a click goes to the wire under it.
+        const inert = o < HIT_OPACITY;
+        if (card.inert !== inert) {
+          card.inert = inert;
+          card.style.pointerEvents = inert ? 'none' : '';
+        }
         const xray = opened && fades.control > 0;
         if (card.hasAttribute('data-xray') !== xray) card.toggleAttribute('data-xray', xray);
       }
