@@ -56,6 +56,16 @@ export function pinKey(side, address) {
   return `pin ${side} ${norm(address)}`;
 }
 
+/** The key of an automation source's tap (its way out to the package's automation pin, inside the chip and around it): its source's. */
+export function tapKey(address) {
+  return `tap ${norm(address)}`;
+}
+
+/** The key a drawn wire carries (full ends): a tap's (`@automation` its end, at any depth) its source's, else its connection's. */
+export function drawnWireKey(from, to) {
+  return /(^|\/)@automation(\.|$)/.test(String(to ?? '')) ? tapKey(from) : wireKey(from, to);
+}
+
 /** The key of a leg of the control signal into parameter `address` (ui/lib/plane-engine.js `layLevel`'s `binds`). */
 export function bindKey(address) {
   return `bind ${norm(address)}`;
@@ -81,7 +91,7 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
   for (const w of laid?.wires ?? []) {
     const from = fullAddress(prefix, w.from);
     const to = fullAddress(prefix, w.to);
-    items.push({ kind: 'e-wire', id: `${scope}|${w.id}`, key: wireKey(from, to), points: w.points, entry, patchLevel: level, prefix, chip, from, to, written: { from: written(w.from), to: written(w.to) }, edge: w.edge ?? null, frame: Boolean(prefix) && (onFrame(w.from) || onFrame(w.to)) });
+    items.push({ kind: 'e-wire', id: `${scope}|${w.id}`, key: drawnWireKey(from, to), points: w.points, entry, patchLevel: level, prefix, chip, from, to, written: { from: written(w.from), to: written(w.to) }, edge: w.edge ?? null, frame: Boolean(prefix) && (onFrame(w.from) || onFrame(w.to)) });
   }
   for (const c of laid?.cards ?? []) {
     const address = `${prefix}/${c.name}`;
@@ -153,7 +163,7 @@ export function selectionKeys(selection, net = null) {
   if (selection.kind === 'port') keys.add(pinKey('in', selection.address)).add(pinKey('out', selection.address));
   // Its whole net (ui/lib/plane-net.js `netOf`): the wires walked, the ports' pins, the control signal's legs into them.
   for (const key of net?.wires ?? []) keys.add(key);
-  for (const address of net?.addresses ?? []) keys.add(pinKey('in', address)).add(pinKey('out', address)).add(bindKey(address));
+  for (const address of net?.addresses ?? []) keys.add(pinKey('in', address)).add(pinKey('out', address)).add(bindKey(address)).add(tapKey(address));
   return keys;
 }
 

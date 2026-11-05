@@ -87,7 +87,7 @@ import { WIRING_TEXT, edgeCableMoves, polylinePath, portIndex, wiringLayout, wir
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { packageOf } from '../lib/plane-package.js';
 import { CARD_RX, REVEAL, chipPath, engineLayout, insideOf, locateAddress, revealShare } from '../lib/plane-engine.js';
-import { ENGINE_SELECTABLE, addOps, bindKey, bindMoveOps, cardKey, connectOps, rewireOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
+import { ENGINE_SELECTABLE, addOps, bindKey, bindMoveOps, cardKey, connectOps, drawnWireKey, rewireOps, dropTargets, engineItems, engineSelection, engineSubject, engineTarget, fullAddress, norm, outStep, pinKey, placedOwners, removeOps, selectionKeys, wireKey } from '../lib/plane-engine-edit.js';
 import { selectionNet } from '../lib/plane-net.js';
 import { planeSidebar } from '../lib/plane-sidebar.js';
 import { headPath } from '../lib/schematic-draw.js';
@@ -127,8 +127,6 @@ function zoomPicksLayer() {
 }
 
 /** The automation wires' arrowhead colours, by kind (the k-* classes' colours). */
-/** A combine mark's sign by the parameter's `combine`. */
-const COMBINE_SIGN = { add: '+', multiply: '×', replace: '=' };
 const ARROW_COLOURS = { audio: '#4fc3f7', control: '#b39ddb', gate: '#ff6b6b', frequency: '#c6e05a', events: '#3ecf8e', vector: '#f48fb1', generic: '#9aa4b2' };
 
 /** The zoom lock (the bar's switch; per viewer, localStorage): the wheel scrolls up and down, the pointer zooms nothing. */
@@ -332,7 +330,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 /* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
-.e-bind { stroke: var(--signal-effective, #ffb74d); } .e-combine circle { fill: var(--signal-board-bg, #0e1014); stroke: var(--signal-effective, #ffb74d); } .e-combine text { fill: var(--signal-effective, #ffb74d); font-weight: 700; pointer-events: none; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
+.e-bind { stroke: var(--signal-effective, #ffb74d); } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
 .e-pin.e-bind-pin, .e-pin.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -2066,7 +2064,7 @@ export class SignalPlane extends HTMLElement {
     const edgeNote = top ? ', through the instrument’s edge' : `, through ${parent.card.name}’s edge`;
     const wires = svg('g', { class: 'e-wires' });
     for (const w of laid.wires) {
-      const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k, CORNERS), ...line(2) }), wireKey(full(w.from), full(w.to)), keyed);
+      const path = this.keyed(svg('path', { class: `e-wire k-${w.kind}`, d: polylinePath(w.points, 6 * k, CORNERS), ...line(2) }), drawnWireKey(full(w.from), full(w.to)), keyed);
       path.append(svg('title', {}, `${full(w.from)} → ${full(w.to)} (${w.kind})${w.edge ? edgeNote : ''}`));
       wires.append(path);
       for (const j of w.junctions) wires.append(svg('circle', { class: `e-junction k-${w.kind}`, cx: j.x, cy: j.y, r: 3 * k }));
@@ -2079,14 +2077,6 @@ export class SignalPlane extends HTMLElement {
       path.append(svg('title', {}, title));
       wires.append(path);
       for (const j of b.junctions ?? []) wires.append(svg('circle', { class: 'e-junction e-bind-dot', cx: j.x, cy: j.y, r: 3 * k }));
-    }
-    // Where a parameter's control and its connection combine (its declared `combine`): a ring with the operation, not a dot.
-    for (const c of laid.combines ?? []) {
-      const mark = svg('g', { class: 'e-combine' });
-      mark.append(svg('circle', { cx: c.x, cy: c.y, r: 3.5 * k, 'stroke-width': 1.2 * k }));
-      mark.append(svg('text', { x: c.x, y: c.y + 1.9 * k, 'font-size': 6 * k, 'text-anchor': 'middle' }, COMBINE_SIGN[c.mode] ?? '+'));
-      mark.append(svg('title', {}, `${full(c.address)}: its control and its connection combined (${c.mode})`));
-      wires.append(mark);
     }
     g.append(wires);
     const composites = new Map();
@@ -2114,8 +2104,8 @@ export class SignalPlane extends HTMLElement {
       g.append(card);
     }
     for (const p of laid.pins) {
-      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
-      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? `a parameter${p.bind ? ' its control sets' : p.connected ? ' a connection drives' : ''}` : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
+      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}${p.fanIn ? ' fan-in' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5), ...(p.fanIn ? { 'stroke-dasharray': `${1.5 * k} ${1.5 * k}` } : {}) }), pinKey(p.side, full(p.address)), keyed);
+      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? `a parameter${p.bind ? ' its control sets' : p.connected ? ' a connection drives' : ''}` : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})${p.fanIn ? ': more than one way into it; one input takes one connection (ADR 0054), a std.add, std.mix or std.merge sums them' : ''}`));
       // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
       const chip = composites.get(p.card);
       const label = svg('text', { class: `e-pin-label${chip ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(chip ? { 'stroke-width': 2.5 * k } : {}) }, p.name);

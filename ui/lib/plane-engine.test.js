@@ -469,7 +469,7 @@ test('an automation source inside a chip: a tap pin on the chip’s right, wired
   assert.deepEqual(out.points.at(-1), { x: 520, y: 200 }, 'to the package’s pin');
   const inner = insideOf({ graph, card: laid.cards[0], pins: laid.pins, scale: laid.scale });
   const way = inner.wires.find((w) => w.from === 'env.out' && w.to === '@automation.env.out');
-  assert.equal(way.kind, 'control');
+  assert.equal(way.kind, inner.wires.find((w) => w.from === 'env.out' && w.to === 'f.p').kind, 'its net’s colour');
   assert.deepEqual(way.points.at(-1), { x: laid.cards[0].x + laid.cards[0].w, y: tap.y }, 'inside, from its source to the tap');
 });
 
