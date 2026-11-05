@@ -51,6 +51,21 @@ fn composite_path(name: &str) -> String {
     format!("{}/{name}.toml", crate::COMPOSITES)
 }
 
+/// The parameter export of composite file `text` that sets `port`
+/// (`instance.parameter`), if one does.
+pub(super) fn parameter_export_onto(text: &str, port: &str) -> Option<String> {
+    let doc: DocumentMut = text.parse().ok()?;
+    let table = doc
+        .get("exports")
+        .and_then(TomlItem::as_table_like)?
+        .get(role_table(Role::Parameter))
+        .and_then(TomlItem::as_table_like)?;
+    table
+        .iter()
+        .find(|(_, item)| targets(item, Role::Parameter).iter().any(|p| p == port))
+        .map(|(n, _)| n.to_owned())
+}
+
 fn role_table(role: Role) -> &'static str {
     match role {
         Role::Input => "inputs",
@@ -424,6 +439,18 @@ impl Patching<'_> {
                         ),
                     ));
                 }
+            }
+            // ADR 0054 (2026-11-05): a parameter takes its control or one connection, never both.
+            if role == Role::Parameter
+                && let Some(c) = m.conns.iter().find(|c| c.to == port)
+            {
+                return Err(refused(
+                    "fan-in",
+                    format!(
+                        "`{port}` already takes {}: a parameter takes its control or one connection (a std.const for the control and a std.add join them)",
+                        c.from
+                    ),
+                ));
             }
             if role == Role::Output && !ports.is_empty() {
                 return Err(bad(format!(

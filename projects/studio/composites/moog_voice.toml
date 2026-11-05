@@ -39,7 +39,9 @@ schema_version = 1
 name = "moog_voice"
 
 [instances]
-glide = { module = "std.lag", rise_ms = 40, fall_ms = 40 }
+glide = { module = "std.lag", rise_ms = 0, fall_ms = 0 }
+glide_knob = { module = "std.const", value = 40 }  # glide's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+glide_sum = { module = "std.add" }  # glide + hz_none.out
 hz_prev = { module = "std.unit_delay" }
 hz_none = { module = "std.compare", mode = 1 }
 pitch = { module = "std.scale", mul = 1, add = 0 }
@@ -77,7 +79,9 @@ osc3 = { module = "std.osc", shape = 2, freq = 0 }
 noise = { module = "std.noise" }
 mixer = { module = "std.mix", gain_a = 0.6, gain_b = 0.5, gain_c = 0.5, gain_d = 0 }
 
-ladder = { module = "std.ladder", cutoff_hz = 300, resonance = 0.45, drive = 1 }
+ladder = { module = "std.ladder", cutoff_hz = 0, resonance = 0.45, drive = 1 }
+cutoff_knob = { module = "std.const", value = 300 }  # cutoff's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+cutoff_sum = { module = "std.add" }  # cutoff + cutoff_mod.out
 cutoff_mod = { module = "std.add" }  # filter contour + key tracking, added to the cutoff knob
 fenv = { module = "std.adsr", attack_ms = 3, decay_ms = 220, sustain = 0.2, release_ms = 180 }
 env_amt = { module = "std.scale", mul = 2600, add = 0 }
@@ -93,8 +97,10 @@ volume = { module = "std.gain", db = 0 }
 connections = [
   # Glide only once there is a pitch to glide from.
   { from = "hz_prev.out", to = "hz_none.a" },
-  { from = "hz_none.out", to = "glide.rise_ms", scale = -60000 },
-  { from = "hz_none.out", to = "glide.fall_ms", scale = -60000 },
+  { from = "hz_none.out", to = "glide_sum.b", scale = -60000 },
+  { from = "glide_knob.out", to = "glide_sum.a" },
+  { from = "glide_sum.out", to = "glide.rise_ms" },
+  { from = "glide_sum.out", to = "glide.fall_ms" },
   { from = "glide.out", to = "pitch.in" },
   # Pitch: the glided hz times each oscillator's ratio.
   { from = "o1_oct.out", to = "o1_oct_lim.in" },
@@ -135,7 +141,9 @@ connections = [
   { from = "env_amt.out", to = "cutoff_mod.a" },
   { from = "pitch.out", to = "key_amt.in" },
   { from = "key_amt.out", to = "cutoff_mod.b" },
-  { from = "cutoff_mod.out", to = "ladder.cutoff_hz" },
+  { from = "cutoff_mod.out", to = "cutoff_sum.b" },
+  { from = "cutoff_knob.out", to = "cutoff_sum.a" },
+  { from = "cutoff_sum.out", to = "ladder.cutoff_hz" },
   { from = "ladder.lp", to = "trim.in" },
   # Loudness: the amp contour times the note's velocity.
   { from = "aenv.out", to = "velamp.a" },
@@ -151,7 +159,7 @@ outputs = { out = "volume.out" }
 # The exported parameters, each with its own range where it has one (ADR
 # 0042): a control reaches no value outside it.
 [exports.parameters]
-glide = { to = ["glide.rise_ms", "glide.fall_ms"], min = 0, max = 2000 }
+glide = { to = "glide_knob.value", min = 0, max = 2000 }
 osc1_octave = { to = "o1_oct.value", values = [{ value = -2, label = "-2" }, { value = -1, label = "-1" }, { value = 0, label = "0" }, { value = 1, label = "+1" }, { value = 2, label = "+2" }] }
 osc1_detune = { to = "o1_det.value", min = -1200, max = 1200 }
 osc1_wave = { to = "osc1.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }, { value = 2, label = "square" }, { value = 3, label = "triangle" }] }
@@ -165,7 +173,7 @@ osc1_level = { to = "mixer.gain_a", min = 0, max = 2 }
 osc2_level = { to = "mixer.gain_b", min = 0, max = 2 }
 osc3_level = { to = "mixer.gain_c", min = 0, max = 2 }
 noise_level = { to = "mixer.gain_d", min = 0, max = 2 }
-cutoff = { to = "ladder.cutoff_hz", min = 20, max = 20000 }
+cutoff = { to = "cutoff_knob.value", min = 20, max = 20000 }
 emphasis = { to = "ladder.resonance", min = 0, max = 1 }
 drive = { to = "ladder.drive", min = 0, max = 10 }
 env_amount = { to = "env_amt.mul", min = -10000, max = 10000 }

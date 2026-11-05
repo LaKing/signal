@@ -8,7 +8,7 @@
 //! §3, §4), except into an input the registry restricts ([`restricted`], ADR
 //! 0024).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use signal_core::{InstanceAddress, PortAddress, PortKind, PortShape, RateDivisor, Registry};
 
@@ -234,8 +234,13 @@ pub(crate) fn validate(
 /// ADR 0042, 0043 (the operator's decision of 2026-10-25): every primitive
 /// parameter value outside its declared range is clamped to it, and one not
 /// in its value set snapped as `process` reads it, each with a warning; the
-/// corrected value is what the plan holds and what plays.
+/// corrected value is what the plan holds and what plays. The base of a
+/// parameter a connection drives is the offset its sum is added to (ADR
+/// 0054: a control and a connection meet in a module, the parameter's base
+/// then 0), not clamped: its effective value is, every frame
+/// (`docs/semantics.md` §4).
 pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
+    let driven: BTreeSet<&PortAddress> = graph.connections.iter().map(|c| &c.to).collect();
     for (address, instance) in &mut graph.instances {
         for parameter in instance.descriptor.parameters {
             let Some(slot) = instance.parameters.get_mut(parameter.name) else {
@@ -245,7 +250,9 @@ pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
             let range = parameter.range;
             let mut to = value;
             let mut reason = None;
-            if !(range.min <= to && to <= range.max) {
+            let offset =
+                PortAddress::new(address, parameter.name).is_ok_and(|p| driven.contains(&p));
+            if !offset && !(range.min <= to && to <= range.max) {
                 to = to.max(range.min).min(range.max);
                 reason = Some(crate::flatten::outside(range));
             }

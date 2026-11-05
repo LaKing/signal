@@ -2054,6 +2054,17 @@ impl Patching<'_> {
                         ),
                     ));
                 }
+                // ADR 0054 (2026-11-05): a parameter its control sets takes no connection besides.
+                if !self.ctx.level.is_empty()
+                    && let Some(name) = inside::parameter_export_onto(&self.text, to)
+                {
+                    return Err(refused(
+                        "fan-in",
+                        format!(
+                            "{to} is set by the parameter `{name}`'s control: a parameter takes its control or one connection (a std.const for the control and a std.add join them)"
+                        ),
+                    ));
+                }
                 let entry = connection_entry(m.aot, from, to, *scale);
                 let mut inv = Vec::new();
                 add_connection(&mut self.text, &entry, &mut inv).map_err(written)?;

@@ -3,8 +3,11 @@
 // connection into the bound address, from the engine or from outside (an
 // external control cable), and a connection inside a composite into the
 // export's target (the studio's filter contour into `ladder.cutoff_hz`,
-// which MONO SYNTH's cutoff knob binds through `/synth.cutoff`); the inner
-// value is read at the export's first target. The cube keeps clear of the
+// which MONO SYNTH's cutoff knob bound through `/synth.cutoff` before ADR
+// 0054's amendment: `LEGACY`, the studio as such a file still has it; the
+// studio itself now sums the knob's `std.const` and the contour in a
+// `std.add`, so its knob is automated by nothing); the inner value is read
+// at the export's first target. The cube keeps clear of the
 // controls, the legs never cross, and the layout is deterministic and
 // within the budget.
 
@@ -20,6 +23,8 @@ const root = new URL('../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
 const whitelist = JSON.parse(read('ui/lib/panel-whitelist.json'));
 const STUDIO = JSON.parse(read('ui/lib/fixtures/studio-graph.json'));
+// The studio before ADR 0054's amendment (2026-11-05): a knob and a modulation on one parameter, as an older project has them.
+const LEGACY = JSON.parse(read('ui/lib/fixtures/studio-graph-legacy.json'));
 
 function studioCards() {
   const text = read('projects/studio/ui/main.html');
@@ -32,22 +37,24 @@ const SYNTH = 'card:mono-synth';
 test('a bind’s targets: the parameter, then the export’s targets inside the composite; the inner value at the first', () => {
   assert.deepEqual(
     bindTargets('/synth.cutoff', STUDIO).map((t) => `${t.address} @${t.level || 'top'}`),
-    ['/synth.cutoff @top', '/synth/ladder.cutoff_hz @moog_voice'],
+    ['/synth.cutoff @top', '/synth/cutoff_knob.value @moog_voice'],
   );
   assert.deepEqual(
-    bindTargets('/synth.glide', STUDIO).map((t) => t.address),
+    bindTargets('/synth.glide', LEGACY).map((t) => t.address),
     ['/synth.glide', '/synth/glide.rise_ms', '/synth/glide.fall_ms'],
   );
-  assert.equal(innerAddress('/synth.cutoff', STUDIO), '/synth/ladder.cutoff_hz');
+  assert.equal(innerAddress('/synth.cutoff', STUDIO), '/synth/cutoff_knob.value');
+  assert.equal(innerAddress('/synth.cutoff', LEGACY), '/synth/ladder.cutoff_hz');
   assert.equal(innerAddress('/transport.bpm', STUDIO), null);
   assert.deepEqual(bindTargets('/nothing', STUDIO), []);
 });
 
-test('the studio’s cutoff: the filter contour and the key tracking, summed (ADR 0054), drive ladder.cutoff_hz inside the engine, so they land on the cutoff knob', () => {
+test('the studio’s knobs: summed with their modulation in a std.add (ADR 0054), automated by nothing; before that, the filter contour drove ladder.cutoff_hz inside the engine and landed on the cutoff knob', () => {
   const cards = studioCards();
   const owner = assignInstruments({ instances: STUDIO.top.instances, connections: STUDIO.top.connections, cards });
   const binds = cards.find((c) => c.id === 'mono-synth').binds;
-  const autos = automations({ entry: SYNTH, binds, owner, graph: STUDIO });
+  assert.deepEqual(automations({ entry: SYNTH, binds, owner, graph: STUDIO }), []);
+  const autos = automations({ entry: SYNTH, binds, owner, graph: LEGACY });
   assert.deepEqual(
     autos.map((a) => `${a.bind} ← ${a.from} → ${a.to} (${a.source}${a.inner ? `, inside ${a.level}` : ''})`),
     [
@@ -94,8 +101,8 @@ test('the Control plane: the cube clear of every control, legs that never cross,
   const binds = cards.find((c) => c.id === 'mono-synth').binds;
   const rect = { x: 0, y: 100, w: 1280, h: 420 };
   const controls = synthControls(rect, binds);
-  const autos = automations({ entry: SYNTH, binds, owner, graph: STUDIO });
-  const inner = new Map(binds.map((b) => [b, innerAddress(b, STUDIO)]).filter(([, a]) => a));
+  const autos = automations({ entry: SYNTH, binds, owner, graph: LEGACY });
+  const inner = new Map(binds.map((b) => [b, innerAddress(b, LEGACY)]).filter(([, a]) => a));
   const t0 = performance.now();
   const c = controlLayout({ rect, controls, engine: engineOf(SYNTH, owner), autos, inner, title: 'MONO SYNTH' });
   const ms = performance.now() - t0;
@@ -156,7 +163,7 @@ test('the cube’s place: the free spot nearest its controls, ties by y then x; 
 
 test('automation and external cables never run over a control: corridors between the columns, the left edge, lanes in the row gaps', () => {
   const cards = studioCards();
-  const graph = structuredClone(STUDIO);
+  const graph = structuredClone(LEGACY);
   graph.top.instances.push({ name: 'lfo', module: 'std.osc', ports: [{ name: 'out', address: '/lfo.out', direction: 'out', shape: 'signal', kind: 'control', rate: 1 }], parameters: [] });
   graph.top.connections.push({ from: '/lfo.out', to: '/synth.cutoff', converters: [] });
   const owner = assignInstruments({ instances: graph.top.instances, connections: graph.top.connections, cards });

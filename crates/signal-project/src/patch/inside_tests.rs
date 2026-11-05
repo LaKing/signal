@@ -608,6 +608,27 @@ fn what_is_refused() {
     .unwrap_err();
     assert_eq!(refused.code, "fan-in");
     assert!(run(&start, "voice", &[op(serde_json::json!({"op": "export.connect", "role": "parameter", "name": "level", "port": "amp.db"}))]).is_ok());
+    // ADR 0054 (2026-11-05): a parameter takes its control or one connection, never both, whichever comes second.
+    let refused = run(
+        &start,
+        "voice",
+        &[op(
+            serde_json::json!({"op": "connection.add", "from": "osc.out", "to": "amp.db"}),
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "fan-in");
+    let refused = run(
+        &start,
+        "voice",
+        &[
+            op(serde_json::json!({"op": "export.disconnect", "role": "parameter", "name": "db", "port": "amp.db"})),
+            op(serde_json::json!({"op": "connection.add", "from": "osc.out", "to": "amp.db"})),
+            op(serde_json::json!({"op": "export.connect", "role": "parameter", "name": "level", "port": "amp.db"})),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "fan-in");
     let refused = run(
         &start,
         "voice",

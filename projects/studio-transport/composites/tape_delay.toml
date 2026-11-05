@@ -34,7 +34,9 @@ name = "tape_delay"
 
 [instances]
 # Dotted eighth at 120 bpm: 3/4 of a 500 ms beat.
-delay = { module = "std.delay", time_ms = 375 }
+delay = { module = "std.delay", time_ms = 0 }
+time_ms_knob = { module = "std.const", value = 375 }  # time_ms's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+time_ms_sum = { module = "std.add" }  # time_ms + time_mod.out
 feed = { module = "std.add" }  # the input and the feedback into the tape (ADR 0054: a sum is a module)
 time_mod = { module = "std.add" }  # flutter + wow, added to the time knob (ADR 0054)
 
@@ -73,7 +75,9 @@ connections = [
   { from = "flutter_lp1.lp", to = "flutter_lp2.in" },
   { from = "flutter_lp2.lp", to = "flutter_depth.in" },
   { from = "flutter_depth.out", to = "time_mod.a" },
-  { from = "time_mod.out", to = "delay.time_ms" },
+  { from = "time_mod.out", to = "time_ms_sum.b" },
+  { from = "time_ms_knob.out", to = "time_ms_sum.a" },
+  { from = "time_ms_sum.out", to = "delay.time_ms" },
   # The feedback path: darken, saturate, scale, back into the delay.
   { from = "tone_amt.out", to = "tone_lim.in" },
   { from = "tone_lim.out", to = "tone.cutoff_hz" },
@@ -102,7 +106,7 @@ outputs = { out = "sum.out" }
 # The exported parameters, each with its own range where it has one (ADR
 # 0042): a control reaches no value outside it.
 [exports.parameters]
-time_ms = { to = "delay.time_ms", min = 1, max = 2000 }
+time_ms = { to = "time_ms_knob.value", min = 1, max = 2000 }
 feedback = { to = "feedback.value", min = 0, max = 0.75 }
 tone = { to = "tone_amt.value", min = 0, max = 4999 }
 wow = { to = "wow_depth.mul", min = 0, max = 10 }

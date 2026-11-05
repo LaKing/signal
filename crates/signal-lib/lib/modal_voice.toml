@@ -40,7 +40,9 @@ vel_bright = { module = "std.const", value = 0.3 }
 vel_amt = { module = "std.mul" }
 
 exciter = { module = "std.exciter", kind = 1, level = 0, duration_ms = 3, hardness = 0.6, bow_speed = 1, friction = 0.25, noise_color = 0, position = 0 }
-modal = { module = "std.modal", freq = 0, material = 1, modes = 16, decay_s = 1.5, law = 1, position = 0.3, gain = 0.4 }
+modal = { module = "std.modal", freq = 0, material = 1, modes = 16, decay_s = 1.5, law = 1, position = 0.3, gain = 0.4, brightness = 0 }
+brightness_knob = { module = "std.const", value = 0 }  # brightness's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+brightness_sum = { module = "std.add" }  # brightness + vel_amt.out
 
 aenv = { module = "std.adsr", attack_ms = 1, decay_ms = 50, sustain = 1, release_ms = 400 }
 vca = { module = "std.mul" }
@@ -55,7 +57,9 @@ connections = [
   { from = "vel_lim.out", to = "exciter.level" },
   { from = "vel_lim.out", to = "vel_amt.a" },
   { from = "vel_bright.out", to = "vel_amt.b" },
-  { from = "vel_amt.out", to = "modal.brightness" },
+  { from = "vel_amt.out", to = "brightness_sum.b" },
+  { from = "brightness_knob.out", to = "brightness_sum.a" },
+  { from = "brightness_sum.out", to = "modal.brightness" },
   # The body, its contour and the output stage.
   { from = "exciter.out", to = "modal.in" },
   { from = "modal.out", to = "vca.a" },
@@ -84,7 +88,7 @@ law = { to = "modal.law", min = 0, max = 3 }
 strike_position = { to = "modal.position", min = 0.01, max = 0.99 }
 inharmonicity = { to = "modal.inharmonicity", min = 0, max = 0.1 }
 damping_tilt = { to = "modal.damping_tilt", min = 0, max = 10 }
-brightness = { to = "modal.brightness", min = -1, max = 1 }
+brightness = { to = "brightness_knob.value", min = -1, max = 1 }
 pickup = { to = "modal.pickup", min = 0.01, max = 0.99 }
 pickup_mix = { to = "modal.pickup_mix", min = 0, max = 1 }
 spread = { to = "modal.spread", min = 0, max = 0.1 }

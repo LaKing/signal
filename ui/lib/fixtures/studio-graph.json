@@ -3847,6 +3847,18 @@
           "converters": [],
           "from": "pitch_env.out",
           "scale": 180.0,
+          "to": "tune_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "tune_knob.out",
+          "scale": null,
+          "to": "tune_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "tune_sum.out",
+          "scale": null,
           "to": "osc.freq"
         },
         {
@@ -3858,6 +3870,18 @@
         {
           "converters": [],
           "from": "velocity.out",
+          "scale": null,
+          "to": "drive_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "drive_knob.out",
+          "scale": null,
+          "to": "drive_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "drive_sum.out",
           "scale": null,
           "to": "shaper.drive"
         },
@@ -4012,6 +4036,78 @@
           ]
         },
         {
+          "address": "tune_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "tune_knob",
+          "parameters": [
+            {
+              "address": "tune_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "tune_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "tune_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "tune_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "tune_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "tune_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "tune_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
           "address": "pitch_env",
           "composite": false,
           "module": "std.exp_env",
@@ -4110,6 +4206,78 @@
                 "max": 1.0,
                 "min": -1.0
               },
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "drive_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "drive_knob",
+          "parameters": [
+            {
+              "address": "drive_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "drive_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "drive_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "drive_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "drive_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "drive_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "drive_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
               "rate": 1,
               "shape": "signal",
               "unit": null
@@ -4725,7 +4893,7 @@
             "min": 0.1
           },
           "to": [
-            "shaper.drive"
+            "drive_knob.value"
           ]
         },
         {
@@ -4747,7 +4915,7 @@
             "min": 20.0
           },
           "to": [
-            "osc.freq"
+            "tune_knob.value"
           ]
         },
         {
@@ -4775,12 +4943,24 @@
           "converters": [],
           "from": "hz_none.out",
           "scale": -60000.0,
+          "to": "glide_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "glide_knob.out",
+          "scale": null,
+          "to": "glide_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "glide_sum.out",
+          "scale": null,
           "to": "glide.rise_ms"
         },
         {
           "converters": [],
-          "from": "hz_none.out",
-          "scale": -60000.0,
+          "from": "glide_sum.out",
+          "scale": null,
           "to": "glide.fall_ms"
         },
         {
@@ -5009,6 +5189,18 @@
           "converters": [],
           "from": "cutoff_mod.out",
           "scale": null,
+          "to": "cutoff_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "cutoff_knob.out",
+          "scale": null,
+          "to": "cutoff_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "cutoff_sum.out",
+          "scale": null,
           "to": "ladder.cutoff_hz"
         },
         {
@@ -5137,6 +5329,78 @@
               "address": "glide.out",
               "direction": "out",
               "kind": "control",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "glide_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "glide_knob",
+          "parameters": [
+            {
+              "address": "glide_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "glide_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "glide_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "glide_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "glide_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "glide_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "glide_sum.out",
+              "direction": "out",
+              "kind": "generic",
               "name": "out",
               "range": null,
               "rate": 1,
@@ -6738,6 +7002,78 @@
           ]
         },
         {
+          "address": "cutoff_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "cutoff_knob",
+          "parameters": [
+            {
+              "address": "cutoff_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "cutoff_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "cutoff_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "cutoff_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "cutoff_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "cutoff_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "cutoff_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
           "address": "cutoff_mod",
           "composite": false,
           "module": "std.add",
@@ -7323,7 +7659,7 @@
             "min": 20.0
           },
           "to": [
-            "ladder.cutoff_hz"
+            "cutoff_knob.value"
           ]
         },
         {
@@ -7411,8 +7747,7 @@
             "min": 0.0
           },
           "to": [
-            "glide.rise_ms",
-            "glide.fall_ms"
+            "glide_knob.value"
           ]
         },
         {
@@ -9605,6 +9940,18 @@
           "converters": [],
           "from": "time_mod.out",
           "scale": null,
+          "to": "time_ms_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "time_ms_knob.out",
+          "scale": null,
+          "to": "time_ms_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "time_ms_sum.out",
+          "scale": null,
           "to": "delay.time_ms"
         },
         {
@@ -9763,6 +10110,78 @@
               "address": "delay.out",
               "direction": "out",
               "kind": "audio",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "time_ms_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "time_ms_knob",
+          "parameters": [
+            {
+              "address": "time_ms_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "time_ms_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "time_ms_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "time_ms_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "time_ms_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "time_ms_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "time_ms_sum.out",
+              "direction": "out",
+              "kind": "generic",
               "name": "out",
               "range": null,
               "rate": 1,
@@ -10835,7 +11254,7 @@
             "min": 1.0
           },
           "to": [
-            "delay.time_ms"
+            "time_ms_knob.value"
           ]
         },
         {
@@ -10868,6 +11287,18 @@
           "converters": [],
           "from": "pitch_env.out",
           "scale": 60.0,
+          "to": "tune_sum.b"
+        },
+        {
+          "converters": [],
+          "from": "tune_knob.out",
+          "scale": null,
+          "to": "tune_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "tune_sum.out",
+          "scale": null,
           "to": "osc.freq"
         },
         {
@@ -11008,6 +11439,78 @@
                 "max": 1.0,
                 "min": -1.0
               },
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "tune_knob",
+          "composite": false,
+          "module": "std.const",
+          "name": "tune_knob",
+          "parameters": [
+            {
+              "address": "tune_knob.value",
+              "combine": "add",
+              "default": 0.0,
+              "kind": "generic",
+              "name": "value",
+              "range": {
+                "max": 100000.0,
+                "min": -100000.0
+              },
+              "rate": 1,
+              "unit": null
+            }
+          ],
+          "ports": [
+            {
+              "address": "tune_knob.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "tune_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "tune_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "tune_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "tune_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "tune_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
               "rate": 1,
               "shape": "signal",
               "unit": null
@@ -11639,7 +12142,7 @@
             "min": 40.0
           },
           "to": [
-            "osc.freq"
+            "tune_knob.value"
           ]
         },
         {
@@ -12373,15 +12876,15 @@
           {
             "address": "/synth.cutoff",
             "combine": "add",
-            "default": 1000.0,
-            "kind": "frequency",
+            "default": 0.0,
+            "kind": "generic",
             "name": "cutoff",
             "range": {
               "max": 20000.0,
               "min": 20.0
             },
             "rate": 1,
-            "unit": "Hz"
+            "unit": null
           },
           {
             "address": "/synth.drive",
@@ -12477,15 +12980,15 @@
           {
             "address": "/synth.glide",
             "combine": "add",
-            "default": 10.0,
-            "kind": "control",
+            "default": 0.0,
+            "kind": "generic",
             "name": "glide",
             "range": {
               "max": 2000.0,
               "min": 0.0
             },
             "rate": 1,
-            "unit": "ms"
+            "unit": null
           },
           {
             "address": "/synth.key_track",
@@ -12894,15 +13397,15 @@
           {
             "address": "/echo.time_ms",
             "combine": "add",
-            "default": 250.0,
-            "kind": "control",
+            "default": 0.0,
+            "kind": "generic",
             "name": "time_ms",
             "range": {
               "max": 2000.0,
               "min": 1.0
             },
             "rate": 1,
-            "unit": "ms"
+            "unit": null
           },
           {
             "address": "/echo.tone",
@@ -12989,8 +13492,8 @@
           {
             "address": "/kick.drive",
             "combine": "add",
-            "default": 1.0,
-            "kind": "gain",
+            "default": 0.0,
+            "kind": "generic",
             "name": "drive",
             "range": {
               "max": 5.0,
@@ -13015,15 +13518,15 @@
           {
             "address": "/kick.tune",
             "combine": "add",
-            "default": 440.0,
-            "kind": "frequency",
+            "default": 0.0,
+            "kind": "generic",
             "name": "tune",
             "range": {
               "max": 200.0,
               "min": 20.0
             },
             "rate": 1,
-            "unit": "Hz"
+            "unit": null
           },
           {
             "address": "/kick.velocity",
@@ -13405,15 +13908,15 @@
           {
             "address": "/tom.tune",
             "combine": "add",
-            "default": 440.0,
-            "kind": "frequency",
+            "default": 0.0,
+            "kind": "generic",
             "name": "tune",
             "range": {
               "max": 500.0,
               "min": 40.0
             },
             "rate": 1,
-            "unit": "Hz"
+            "unit": null
           },
           {
             "address": "/tom.velocity",

@@ -306,7 +306,8 @@ fn the_project_is_wired_as_documented() {
     ] {
         assert!(echo.contains(&name), "/echo: {name}");
     }
-    assert_eq!(parameter("/echo/delay", "time_ms"), 375.0);
+    // The time knob is a std.const summed with the wow and flutter (ADR 0054).
+    assert_eq!(parameter("/echo/time_ms_knob", "value"), 375.0);
     assert_eq!(parameter("/echo/wow_lfo", "freq_hz"), 0.5);
     let kick = types_in("/kick/");
     for name in [
@@ -318,9 +319,10 @@ fn the_project_is_wired_as_documented() {
         assert!(kick.contains(&name), "/kick: {name}");
     }
     // About 230 Hz falling to 50 Hz: 50 + 180·pitch_env.
-    assert_eq!(parameter("/kick/osc", "freq"), 50.0);
+    assert_eq!(parameter("/kick/tune_knob", "value"), 50.0);
     let kick_text = fs::read_to_string(studio().join("composites/kick909.toml")).unwrap();
-    assert!(kick_text.contains(r#"{ from = "pitch_env.out", to = "osc.freq", scale = 180 }"#));
+    assert!(kick_text.contains(r#"{ from = "pitch_env.out", to = "tune_sum.b", scale = 180 }"#));
+    assert!(kick_text.contains(r#"{ from = "tune_sum.out", to = "osc.freq" }"#));
     for voice in ["/snare/", "/clap/", "/hats/", "/tom/", "/rim/", "/cymbal/"] {
         assert!(!types_in(voice).is_empty(), "{voice}");
     }

@@ -34,6 +34,6 @@ test('a control’s leg: the parameter, what else drives its target, the target 
   const selection = { kind: 'leg', address: '/synth.cutoff' };
   const side = planeSidebar(selection, { graph: STUDIO, net: selectionNet(STUDIO, selection) });
   assert.equal(side.title, '/synth.cutoff');
-  assert.ok(side.sections.find((s) => s.title === 'Goes to').items.some((i) => i.address === '/synth/ladder.cutoff_hz'));
+  assert.ok(side.sections.find((s) => s.title === 'Goes to').items.some((i) => i.address === '/synth/cutoff_knob.value'));
   assert.ok(side.rows.some((r) => r.label === 'Net'));
 });

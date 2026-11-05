@@ -11,7 +11,9 @@ category = "generator"
 description = "An analogue-style tom: a sine falling from tune + 60 Hz to tune with an amplitude decay and a touch of filtered noise on the attack. Input: trigger. Output: out (about ±1 at the defaults). Parameters: tune (Hz, default 105), decay (ms, default 240), level (dB, default −1), velocity (clamped to [0, 2], default 1)."
 
 [instances]
-osc = { module = "std.sine_osc", freq = 105 }
+osc = { module = "std.sine_osc", freq = 0 }
+tune_knob = { module = "std.const", value = 105 }  # tune's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+tune_sum = { module = "std.add" }  # tune + pitch_env.out
 pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 70 }
 amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 240 }
 amp = { module = "std.mul" }
@@ -30,7 +32,9 @@ level = { module = "std.gain", db = -1 }
 [wiring]
 connections = [
   { from = "velocity.out", to = "velocity_lim.in" },
-  { from = "pitch_env.out", to = "osc.freq", scale = 60 },
+  { from = "pitch_env.out", to = "tune_sum.b", scale = 60 },
+  { from = "tune_knob.out", to = "tune_sum.a" },
+  { from = "tune_sum.out", to = "osc.freq" },
   { from = "amp_env.out", to = "amp.a" },
   { from = "velocity_lim.out", to = "amp.b" },
   { from = "osc.out", to = "body.a" },
@@ -52,7 +56,7 @@ outputs = { out = "level.out" }
 
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
-tune = { to = "osc.freq", min = 40, max = 500 }
+tune = { to = "tune_knob.value", min = 40, max = 500 }
 decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
 level = { to = "level.db", min = -120, max = 12 }
 velocity = { to = "velocity.value", min = 0, max = 2 }

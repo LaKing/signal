@@ -291,6 +291,43 @@ fn parameter_out_of_range() {
     );
 }
 
+/// ADR 0054: the base of a parameter a connection drives is the offset its
+/// sum is added to, kept as written (its effective value is clamped every
+/// frame); a base alone is clamped as before.
+#[test]
+fn a_driven_parameters_base_is_an_offset_never_clamped() {
+    let project = composite(
+        "project",
+        vec![
+            inst("env", "test.env"),
+            inst_with("driven", "test.osc", &[("freq", -100.0)]),
+            inst_with("alone", "test.osc", &[("freq", -100.0)]),
+        ],
+        vec![conn("env.out", "driven.freq")],
+    );
+    let plan = signal_graph::build_plan(&project, &[], &common::registry(), 1).unwrap();
+    let corrected: Vec<_> = plan
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            GraphWarning::ParameterCorrected { parameter, .. } => Some(parameter.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(corrected, ["/alone.freq"]);
+    let freq = |name: &str| {
+        plan.instances
+            .iter()
+            .find(|i| i.address == addr(name))
+            .unwrap()
+            .parameters
+            .get("freq")
+            .copied()
+    };
+    assert_eq!(freq("/driven"), Some(-100.0));
+    assert_eq!(freq("/alone"), Some(0.0));
+}
+
 #[test]
 fn non_finite_scale() {
     let connection = ConnectionDef {

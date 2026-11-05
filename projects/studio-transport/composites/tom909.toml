@@ -7,7 +7,9 @@ schema_version = 1
 name = "tom909"
 
 [instances]
-osc = { module = "std.sine_osc", freq = 105 }
+osc = { module = "std.sine_osc", freq = 0 }
+tune_knob = { module = "std.const", value = 105 }  # tune's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+tune_sum = { module = "std.add" }  # tune + pitch_env.out
 pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 70 }
 amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 240 }
 amp = { module = "std.mul" }
@@ -24,7 +26,9 @@ level = { module = "std.gain", db = 0 }
 
 [wiring]
 connections = [
-  { from = "pitch_env.out", to = "osc.freq", scale = 60 },
+  { from = "pitch_env.out", to = "tune_sum.b", scale = 60 },
+  { from = "tune_knob.out", to = "tune_sum.a" },
+  { from = "tune_sum.out", to = "osc.freq" },
   { from = "amp_env.out", to = "amp.a" },
   { from = "velocity.out", to = "amp.b" },
   { from = "osc.out", to = "body.a" },
@@ -47,7 +51,7 @@ outputs = { out = "level.out" }
 # The exported parameters, each with its own range where it has one (ADR
 # 0042): a control reaches no value outside it.
 [exports.parameters]
-tune = { to = "osc.freq", min = 40, max = 500 }
+tune = { to = "tune_knob.value", min = 40, max = 500 }
 decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
 level = { to = "level.db", min = -120, max = 12 }
 velocity = { to = "velocity.value", min = 0, max = 2 }

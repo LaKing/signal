@@ -8,13 +8,18 @@ import { netOf, selectionNet, selectionSeeds } from './plane-net.js';
 import { wireKey } from './plane-engine-edit.js';
 
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
+// The studio before ADR 0054's amendment: the cutoff knob's target driven by a connection too.
+const LEGACY = JSON.parse(readFileSync(new URL('./fixtures/studio-graph-legacy.json', import.meta.url), 'utf8'));
 
 test('a parameter’s net: from the chip’s pin to its target inside, and the automation that drives the target', () => {
   const net = netOf(STUDIO, ['/synth.cutoff']);
-  assert.ok(net.addresses.has('/synth/ladder.cutoff_hz'), 'its target inside the chip');
-  assert.ok(net.wires.has(wireKey('/synth.cutoff', '/synth/ladder.cutoff_hz')), 'the export’s wire as the Engine keys it');
-  assert.ok(net.addresses.has('/synth/cutoff_mod.out'), 'what else drives it: the sum of the contour and the key tracking');
-  assert.ok(!net.addresses.has('/synth/ladder.out') && !net.addresses.has('/synth/cutoff_mod.a'), 'never through an instance');
+  assert.ok(net.addresses.has('/synth/cutoff_knob.value'), 'its target inside the chip');
+  assert.ok(net.wires.has(wireKey('/synth.cutoff', '/synth/cutoff_knob.value')), 'the export’s wire as the Engine keys it');
+  assert.ok(!net.addresses.has('/synth/cutoff_sum.a') && !net.addresses.has('/synth/ladder.cutoff_hz'), 'never through an instance: the knob’s std.const');
+  const old = netOf(LEGACY, ['/synth.cutoff']);
+  assert.ok(old.addresses.has('/synth/ladder.cutoff_hz'));
+  assert.ok(old.addresses.has('/synth/cutoff_mod.out'), 'what else drives it: the sum of the contour and the key tracking');
+  assert.ok(!old.addresses.has('/synth/ladder.out') && !old.addresses.has('/synth/cutoff_mod.a'), 'never through an instance');
 });
 
 test('a cable’s net goes on into the chip: /melody.gate → /synth.gate → its targets inside', () => {

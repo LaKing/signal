@@ -21,9 +21,13 @@ schema_version = 1
 name = "kick909"
 
 [instances]
-osc = { module = "std.sine_osc", freq = 50 }
+osc = { module = "std.sine_osc", freq = 0 }
+tune_knob = { module = "std.const", value = 50 }  # tune's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+tune_sum = { module = "std.add" }  # tune + pitch_env.out
 pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 28 }
-shaper = { module = "std.tanh_shaper", drive = 0.6 }
+shaper = { module = "std.tanh_shaper", drive = 0 }
+drive_knob = { module = "std.const", value = 0.6 }  # drive's base: its control sets it (ADR 0054: a control and a connection meet in a module)
+drive_sum = { module = "std.add" }  # drive + velocity.out
 amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 170 }
 amp = { module = "std.mul" }
 body = { module = "std.mul" }
@@ -40,10 +44,14 @@ level = { module = "std.gain", db = 0 }
 
 [wiring]
 connections = [
-  { from = "pitch_env.out", to = "osc.freq", scale = 180 },
+  { from = "pitch_env.out", to = "tune_sum.b", scale = 180 },
+  { from = "tune_knob.out", to = "tune_sum.a" },
+  { from = "tune_sum.out", to = "osc.freq" },
   # Drive 0.6 + velocity: 1.5 on a plain hit of 0.9, 1.95 on an accent.
   { from = "osc.out", to = "shaper.in" },
-  { from = "velocity.out", to = "shaper.drive" },
+  { from = "velocity.out", to = "drive_sum.b" },
+  { from = "drive_knob.out", to = "drive_sum.a" },
+  { from = "drive_sum.out", to = "shaper.drive" },
   { from = "amp_env.out", to = "amp.a" },
   { from = "velocity.out", to = "amp.b" },
   { from = "shaper.out", to = "body.a" },
@@ -67,9 +75,9 @@ outputs = { out = "level.out" }
 # The exported parameters, each with its own range where it has one (ADR
 # 0042): a control reaches no value outside it.
 [exports.parameters]
-tune = { to = "osc.freq", min = 20, max = 200 }
+tune = { to = "tune_knob.value", min = 20, max = 200 }
 decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
 attack = { to = "click_level.mul", min = 0, max = 2 }
-drive = { to = "shaper.drive", min = 0.1, max = 5 }
+drive = { to = "drive_knob.value", min = 0.1, max = 5 }
 level = { to = "level.db", min = -120, max = 12 }
 velocity = { to = "velocity.value", min = 0, max = 2 }
