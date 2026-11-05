@@ -164,6 +164,8 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
   const spell = (a) => String(a ?? '').replace(/^\//, '');
   const connectedIns = new Set([...internal.map((c) => c.to), ...entering.keys(), ...legs.map((l) => l.address)].map(spell));
   const bound = new Set(legs.map((l) => spell(l.address)));
+  // The inputs a connection already takes (ADR 0054: one each; a control's leg is none).
+  const wiredIns = new Set([...internal.map((c) => c.to), ...entering.keys()].map(spell));
   // Automation sources inside a chip (`taps`, the package's right-edge pins): a pin of their own on the chip's right, named by
   // the way into it (`env_amt.out`), wired out to the frame's right edge at the tap's height.
   const tapsOf = new Map();
@@ -305,6 +307,7 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
           tap: Boolean(p.tap),
           connected: side === 'in' ? connectedIns.has(spell(address)) : connectedOuts.has(spell(address)),
           bind: side === 'in' && bound.has(spell(address)),
+          wired: side === 'in' && wiredIns.has(spell(address)),
           x: side === 'in' ? cx : cx + w,
           y: y + (HEADER + ROW * (j + 0.5)) * scale,
         };
@@ -412,9 +415,12 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     const m = spans.get(ch);
     // A wire straight across the channel (along a row) takes no track of its own.
     if (Math.abs(y0 - y1) < 1e-9 && !m.has(key)) return;
-    const iv = m.get(key) ?? { key, lo: Math.min(y0, y1), hi: Math.max(y0, y1), yl: y0, yr: y1 };
+    const iv = m.get(key) ?? { key, lo: Math.min(y0, y1), hi: Math.max(y0, y1), yl: y0, yr: y1, ins: [], outs: [] };
     iv.lo = Math.min(iv.lo, y0, y1);
     iv.hi = Math.max(iv.hi, y0, y1);
+    // Every height it comes in at and leaves at (a fan-out leaves at several).
+    iv.ins.push(y0);
+    iv.outs.push(y1);
     m.set(key, iv);
   };
   for (const w of drawn) {
@@ -518,7 +524,32 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     const farther = legsOut.find((o) => o !== b && o.points[0].x === b.points[0].x && o.points[1] && Math.abs(o.points[1].y - bindY) > Math.abs(turn.y - bindY) + 1e-9);
     if (farther && !farther.junctions.some((j) => j.y === turn.y)) farther.junctions.push({ x: turn.x, y: turn.y });
   }
-  return { scale, cards, pins, wires: wiresOut, edges, lanes, reserved, binds: [...legsOut, ...fromPins] };
+  const ways = [...legsOut, ...fromPins];
+  // A parameter its control sets and a connection drives (its base and its modulation, combined as it declares): the two meet at
+  // a combine mark short of the pin, the connection on into it, the control's leg into the mark from between the pin rows; so
+  // one way enters the pin and none runs along the other (the owner's, 2026-11-05).
+  const combines = [];
+  for (const q of pins) {
+    if (q.side !== 'in' || !q.bind || !q.wired) continue;
+    const Q = { x: q.x, y: q.y };
+    const at = (pts) => pts.length && Math.abs(pts.at(-1).x - Q.x) < 1e-9 && Math.abs(pts.at(-1).y - Q.y) < 1e-9;
+    const into = ways.filter((b) => at(b.points));
+    if (!into.length || !wiresOut.some((w) => at(w.points))) continue;
+    const M = { x: Q.x - COMBINE_STUB * scale, y: Q.y };
+    for (const b of into) {
+      const pts = b.points;
+      // Its run into the pin from its track (or the edge), arriving between the rows on the side it comes from.
+      const before = pts.length >= 3 ? pts.at(-3) : null;
+      const from = pts.at(-2);
+      const side = before && before.y < Q.y ? -1 : before && before.y > Q.y ? 1 : -1;
+      const ym = Q.y + (side * ROW * scale) / 2;
+      const head = before ? pts.slice(0, -2) : [from];
+      b.points = simplify([...head, { x: from.x, y: ym }, { x: M.x, y: ym }, M]);
+    }
+    const param = instances.find((i) => q.card === `card ${i.name}`)?.parameters?.find((p) => p.name === q.name);
+    combines.push({ id: `combine ${q.address}`, address: q.address, x: M.x, y: M.y, mode: param?.combine ?? 'add' });
+  }
+  return { scale, cards, pins, wires: wiresOut, edges, lanes, reserved, binds: ways, combines };
 }
 
 /**
@@ -556,15 +587,34 @@ export function bindLanes(legs, gap = 0) {
  * of the other; of two going up, the upper one. Each net takes the track
  * after the last one of the nets placed before it that it meets (with
  * `gap`); those going down are placed first, lowest first, then those
- * going up, highest first. Ties by key. `Map(key → track)`.
+ * going up, highest first, but a net that comes in at the height another
+ * leaves at before it (so left of it). Ties by key. `Map(key → track)`.
  */
 export function orderedTracks(nets, gap = 0) {
   const byKey = (p, q) => (p.key < q.key ? -1 : p.key > q.key ? 1 : 0);
   const down = nets.filter((n) => n.yr >= n.yl).sort((p, q) => q.yl - p.yl || byKey(p, q));
   const up = nets.filter((n) => n.yr < n.yl).sort((p, q) => p.yl - q.yl || byKey(p, q));
+  // A net that comes in at the height another leaves at runs left of it: else the one's run in and the other's run out lie on
+  // one line between their tracks (the owner's, 2026-11-05: ways may cross, never run along one another).
+  const order = [...down, ...up];
+  for (let moved = true, guard = 0; moved && guard < order.length * order.length; guard++) {
+    moved = false;
+    for (let i = 0; i < order.length && !moved; i++) {
+      for (let j = 0; j < i; j++) {
+        const a = order[i];
+        const b = order[j];
+        if ((a.ins ?? [a.yl]).some((y) => (b.outs ?? [b.yr]).some((z) => Math.abs(y - z) < 1e-9))) {
+          order.splice(i, 1);
+          order.splice(j, 0, a);
+          moved = true;
+          break;
+        }
+      }
+    }
+  }
   const placed = [];
   const out = new Map();
-  for (const n of [...down, ...up]) {
+  for (const n of order) {
     let t = 0;
     for (const o of placed) if (n.lo <= o.hi + gap && o.lo <= n.hi + gap) t = Math.max(t, out.get(o.key) + 1);
     placed.push(n);
@@ -641,6 +691,8 @@ const CHIP_DEPTH = 16;
 /** A pin label's width by its name's length, in the cards' units (the 9 px label at the pin ± 6). */
 const LABEL_CHAR = 5.2;
 const LABEL_PAD = 8;
+/** Where a parameter's control and its connection combine, short of its pin (cards' units). */
+const COMBINE_STUB = 6;
 /** The most of a chip's body its pin labels keep clear on each side. */
 const LABEL_SHARE = 0.125;
 

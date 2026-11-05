@@ -13,8 +13,8 @@ test('a parameter’s net: from the chip’s pin to its target inside, and the a
   const net = netOf(STUDIO, ['/synth.cutoff']);
   assert.ok(net.addresses.has('/synth/ladder.cutoff_hz'), 'its target inside the chip');
   assert.ok(net.wires.has(wireKey('/synth.cutoff', '/synth/ladder.cutoff_hz')), 'the export’s wire as the Engine keys it');
-  assert.ok(net.addresses.has('/synth/env_amt.out') && net.addresses.has('/synth/key_amt.out'), 'what else drives it');
-  assert.ok(!net.addresses.has('/synth/ladder.out') && !net.addresses.has('/synth/env_amt.in'), 'never through an instance');
+  assert.ok(net.addresses.has('/synth/cutoff_mod.out'), 'what else drives it: the sum of the contour and the key tracking');
+  assert.ok(!net.addresses.has('/synth/ladder.out') && !net.addresses.has('/synth/cutoff_mod.a'), 'never through an instance');
 });
 
 test('a cable’s net goes on into the chip: /melody.gate → /synth.gate → its targets inside', () => {

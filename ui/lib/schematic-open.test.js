@@ -78,15 +78,17 @@ test('the studio’s synth opens with its inside as readable as Enter draws it, 
   const natural = inside(synth, bounds).k;
   const k = linkScale(synth, bounds);
   assert.ok(Math.abs(k - natural * GROW_MAX) < 1e-12, `capped: ${k} = ${natural} × ${GROW_MAX}`);
-  assert.ok(Math.abs(k - 0.363) < 0.001, `measured 0.363: ${k}`);
+  // 0.339 since its sums are instances of their own (ADR 0054, 2026-11-05; 0.363 before).
+  assert.ok(Math.abs(k - 0.339) < 0.001, `measured 0.339: ${k}`);
   // Opened (pinned) at the scale Enter draws it at, its inside is drawn at READ_K.
   const view = { k: readableAt(synth, bounds), ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
   const drawn = scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
   assert.deepEqual(drawn.levels.map((l) => l.path), ['', '/synth']);
   assert.ok(Math.abs(drawn.levels[1].transform.k - READ_K) < 1e-9, `inside at ${drawn.levels[1].transform.k}`);
-  // The surrounding level is still drawn around it (its boxes moved out of the frame's way: off this small stage, on a larger one).
-  assert.ok(!drawn.levels[0].behind);
+  // The surrounding level is still drawn around it on a larger stage (its boxes moved out of the frame's way; on this small one
+  // the inside, larger since its sums are instances of their own, ADR 0054, fills the stage).
   const wide = scene({ layoutOf: studioOf, view: { ...view, x: 1000, y: 600 }, viewport: { w: 2000, h: 1200 }, pinned: SYNTH });
+  assert.ok(!wide.levels[0].behind);
   assert.ok(wide.levels[0].nodes.length > 1, `${wide.levels[0].nodes.map((n) => n.name)}`);
 });
 

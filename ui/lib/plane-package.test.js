@@ -212,3 +212,74 @@ test('the Engine’s inside lies in the package’s body, its edges at the packa
   const both = Math.max((b + 1) / synth.card.body.w, (REVEAL[1] + 1) / chip.body.w);
   assert.deepEqual(chipPath(cards, centre, both, inside).map((x) => x.id), ['package card:mono-synth', 'card synth']);
 });
+
+/**
+ * Every drawn way at a level as segments with its net: a wire by its source (a fan-out one net), a control's leg by the
+ * parameter it comes from; `[{net, a, b}]`, and the dots `[{net, x, y}]`.
+ */
+function waysOf(laid) {
+  const segs = [];
+  const dots = [];
+  const add = (net, points, junctions = []) => {
+    for (let i = 1; i < points.length; i++) segs.push({ net, a: points[i - 1], b: points[i] });
+    for (const j of junctions) dots.push({ net, ...j });
+  };
+  for (const w of laid.wires) add(`wire ${String(w.from).replace(/^\//, '')}`, w.points, w.junctions);
+  for (const b of laid.binds ?? []) add(`bind ${b.export ?? b.address}`, b.points, b.junctions);
+  return { segs, dots };
+}
+
+/** The length two axis-parallel segments run along one another (0 when they only touch or cross). */
+function alongLength(s, t) {
+  const eps = 1e-6;
+  const vertical = (q) => Math.abs(q.a.x - q.b.x) < eps;
+  const horizontal = (q) => Math.abs(q.a.y - q.b.y) < eps;
+  const span = (lo1, hi1, lo2, hi2) => Math.min(hi1, hi2) - Math.max(lo1, lo2);
+  if (vertical(s) && vertical(t) && Math.abs(s.a.x - t.a.x) < eps && !(horizontal(s) && horizontal(t)))
+    return span(Math.min(s.a.y, s.b.y), Math.max(s.a.y, s.b.y), Math.min(t.a.y, t.b.y), Math.max(t.a.y, t.b.y));
+  if (horizontal(s) && horizontal(t) && Math.abs(s.a.y - t.a.y) < eps)
+    return span(Math.min(s.a.x, s.b.x), Math.max(s.a.x, s.b.x), Math.min(t.a.x, t.b.x), Math.max(t.a.x, t.b.x));
+  return 0;
+}
+
+/** Whether point `p` lies inside segment `s` (not at its ends). */
+function midSegment(p, s) {
+  const eps = 1e-6;
+  if (Math.abs(s.a.x - s.b.x) < eps && Math.abs(p.x - s.a.x) < eps) return p.y > Math.min(s.a.y, s.b.y) + eps && p.y < Math.max(s.a.y, s.b.y) - eps;
+  if (Math.abs(s.a.y - s.b.y) < eps && Math.abs(p.y - s.a.y) < eps) return p.x > Math.min(s.a.x, s.b.x) + eps && p.x < Math.max(s.a.x, s.b.x) - eps;
+  return false;
+}
+
+/** The package and every chip inside it, laid as they are drawn: `[{name, laid}]`. */
+function levelsOf(e) {
+  const out = [{ name: e.entry, laid: e }];
+  const walk = (laid, path, depth) => {
+    for (const card of laid.cards) {
+      if (!card.composite || depth > 4) continue;
+      const inside = insideOf({ graph: STUDIO, card, pins: laid.pins, scale: laid.scale });
+      if (!inside) continue;
+      out.push({ name: `${path}/${card.name}`, laid: inside });
+      walk(inside, `${path}/${card.name}`, depth + 1);
+    }
+  };
+  walk(e, e.entry, 0);
+  return out;
+}
+
+test('no way runs along another’s at any level (they may cross), and a dot only where a way branches off its own net', () => {
+  const s = studio(withKnobs);
+  const problems = [];
+  for (const e of s.engines) {
+    for (const { name, laid } of levelsOf(e)) {
+      const { segs, dots } = waysOf(laid);
+      const tol = 0.05 * laid.scale;
+      for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+        if (segs[i].net === segs[j].net) continue;
+        const l = alongLength(segs[i], segs[j]);
+        if (l > tol) problems.push(`${name}: ${segs[i].net} along ${segs[j].net} (${l.toFixed(2)})`);
+      }
+      for (const d of dots) if (!segs.some((q) => q.net === d.net && midSegment(d, q))) problems.push(`${name}: a dot of ${d.net} at ${d.x.toFixed(1)},${d.y.toFixed(1)} on no run of its net`);
+    }
+  }
+  assert.deepEqual(problems, []);
+});

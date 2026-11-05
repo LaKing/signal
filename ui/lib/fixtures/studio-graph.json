@@ -4805,12 +4805,18 @@
           "converters": [],
           "from": "o1_oct_step.out",
           "scale": 0.6931471805599453,
-          "to": "o1_exp_in.in"
+          "to": "o1_exp_sum.b"
         },
         {
           "converters": [],
           "from": "o1_det.out",
           "scale": 0.0005776226504666211,
+          "to": "o1_exp_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "o1_exp_sum.out",
+          "scale": null,
           "to": "o1_exp_in.in"
         },
         {
@@ -4853,12 +4859,18 @@
           "converters": [],
           "from": "o2_oct_step.out",
           "scale": 0.6931471805599453,
-          "to": "o2_exp_in.in"
+          "to": "o2_exp_sum.b"
         },
         {
           "converters": [],
           "from": "o2_det.out",
           "scale": 0.0005776226504666211,
+          "to": "o2_exp_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "o2_exp_sum.out",
+          "scale": null,
           "to": "o2_exp_in.in"
         },
         {
@@ -4901,12 +4913,18 @@
           "converters": [],
           "from": "o3_oct_step.out",
           "scale": 0.6931471805599453,
-          "to": "o3_exp_in.in"
+          "to": "o3_exp_sum.b"
         },
         {
           "converters": [],
           "from": "o3_det.out",
           "scale": 0.0005776226504666211,
+          "to": "o3_exp_sum.a"
+        },
+        {
+          "converters": [],
+          "from": "o3_exp_sum.out",
+          "scale": null,
           "to": "o3_exp_in.in"
         },
         {
@@ -4973,7 +4991,7 @@
           "converters": [],
           "from": "env_amt.out",
           "scale": null,
-          "to": "ladder.cutoff_hz"
+          "to": "cutoff_mod.a"
         },
         {
           "converters": [],
@@ -4984,6 +5002,12 @@
         {
           "converters": [],
           "from": "key_amt.out",
+          "scale": null,
+          "to": "cutoff_mod.b"
+        },
+        {
+          "converters": [],
+          "from": "cutoff_mod.out",
           "scale": null,
           "to": "ladder.cutoff_hz"
         },
@@ -5496,6 +5520,45 @@
           ]
         },
         {
+          "address": "o1_exp_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "o1_exp_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "o1_exp_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o1_exp_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o1_exp_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
           "address": "o1_ratio",
           "composite": false,
           "module": "std.exp",
@@ -5850,6 +5913,45 @@
             },
             {
               "address": "o2_exp_in.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "o2_exp_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "o2_exp_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "o2_exp_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o2_exp_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o2_exp_sum.out",
               "direction": "out",
               "kind": "generic",
               "name": "out",
@@ -6226,6 +6328,45 @@
           ]
         },
         {
+          "address": "o3_exp_sum",
+          "composite": false,
+          "module": "std.add",
+          "name": "o3_exp_sum",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "o3_exp_sum.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o3_exp_sum.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "o3_exp_sum.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
           "address": "o3_ratio",
           "composite": false,
           "module": "std.exp",
@@ -6589,6 +6730,45 @@
               "direction": "out",
               "kind": "audio",
               "name": "lp12",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "cutoff_mod",
+          "composite": false,
+          "module": "std.add",
+          "name": "cutoff_mod",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "cutoff_mod.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "cutoff_mod.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "cutoff_mod.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
               "range": null,
               "rate": 1,
               "shape": "signal",
@@ -8240,24 +8420,36 @@
           "converters": [],
           "from": "tune.out",
           "scale": null,
-          "to": "osc_a.freq"
+          "to": "freq_a.b"
         },
         {
           "converters": [],
           "from": "tune.out",
           "scale": 1.83,
-          "to": "osc_b.freq"
+          "to": "freq_b.b"
         },
         {
           "converters": [],
           "from": "pitch_env.out",
           "scale": 60.0,
+          "to": "freq_a.a"
+        },
+        {
+          "converters": [],
+          "from": "freq_a.out",
+          "scale": null,
           "to": "osc_a.freq"
         },
         {
           "converters": [],
           "from": "pitch_env.out",
           "scale": 90.0,
+          "to": "freq_b.a"
+        },
+        {
+          "converters": [],
+          "from": "freq_b.out",
+          "scale": null,
           "to": "osc_b.freq"
         },
         {
@@ -8509,6 +8701,45 @@
           ]
         },
         {
+          "address": "freq_a",
+          "composite": false,
+          "module": "std.add",
+          "name": "freq_a",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "freq_a.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "freq_a.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "freq_a.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
           "address": "osc_b",
           "composite": false,
           "module": "std.sine_osc",
@@ -8548,6 +8779,45 @@
                 "max": 1.0,
                 "min": -1.0
               },
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "freq_b",
+          "composite": false,
+          "module": "std.add",
+          "name": "freq_b",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "freq_b.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "freq_b.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "freq_b.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
               "rate": 1,
               "shape": "signal",
               "unit": null
@@ -9305,7 +9575,7 @@
           "converters": [],
           "from": "wow_depth.out",
           "scale": null,
-          "to": "delay.time_ms"
+          "to": "time_mod.b"
         },
         {
           "converters": [],
@@ -9328,6 +9598,12 @@
         {
           "converters": [],
           "from": "flutter_depth.out",
+          "scale": null,
+          "to": "time_mod.a"
+        },
+        {
+          "converters": [],
+          "from": "time_mod.out",
           "scale": null,
           "to": "delay.time_ms"
         },
@@ -9383,6 +9659,12 @@
           "converters": [],
           "from": "fb_vca.out",
           "scale": null,
+          "to": "feed.b"
+        },
+        {
+          "converters": [],
+          "from": "feed.out",
+          "scale": null,
           "to": "delay.in"
         },
         {
@@ -9432,14 +9714,14 @@
         {
           "address": "in",
           "direction": "in",
-          "kind": "audio",
+          "kind": "generic",
           "name": "in",
           "order": 0,
           "range": null,
           "rate": 1,
           "shape": "signal",
           "to": [
-            "delay.in",
+            "feed.a",
             "dry.a"
           ],
           "unit": null
@@ -9481,6 +9763,84 @@
               "address": "delay.out",
               "direction": "out",
               "kind": "audio",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "feed",
+          "composite": false,
+          "module": "std.add",
+          "name": "feed",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "feed.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "feed.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "feed.out",
+              "direction": "out",
+              "kind": "generic",
+              "name": "out",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            }
+          ]
+        },
+        {
+          "address": "time_mod",
+          "composite": false,
+          "module": "std.add",
+          "name": "time_mod",
+          "parameters": [],
+          "ports": [
+            {
+              "address": "time_mod.a",
+              "direction": "in",
+              "kind": "generic",
+              "name": "a",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "time_mod.b",
+              "direction": "in",
+              "kind": "generic",
+              "name": "b",
+              "range": null,
+              "rate": 1,
+              "shape": "signal",
+              "unit": null
+            },
+            {
+              "address": "time_mod.out",
+              "direction": "out",
+              "kind": "generic",
               "name": "out",
               "range": null,
               "rate": 1,
@@ -12575,7 +12935,7 @@
           {
             "address": "/echo.in",
             "direction": "in",
-            "kind": "audio",
+            "kind": "generic",
             "name": "in",
             "range": null,
             "rate": 1,

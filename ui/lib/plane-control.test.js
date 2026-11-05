@@ -43,7 +43,7 @@ test('a bind’s targets: the parameter, then the export’s targets inside the 
   assert.deepEqual(bindTargets('/nothing', STUDIO), []);
 });
 
-test('the studio’s cutoff: the filter contour and the key tracking drive ladder.cutoff_hz inside the engine, so they land on the cutoff knob', () => {
+test('the studio’s cutoff: the filter contour and the key tracking, summed (ADR 0054), drive ladder.cutoff_hz inside the engine, so they land on the cutoff knob', () => {
   const cards = studioCards();
   const owner = assignInstruments({ instances: STUDIO.top.instances, connections: STUDIO.top.connections, cards });
   const binds = cards.find((c) => c.id === 'mono-synth').binds;
@@ -54,11 +54,10 @@ test('the studio’s cutoff: the filter contour and the key tracking drive ladde
       // The glide's own forwarding is no automation; the oscillators' pitch chain drives no bound parameter.
       '/synth.glide ← /synth/hz_none.out → /synth/glide.rise_ms (engine, inside moog_voice)',
       '/synth.glide ← /synth/hz_none.out → /synth/glide.fall_ms (engine, inside moog_voice)',
-      '/synth.cutoff ← /synth/env_amt.out → /synth/ladder.cutoff_hz (engine, inside moog_voice)',
-      '/synth.cutoff ← /synth/key_amt.out → /synth/ladder.cutoff_hz (engine, inside moog_voice)',
+      '/synth.cutoff ← /synth/cutoff_mod.out → /synth/ladder.cutoff_hz (engine, inside moog_voice)',
     ],
   );
-  assert.deepEqual(autos[2].written, { from: 'env_amt.out', to: 'ladder.cutoff_hz' });
+  assert.deepEqual(autos[2].written, { from: 'cutoff_mod.out', to: 'ladder.cutoff_hz' });
   assert.deepEqual(engineOf(SYNTH, owner), ['melody', 'synth']);
 });
 
@@ -122,7 +121,7 @@ test('the Control plane: the cube clear of every control, legs that never cross,
   // The cutoff's automation lands on the cutoff knob's top, from the cube's automation pins.
   const cutoff = controls.find((k) => k.binds[0] === '/synth.cutoff');
   const landing = c.wires.filter((w) => w.control === cutoff.id);
-  assert.equal(landing.length, 2);
+  assert.equal(landing.length, 1);
   for (const w of landing) {
     assert.equal(w.points.at(-1).y, cutoff.rect.y);
     assert.ok(c.autoPins.some((p) => p.auto === w.auto.id));
@@ -168,7 +167,7 @@ test('automation and external cables never run over a control: corridors between
   const controls = binds.map((address, i) => ({ id: `c${i}`, tag: 'signal-knob', binds: [address], writes: true, rect: { x: 40 + (i % 10) * 70, y: rect.y + 40 + Math.floor(i / 10) * 140, w: 56, h: 100 } }));
   const autos = automations({ entry: SYNTH, binds, owner, graph });
   const c = controlLayout({ rect, controls, engine: engineOf(SYNTH, owner), autos, edgeYs: new Map([['/synth.cutoff', 160]]), inner: new Map() });
-  assert.ok(c.wires.length >= 5);
+  assert.ok(c.wires.length >= 4);
   const through = (a, b, r) => {
     const lo = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) };
     const hi = { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) };

@@ -23,6 +23,8 @@ Since 0.2.0 (there is no 0.3 release; the next is 0.4): projects inside projects
 
 ### Changed
 
+- **One connection per input** (ADR 0054, the owner's decision of 2026-11-05). An input, signal or events, and a parameter take one connection; a fan-in still plays, with a warning (`fan_in`), and the editors refuse to make one (`patch`: `fan-in`). Summing is `std.add` or `std.mix`, merging events the new `std.merge`. The built-in library (`lib.ladder_voice`, `lib.analog_snare`, `lib.tape_echo`, `lib.lfo_shapes`) and the example projects are migrated, bit for bit (every source on the module's input in the old canonical order).
+
 - Signal.app's toolbar has no Play or Stop. A project plays while the power is on and starts and stops from its own panel.
 - **The device's clock is the run's** (ADR 0036). Signal plays at the output device's rate and never switches it, so it joins the device without a glitch. When a device does not start, Signal says in plain words which rates it supports and what to do.
 - The wheel scrolls the page. A control takes the wheel only when it is clicked or focused, while ⌥ is held, or when it fills its window, and a hint says how.

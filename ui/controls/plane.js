@@ -127,6 +127,8 @@ function zoomPicksLayer() {
 }
 
 /** The automation wires' arrowhead colours, by kind (the k-* classes' colours). */
+/** A combine mark's sign by the parameter's `combine`. */
+const COMBINE_SIGN = { add: '+', multiply: '×', replace: '=' };
 const ARROW_COLOURS = { audio: '#4fc3f7', control: '#b39ddb', gate: '#ff6b6b', frequency: '#c6e05a', events: '#3ecf8e', vector: '#f48fb1', generic: '#9aa4b2' };
 
 /** The zoom lock (the bar's switch; per viewer, localStorage): the wheel scrolls up and down, the pointer zooms nothing. */
@@ -330,7 +332,7 @@ svg.wiring text, svg.control text, svg.engine text { font-family: -apple-system,
 .e-pin { fill: var(--signal-board-bg, #0e1014); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .e-wire { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 /* The control signal into the engine, in the Control layer's amber: a bound parameter's leg from the package's connector. */
-.e-bind { stroke: var(--signal-effective, #ffb74d); } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
+.e-bind { stroke: var(--signal-effective, #ffb74d); } .e-combine circle { fill: var(--signal-board-bg, #0e1014); stroke: var(--signal-effective, #ffb74d); } .e-combine text { fill: var(--signal-effective, #ffb74d); font-weight: 700; pointer-events: none; } .e-junction.e-bind-dot { fill: var(--signal-effective, #ffb74d); }
 .e-pin.e-bind-pin, .e-pin.connected.e-bind-pin { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-board-bg, #0e1014); }
 .e-junction { stroke: none; }
 .e-plain { fill: #1d232c; pointer-events: none; }
@@ -2078,6 +2080,14 @@ export class SignalPlane extends HTMLElement {
       wires.append(path);
       for (const j of b.junctions ?? []) wires.append(svg('circle', { class: 'e-junction e-bind-dot', cx: j.x, cy: j.y, r: 3 * k }));
     }
+    // Where a parameter's control and its connection combine (its declared `combine`): a ring with the operation, not a dot.
+    for (const c of laid.combines ?? []) {
+      const mark = svg('g', { class: 'e-combine' });
+      mark.append(svg('circle', { cx: c.x, cy: c.y, r: 3.5 * k, 'stroke-width': 1.2 * k }));
+      mark.append(svg('text', { x: c.x, y: c.y + 1.9 * k, 'font-size': 6 * k, 'text-anchor': 'middle' }, COMBINE_SIGN[c.mode] ?? '+'));
+      mark.append(svg('title', {}, `${full(c.address)}: its control and its connection combined (${c.mode})`));
+      wires.append(mark);
+    }
     g.append(wires);
     const composites = new Map();
     for (const c of laid.cards) {
@@ -3155,7 +3165,9 @@ export class SignalPlane extends HTMLElement {
       const want = g.end === 'from' ? 'out' : 'in';
       if (hit.kind === 'cable') return to?.kind === 'port' && to.port.side === want ? point(to) : null;
       if (hit.kind === 'auto') return g.end === 'to' ? control() : to?.kind === 'auto-pin' || to?.kind === 'external' ? point(to) : null;
-      if (hit.kind === 'e-wire') return to?.kind === 'e-pin' && to.side === want && (to.chip === hit.chip || (hit.frame && to.cardChip === hit.chip)) ? point(to) : null;
+      // ADR 0054: an input that takes a connection already is no target (but the wire's own end).
+      const taken = (pin) => pin?.side === 'in' && pin.wired && !(g.end === 'to' && pin.address === hit.to);
+      if (hit.kind === 'e-wire') return to?.kind === 'e-pin' && to.side === want && !taken(to) && (to.chip === hit.chip || (hit.frame && to.cardChip === hit.chip)) ? point(to) : null;
       if (hit.kind === 'e-bind' && !hit.prefix) return to?.kind === 'e-pin' && to.parameter && !to.prefix ? point(to) : to?.kind === 'e-card' && !to.prefix ? box(to) : null;
       if (hit.kind === 'e-bind' && g.end === 'from') return to?.kind === 'e-pin' && to.side === 'in' && to.cardChip === hit.chip ? point(to) : null;
       if (hit.kind === 'e-bind') return to?.kind === 'e-pin' && to.parameter && to.chip === hit.chip ? point(to) : to?.kind === 'e-card' && to.chip === hit.chip ? box(to) : null;
@@ -3168,7 +3180,7 @@ export class SignalPlane extends HTMLElement {
     if (hit.kind === 'via') return to?.kind === 'param' ? point(to) : to?.kind === 'cube' ? box(to) : null;
     if (hit.kind === 'auto-pin' || hit.kind === 'external' || hit.kind === 'cube') return control();
     if (hit.kind === 'e-pin') {
-      if (to?.kind === 'e-pin' && to !== hit && (to.side !== hit.side || to.cardChip === hit.chip || hit.cardChip === to.chip)) return point(to);
+      if (to?.kind === 'e-pin' && to !== hit && !(to.side === 'in' && to.wired && hit.side === 'out') && (to.side !== hit.side || to.cardChip === hit.chip || hit.cardChip === to.chip)) return point(to);
       return to?.kind === 'e-card' && to.chip === hit.chip && to.name !== hit.card ? box(to) : null;
     }
     return null;
