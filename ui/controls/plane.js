@@ -2104,8 +2104,8 @@ export class SignalPlane extends HTMLElement {
       g.append(card);
     }
     for (const p of laid.pins) {
-      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}${p.fanIn ? ' fan-in' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5), ...(p.fanIn ? { 'stroke-dasharray': `${1.5 * k} ${1.5 * k}` } : {}) }), pinKey(p.side, full(p.address)), keyed);
-      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? `a parameter${p.bind ? ' its control sets' : p.connected ? ' a connection drives' : ''}` : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})${p.fanIn ? ': more than one way into it; one input takes one connection (ADR 0054), a std.add, std.mix or std.merge sums them' : ''}`));
+      const dot = this.keyed(svg('circle', { class: `e-pin k-${p.kind}${p.connected ? ' connected' : ''}${p.bind ? ' e-bind-pin' : ''}`, cx: p.x, cy: p.y, r: 3 * k, ...line(1.5) }), pinKey(p.side, full(p.address)), keyed);
+      dot.append(svg('title', {}, `${full(p.address)} (${p.parameter ? `a parameter${p.bind ? ' its control sets' : p.connected ? ' a connection drives' : ''}` : `${p.kind} ${p.side === 'in' ? 'input' : 'output'}`})`));
       // A chip's pin labels fade out as its inside comes in (the owner's look, 2026-11-03: they grew over it), kept legible by a halo till then.
       const chip = composites.get(p.card);
       const label = svg('text', { class: `e-pin-label${chip ? ' halo' : ''}`, x: p.side === 'in' ? p.x + 6 * k : p.x - 6 * k, y: p.y + 3 * k, 'font-size': 9 * k, 'text-anchor': p.side === 'in' ? 'start' : 'end', ...(chip ? { 'stroke-width': 2.5 * k } : {}) }, p.name);
@@ -3155,12 +3155,14 @@ export class SignalPlane extends HTMLElement {
       const want = g.end === 'from' ? 'out' : 'in';
       if (hit.kind === 'cable') return to?.kind === 'port' && to.port.side === want ? point(to) : null;
       if (hit.kind === 'auto') return g.end === 'to' ? control() : to?.kind === 'auto-pin' || to?.kind === 'external' ? point(to) : null;
-      // ADR 0054: an input that takes a connection already is no target (but the wire's own end).
-      const taken = (pin) => pin?.side === 'in' && pin.wired && !(g.end === 'to' && pin.address === hit.to);
+      // ADR 0054: an input that takes a connection already is no target (but the wire's own end), nor inside a chip a
+      // parameter an export sets (a control and a connection never both; the patch refuses it, `fan-in`).
+      const taken = (pin) => pin?.side === 'in' && (pin.wired || (pin.bound && pin.prefix)) && !(g.end === 'to' && pin.address === hit.to);
       if (hit.kind === 'e-wire') return to?.kind === 'e-pin' && to.side === want && !taken(to) && (to.chip === hit.chip || (hit.frame && to.cardChip === hit.chip)) ? point(to) : null;
       if (hit.kind === 'e-bind' && !hit.prefix) return to?.kind === 'e-pin' && to.parameter && !to.prefix ? point(to) : to?.kind === 'e-card' && !to.prefix ? box(to) : null;
       if (hit.kind === 'e-bind' && g.end === 'from') return to?.kind === 'e-pin' && to.side === 'in' && to.cardChip === hit.chip ? point(to) : null;
-      if (hit.kind === 'e-bind') return to?.kind === 'e-pin' && to.parameter && to.chip === hit.chip ? point(to) : to?.kind === 'e-card' && to.chip === hit.chip ? box(to) : null;
+      // Inside a chip an export's leg never onto a parameter a connection drives (ADR 0054).
+      if (hit.kind === 'e-bind') return to?.kind === 'e-pin' && to.parameter && !to.wired && to.chip === hit.chip ? point(to) : to?.kind === 'e-card' && to.chip === hit.chip ? box(to) : null;
       return null;
     }
     if (hit.kind === 'port') {

@@ -101,7 +101,7 @@ export function engineItems(laid, { entry, level = '', prefix = '', chip = null 
     const card = cardById.get(p.card);
     const name = card?.name ?? String(p.address).replace(/^\//, '').split('.')[0];
     const address = fullAddress(prefix, p.address);
-    items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey(p.side, address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: name, port: p.name, side: p.side, parameter: p.parameter, wired: Boolean(p.wired), address, local: `${name}.${p.name}`, cardChip: card ? chipOf(card) : null, module: card?.module ?? null });
+    items.push({ kind: 'e-pin', id: `${scope}|${p.id}`, key: pinKey(p.side, address), x: p.x, y: p.y, entry, patchLevel: level, prefix, chip, card: name, port: p.name, side: p.side, parameter: p.parameter, wired: Boolean(p.wired), bound: Boolean(p.bind), address, local: `${name}.${p.name}`, cardChip: card ? chipOf(card) : null, module: card?.module ?? null });
   }
   // The control signal's legs into the parameters (`layLevel`'s `binds`): each selectable, by the parameter it sets.
   for (const b of laid?.binds ?? []) {

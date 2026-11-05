@@ -468,7 +468,9 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     const legNets = [...m.values()].filter((iv) => legInfo.has(iv.key));
     const order = (iv) => (legInfo.get(iv.key).right ? legInfo.get(iv.key).d : -legInfo.get(iv.key).d);
     legNets.sort((a, b) => order(a) - order(b) || (a.key < b.key ? -1 : 1));
-    const tracks = orderedTracks([...m.values()].filter((iv) => !legInfo.has(iv.key)), (PAD * scale) / 2);
+    // Two nets share a track only a row and a half apart: one ending a pin's row above where the other starts would read as one
+    // line through the other's branch dot (the owner's, 2026-11-05: @inputs.hz down onto glide.in over glide_sum's branch).
+    const tracks = orderedTracks([...m.values()].filter((iv) => !legInfo.has(iv.key)), 1.5 * ROW * scale);
     const first = Math.max(0, ...[...tracks.values()].map((t) => t + 1));
     legNets.forEach((iv, t) => tracks.set(iv.key, first + t));
     const count = Math.max(1, ...[...tracks.values()].map((t) => t + 1));
@@ -543,13 +545,6 @@ function layPass({ level, names = null, area, edgeIns = new Map(), edgeOuts = ne
     if (farther && !farther.junctions.some((j) => j.y === turn.y)) farther.junctions.push({ x: turn.x, y: turn.y });
   }
   const ways = [...legsOut, ...fromPins];
-  // An input more than one way enters (ADR 0054: one connection per input; a file from before it, or a control and a
-  // connection on one parameter): marked, never summed on the drawing; a std.add, std.mix or std.merge does that.
-  for (const q of pins) {
-    if (q.side !== 'in') continue;
-    const at = (pts) => pts.length && Math.abs(pts.at(-1).x - q.x) < 1e-9 && Math.abs(pts.at(-1).y - q.y) < 1e-9;
-    if (wiresOut.filter((w) => at(w.points)).length + ways.filter((b) => at(b.points)).length > 1) q.fanIn = true;
-  }
   return { scale, cards, pins, wires: wiresOut, edges, lanes, reserved, binds: ways };
 }
 

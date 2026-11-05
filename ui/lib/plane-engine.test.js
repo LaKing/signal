@@ -220,6 +220,19 @@ test('odd graphs: a port inside an instance is not its own, two wires entering f
   for (const w of laid.wires) for (const p of w.points) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
 });
 
+test('two nets on one track are more than a pin’s row apart (else they read as one line, through the other’s branch dot)', () => {
+  const { engines } = studio();
+  const levels = engines.flatMap((e) => [e, ...e.cards.filter((c) => c.composite).map((card) => insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale }))]);
+  for (const laid of levels) {
+    const row = 16 * laid.scale;
+    const runs = laid.wires.flatMap((w) => w.points.slice(1).map((q, i) => [w.points[i], q]).filter(([p, q]) => Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) > 1e-9).map(([p, q]) => ({ net: w.from, x: p.x, lo: Math.min(p.y, q.y), hi: Math.max(p.y, q.y), w })));
+    for (const a of runs) for (const b of runs) {
+      if (a.net === b.net || Math.abs(a.x - b.x) > 1e-9 || a.hi > b.lo) continue;
+      assert.ok(b.lo - a.hi > row, `${a.w.from} → ${a.w.to} ends ${(b.lo - a.hi).toFixed(3)} above ${b.w.from} → ${b.w.to} on one track (a row: ${row.toFixed(3)})`);
+    }
+  }
+});
+
 // Step 2: a composite's inside, revealed by zoom in its card's body (the owner's, 2026-11-03).
 
 test('a chip’s inside: every inner instance inside the card’s body, apart; the edges at the card’s pins’ heights; an input fanning out one net', () => {
