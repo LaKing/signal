@@ -66,9 +66,10 @@ fn kick_pulse_and_physical_av_are_described_as_written(transport: Transport) {
     let mut rig = project_rig("graph-pulse", transport, "pulse");
     let (mut ws, _) = rig.client();
     let g = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
-    assert_eq!(names(&g["top"]).len(), 17);
+    // Seventeen and its two sums (ADR 0054).
+    assert_eq!(names(&g["top"]).len(), 19);
     let connections = g["top"]["connections"].as_array().unwrap();
-    assert_eq!(connections.len(), 20);
+    assert_eq!(connections.len(), 22);
     assert!(connections.iter().all(|c| c["converters"] == json!([])));
     assert_eq!(g["composites"], json!({}));
     rig.finish();

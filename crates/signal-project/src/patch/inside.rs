@@ -396,6 +396,35 @@ impl Patching<'_> {
             if ports.iter().any(|p| p == port) {
                 return Err(bad(format!("the export `{name}` reaches `{port}` already")));
             }
+            // ADR 0054: an inner input takes one connection; an exported input is one (a parameter's export sets its base).
+            if role == Role::Input {
+                let other = doc
+                    .get("exports")
+                    .and_then(TomlItem::as_table_like)
+                    .and_then(|t| t.get("inputs"))
+                    .and_then(TomlItem::as_table_like)
+                    .and_then(|t| {
+                        t.iter()
+                            .find(|(n, item)| {
+                                *n != name && targets(item, role).iter().any(|p| p == port)
+                            })
+                            .map(|(n, _)| format!("the input `{n}`"))
+                    });
+                if let Some(from) = m
+                    .conns
+                    .iter()
+                    .find(|c| c.to == port)
+                    .map(|c| c.from.clone())
+                    .or(other)
+                {
+                    return Err(refused(
+                        "fan-in",
+                        format!(
+                            "`{port}` already takes {from}: one input takes one connection (sum with std.add or std.mix, merge events with std.merge)"
+                        ),
+                    ));
+                }
+            }
             if role == Role::Output && !ports.is_empty() {
                 return Err(bad(format!(
                     "the output `{name}` is exported from `{}`: an exported output names one port; disconnect it first",

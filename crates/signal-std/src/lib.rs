@@ -41,6 +41,7 @@
 //! | `std.sample_hold` | [`SampleHold`] | direct | `event` |
 //! | `std.edge` | [`Edge`] | direct | `event` |
 //! | `std.clock_div` | [`ClockDiv`] | direct | `event` |
+//! | `std.merge` | [`Merge`] | direct | `event` |
 //! | `std.step_seq` | [`StepSeq`] | direct | `event` |
 //! | `std.string` | [`StringModel`] | direct | `physical` |
 //! | `std.modal` | [`Modal`] | direct | `physical` |
@@ -192,6 +193,7 @@ mod logic;
 mod mass_spring;
 mod math;
 mod memory;
+mod merge;
 mod mesh2d;
 mod mix;
 mod modal;
@@ -253,6 +255,7 @@ pub use logic::{And, Compare, Not, Or, Select};
 pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
 pub use memory::{BUFFER_CAPACITIES, Buffer, Buffer1k, Buffer1m, Buffer64k, Table};
+pub use merge::Merge;
 pub use mesh2d::Mesh2d;
 pub use mix::Mix;
 pub use modal::Modal;
@@ -439,6 +442,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<SampleHold>(),
         direct::<Edge>(),
         direct::<ClockDiv>(),
+        direct::<Merge>(),
         direct::<StepSeq>(),
         direct::<StringModel>(),
         direct::<Modal>(),
@@ -833,7 +837,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 75] = [
+    const NAMES: [&str; 76] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -864,6 +868,7 @@ mod tests {
         "std.sample_hold",
         "std.edge",
         "std.clock_div",
+        "std.merge",
         "std.step_seq",
         "std.string",
         "std.modal",
@@ -1083,7 +1088,8 @@ mod tests {
             );
         }
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
-        for name in NAMES[40..].iter().copied().chain(vectors) {
+        // The M2.10-2 types (`std.merge`, ADR 0054, sits among the event types before them).
+        for name in NAMES[41..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");
@@ -1099,6 +1105,7 @@ mod tests {
             ("std.sample_hold", category::EVENT),
             ("std.edge", category::EVENT),
             ("std.clock_div", category::EVENT),
+            ("std.merge", category::EVENT),
         ] {
             assert_eq!(registry.get(name).unwrap().descriptor.category, Some(group));
         }

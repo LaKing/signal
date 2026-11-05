@@ -44,9 +44,11 @@ env = { module = "std.adsr", attack_ms = 4, decay_ms = 160, sustain = 0.25, rele
 sweep = { module = "std.lfo", freq_hz = 0.05 }
 # Low-pass; cutoff 500 Hz + 2400 Hz·env + 200 Hz·sweep.
 filter = { module = "std.svf", cutoff_hz = 500, q = 1.5 }
+cutoff_mod = { module = "std.add" }  # envelope + sweep (ADR 0054: a sum is a module)
 
 # Dotted eighth at 120 bpm: 3/4 of a 500 ms beat = 375 ms.
 delay = { module = "std.delay", time_ms = 375 }
+feed = { module = "std.add" }  # the filter and the damped return
 # Feedback at −6 dB through a one-pole low-pass that darkens each repeat.
 feedback = { module = "std.gain", db = -6 }
 damping = { module = "std.onepole", cutoff_hz = 2500 }
@@ -73,16 +75,18 @@ connections = [
   { from = "pulse.out", to = "gate.in" },
   { from = "gate.gate", to = "env.gate" },
   # Cutoff: envelope and sweep add to the 500 Hz base.
-  { from = "env.out", to = "filter.cutoff_hz", scale = 2400 },
-  { from = "sweep.out", to = "filter.cutoff_hz", scale = 200 },
+  { from = "env.out", to = "cutoff_mod.a", scale = 2400 },
+  { from = "sweep.out", to = "cutoff_mod.b", scale = 200 },
+  { from = "cutoff_mod.out", to = "filter.cutoff_hz" },
   { from = "osc.out", to = "filter.in" },
   # Dry signal, and into the delay.
   { from = "filter.lp", to = "mix.a" },
-  { from = "filter.lp", to = "delay.in" },
+  { from = "filter.lp", to = "feed.b" },
   # Feedback loop: delay → −6 dB → damping → back into the delay.
   { from = "delay.out", to = "feedback.in" },
   { from = "feedback.out", to = "damping.in" },
-  { from = "damping.lp", to = "delay.in" },
+  { from = "damping.lp", to = "feed.a" },
+  { from = "feed.out", to = "delay.in" },
   # Wet signal.
   { from = "delay.out", to = "mix.b" },
   # Stereo: the mix, without DC, panned by the drift.

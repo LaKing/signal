@@ -53,6 +53,8 @@ dc = { module = "std.dc_block" }
 
 # Gain chosen so the 4× oversampled peak stays ≤ −1 dBFS at every rate.
 out = { module = "std.audio_out", gain = 0.45 }
+mix_l = { module = "std.mix" }  # the four voices, left (ADR 0054: a sum is a module)
+mix_r = { module = "std.mix" }  # the four voices, right
 
 [wiring]
 connections = [
@@ -76,12 +78,14 @@ connections = [
   { from = "friction.out", to = "bow.velocity", scale = 4 },
   # The mix: the line left of centre, the bell right, the drum and the
   # cello in the middle.
-  { from = "string.out", to = "out.l", scale = 0.6 },
-  { from = "string.out", to = "out.r", scale = 0.4 },
-  { from = "bell.out", to = "out.l", scale = 0.13 },
-  { from = "bell.out", to = "out.r", scale = 0.2 },
-  { from = "drum.out", to = "out.l", scale = 1 },
-  { from = "drum.out", to = "out.r", scale = 1 },
-  { from = "dc.out", to = "out.l", scale = 1 },
-  { from = "dc.out", to = "out.r", scale = 1 },
+  { from = "string.out", to = "mix_l.d", scale = 0.6 },
+  { from = "string.out", to = "mix_r.d", scale = 0.4 },
+  { from = "bell.out", to = "mix_l.a", scale = 0.13 },
+  { from = "bell.out", to = "mix_r.a", scale = 0.2 },
+  { from = "drum.out", to = "mix_l.c", scale = 1 },
+  { from = "drum.out", to = "mix_r.c", scale = 1 },
+  { from = "dc.out", to = "mix_l.b", scale = 1 },
+  { from = "mix_l.out", to = "out.l" },
+  { from = "dc.out", to = "mix_r.b", scale = 1 },
+  { from = "mix_r.out", to = "out.r" },
 ]

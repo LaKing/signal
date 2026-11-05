@@ -370,6 +370,7 @@ expression: text
             "std.log",
             "std.mass_spring",
             "std.max",
+            "std.merge",
             "std.mesh2d",
             "std.mesh2d_audio",
             "std.min",

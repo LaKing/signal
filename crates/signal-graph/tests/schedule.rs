@@ -302,3 +302,55 @@ fn a_generic_end_through_a_converter_is_not_a_kind_mismatch() {
         .count();
     assert_eq!(converters, 2, "{:?}", plan.warnings);
 }
+
+/// ADR 0054 phase 1: two connections into one signal input, into one
+/// parameter and into one event input are each a fan-in warning, its sources
+/// in canonical order; a fan-out is none.
+#[test]
+fn a_fan_in_is_a_warning_and_a_fan_out_is_none() {
+    let project = composite(
+        "project",
+        vec![
+            inst("a", "test.osc"),
+            inst("b", "test.osc"),
+            inst("t1", "test.trig"),
+            inst("t2", "test.trig"),
+            inst("env", "test.env"),
+            inst("spk", "test.out"),
+            inst("spk2", "test.out"),
+        ],
+        vec![
+            conn("b.out", "spk.in"),
+            conn("a.out", "spk.in"),
+            conn("a.out", "spk2.in"),
+            conn("a.out", "b.freq"),
+            conn("env.out", "b.freq"),
+            conn("t1.out", "env.trig"),
+            conn("t2.out", "env.trig"),
+        ],
+    );
+    let plan = build(&project, &[]).unwrap();
+    let fan_ins: Vec<_> = plan
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, GraphWarning::FanIn { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        fan_ins,
+        [
+            GraphWarning::FanIn {
+                to: port_addr("/b.freq"),
+                from: vec![port_addr("/a.out"), port_addr("/env.out")],
+            },
+            GraphWarning::FanIn {
+                to: port_addr("/env.trig"),
+                from: vec![port_addr("/t1.out"), port_addr("/t2.out")],
+            },
+            GraphWarning::FanIn {
+                to: port_addr("/spk.in"),
+                from: vec![port_addr("/a.out"), port_addr("/b.out")],
+            },
+        ]
+    );
+}

@@ -35,6 +35,8 @@ name = "tape_delay"
 [instances]
 # Dotted eighth at 120 bpm: 3/4 of a 500 ms beat.
 delay = { module = "std.delay", time_ms = 375 }
+feed = { module = "std.add" }  # the input and the feedback into the tape (ADR 0054: a sum is a module)
+time_mod = { module = "std.add" }  # flutter + wow, added to the time knob (ADR 0054)
 
 # Wow: ±1.2 ms at 0.5 Hz. Flutter: white noise through two 5 Hz one-poles
 # measures 0.0076 RMS (0.028 peak over 30 s at 48 kHz), so ×15 moves the time
@@ -66,11 +68,12 @@ sum = { module = "std.add" }
 connections = [
   # Repeat time, wow and flutter.
   { from = "wow_lfo.out", to = "wow_depth.in" },
-  { from = "wow_depth.out", to = "delay.time_ms" },
+  { from = "wow_depth.out", to = "time_mod.b" },
   { from = "flutter_noise.out", to = "flutter_lp1.in" },
   { from = "flutter_lp1.lp", to = "flutter_lp2.in" },
   { from = "flutter_lp2.lp", to = "flutter_depth.in" },
-  { from = "flutter_depth.out", to = "delay.time_ms" },
+  { from = "flutter_depth.out", to = "time_mod.a" },
+  { from = "time_mod.out", to = "delay.time_ms" },
   # The feedback path: darken, saturate, scale, back into the delay.
   { from = "tone_amt.out", to = "tone_lim.in" },
   { from = "tone_lim.out", to = "tone.cutoff_hz" },
@@ -80,7 +83,8 @@ connections = [
   { from = "sat_norm.out", to = "fb_vca.a" },
   { from = "feedback.out", to = "fb_lim.in" },
   { from = "fb_lim.out", to = "fb_vca.b" },
-  { from = "fb_vca.out", to = "delay.in" },
+  { from = "fb_vca.out", to = "feed.b" },
+  { from = "feed.out", to = "delay.in" },
   # Dry and wet, crossfaded by the mix.
   { from = "mix_amt.out", to = "mix_lim.in" },
   { from = "mix_lim.out", to = "wet.b" },
@@ -92,7 +96,7 @@ connections = [
 ]
 
 [exports]
-inputs = { in = ["delay.in", "dry.a"] }
+inputs = { in = ["feed.a", "dry.a"] }
 outputs = { out = "sum.out" }
 
 # The exported parameters, each with its own range where it has one (ADR

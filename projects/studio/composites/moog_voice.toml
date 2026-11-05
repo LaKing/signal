@@ -49,6 +49,7 @@ o1_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
 o1_oct_step = { module = "std.round" }
 o1_det = { module = "std.const", value = 0 }
 o1_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o1_exp_sum = { module = "std.add" }  # octave + detune, in ln units (ADR 0054: a sum is a module)
 o1_ratio = { module = "std.exp" }
 o1_pitch = { module = "std.mul" }
 osc1 = { module = "std.osc", shape = 1, freq = 0 }
@@ -58,6 +59,7 @@ o2_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
 o2_oct_step = { module = "std.round" }
 o2_det = { module = "std.const", value = 7 }
 o2_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o2_exp_sum = { module = "std.add" }  # octave + detune
 o2_ratio = { module = "std.exp" }
 o2_pitch = { module = "std.mul" }
 osc2 = { module = "std.osc", shape = 1, freq = 0 }
@@ -67,6 +69,7 @@ o3_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
 o3_oct_step = { module = "std.round" }
 o3_det = { module = "std.const", value = -4 }
 o3_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o3_exp_sum = { module = "std.add" }  # octave + detune
 o3_ratio = { module = "std.exp" }
 o3_pitch = { module = "std.mul" }
 osc3 = { module = "std.osc", shape = 2, freq = 0 }
@@ -75,6 +78,7 @@ noise = { module = "std.noise" }
 mixer = { module = "std.mix", gain_a = 0.6, gain_b = 0.5, gain_c = 0.5, gain_d = 0 }
 
 ladder = { module = "std.ladder", cutoff_hz = 300, resonance = 0.45, drive = 1 }
+cutoff_mod = { module = "std.add" }  # filter contour + key tracking, added to the cutoff knob
 fenv = { module = "std.adsr", attack_ms = 3, decay_ms = 220, sustain = 0.2, release_ms = 180 }
 env_amt = { module = "std.scale", mul = 2600, add = 0 }
 key_amt = { module = "std.scale", mul = 0.5, add = 0 }
@@ -95,24 +99,27 @@ connections = [
   # Pitch: the glided hz times each oscillator's ratio.
   { from = "o1_oct.out", to = "o1_oct_lim.in" },
   { from = "o1_oct_lim.out", to = "o1_oct_step.in" },
-  { from = "o1_oct_step.out", to = "o1_exp_in.in", scale = 0.6931471805599453 },
-  { from = "o1_det.out", to = "o1_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o1_oct_step.out", to = "o1_exp_sum.b", scale = 0.6931471805599453 },
+  { from = "o1_det.out", to = "o1_exp_sum.a", scale = 0.0005776226504666211 },
+  { from = "o1_exp_sum.out", to = "o1_exp_in.in" },
   { from = "o1_exp_in.out", to = "o1_ratio.in" },
   { from = "pitch.out", to = "o1_pitch.a" },
   { from = "o1_ratio.out", to = "o1_pitch.b" },
   { from = "o1_pitch.out", to = "osc1.freq" },
   { from = "o2_oct.out", to = "o2_oct_lim.in" },
   { from = "o2_oct_lim.out", to = "o2_oct_step.in" },
-  { from = "o2_oct_step.out", to = "o2_exp_in.in", scale = 0.6931471805599453 },
-  { from = "o2_det.out", to = "o2_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o2_oct_step.out", to = "o2_exp_sum.b", scale = 0.6931471805599453 },
+  { from = "o2_det.out", to = "o2_exp_sum.a", scale = 0.0005776226504666211 },
+  { from = "o2_exp_sum.out", to = "o2_exp_in.in" },
   { from = "o2_exp_in.out", to = "o2_ratio.in" },
   { from = "pitch.out", to = "o2_pitch.a" },
   { from = "o2_ratio.out", to = "o2_pitch.b" },
   { from = "o2_pitch.out", to = "osc2.freq" },
   { from = "o3_oct.out", to = "o3_oct_lim.in" },
   { from = "o3_oct_lim.out", to = "o3_oct_step.in" },
-  { from = "o3_oct_step.out", to = "o3_exp_in.in", scale = 0.6931471805599453 },
-  { from = "o3_det.out", to = "o3_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o3_oct_step.out", to = "o3_exp_sum.b", scale = 0.6931471805599453 },
+  { from = "o3_det.out", to = "o3_exp_sum.a", scale = 0.0005776226504666211 },
+  { from = "o3_exp_sum.out", to = "o3_exp_in.in" },
   { from = "o3_exp_in.out", to = "o3_ratio.in" },
   { from = "pitch.out", to = "o3_pitch.a" },
   { from = "o3_ratio.out", to = "o3_pitch.b" },
@@ -125,9 +132,10 @@ connections = [
   # Filter and its contour.
   { from = "mixer.out", to = "ladder.in" },
   { from = "fenv.out", to = "env_amt.in" },
-  { from = "env_amt.out", to = "ladder.cutoff_hz" },
+  { from = "env_amt.out", to = "cutoff_mod.a" },
   { from = "pitch.out", to = "key_amt.in" },
-  { from = "key_amt.out", to = "ladder.cutoff_hz" },
+  { from = "key_amt.out", to = "cutoff_mod.b" },
+  { from = "cutoff_mod.out", to = "ladder.cutoff_hz" },
   { from = "ladder.lp", to = "trim.in" },
   # Loudness: the amp contour times the note's velocity.
   { from = "aenv.out", to = "velamp.a" },

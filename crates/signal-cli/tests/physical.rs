@@ -72,6 +72,8 @@ fn the_project_uses_the_four_physical_models() {
             "std.dc_block",
             "std.exciter",
             "std.mass_spring",
+            // Each channel's sum (ADR 0054).
+            "std.mix",
             "std.modal",
             "std.step_seq",
             "std.string",

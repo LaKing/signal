@@ -85,6 +85,8 @@ fn the_project_is_96_khz_seed_7_with_the_documented_patch() {
     assert_eq!(
         used,
         BTreeSet::from([
+            // The cutoff's and the delay's sums (ADR 0054).
+            "std.add",
             "std.adsr",
             "std.audio_out",
             "std.dc_block",

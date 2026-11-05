@@ -38,6 +38,8 @@ click = { module = "std.mul" }
 out = { module = "std.audio_out", gain = 0.4 }
 # The headphone mix: a device slot of role `cue`, stereo.
 cue = { device = { play = "stereo", role = "cue" }, gain = 0.5 }
+cue_l = { module = "std.add" }  # the click and the program, left (ADR 0054)
+cue_r = { module = "std.add" }  # right
 
 [wiring]
 connections = [
@@ -47,11 +49,13 @@ connections = [
   { from = "pluck.out", to = "vca.b" },
   { from = "vca.out", to = "out.l" },
   { from = "vca.out", to = "out.r" },
-  { from = "vca.out", to = "cue.l", scale = 0.5 },
-  { from = "vca.out", to = "cue.r", scale = 0.5 },
+  { from = "vca.out", to = "cue_l.b", scale = 0.5 },
+  { from = "vca.out", to = "cue_r.b", scale = 0.5 },
   { from = "transport.beat", to = "tick.trigger" },
   { from = "beep.out", to = "click.a" },
   { from = "tick.out", to = "click.b" },
-  { from = "click.out", to = "cue.l" },
-  { from = "click.out", to = "cue.r" },
+  { from = "click.out", to = "cue_l.a" },
+  { from = "cue_l.out", to = "cue.l" },
+  { from = "click.out", to = "cue_r.a" },
+  { from = "cue_r.out", to = "cue.r" },
 ]

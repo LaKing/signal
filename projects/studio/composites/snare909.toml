@@ -16,7 +16,9 @@ name = "snare909"
 tune = { module = "std.const", value = 185 }
 pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 15 }
 osc_a = { module = "std.sine_osc", freq = 0 }
+freq_a = { module = "std.add" }  # pitch sweep + tune (ADR 0054: a sum is a module)
 osc_b = { module = "std.sine_osc", freq = 0 }
+freq_b = { module = "std.add" }  # pitch sweep + tune
 tones = { module = "std.mix", gain_a = 0.6, gain_b = 0.4 }
 body_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 90 }
 body_amp = { module = "std.mul" }
@@ -33,10 +35,12 @@ level = { module = "std.gain", db = 0 }
 
 [wiring]
 connections = [
-  { from = "tune.out", to = "osc_a.freq" },
-  { from = "tune.out", to = "osc_b.freq", scale = 1.83 },
-  { from = "pitch_env.out", to = "osc_a.freq", scale = 60 },
-  { from = "pitch_env.out", to = "osc_b.freq", scale = 90 },
+  { from = "tune.out", to = "freq_a.b" },
+  { from = "tune.out", to = "freq_b.b", scale = 1.83 },
+  { from = "pitch_env.out", to = "freq_a.a", scale = 60 },
+  { from = "freq_a.out", to = "osc_a.freq" },
+  { from = "pitch_env.out", to = "freq_b.a", scale = 90 },
+  { from = "freq_b.out", to = "osc_b.freq" },
   { from = "osc_a.out", to = "tones.a" },
   { from = "osc_b.out", to = "tones.b" },
   { from = "body_env.out", to = "body_amp.a" },

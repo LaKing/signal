@@ -451,7 +451,7 @@ connections = [
     let copy = &made["composites/echo_inside.toml"];
     let library = crate::Library::builtin().get("tape_echo").unwrap();
     assert!(
-        copy.contains("inputs = { x = [\"delay.in\", \"dry.a\"] }"),
+        copy.contains("inputs = { x = [\"feed.a\", \"dry.a\"] }"),
         "{copy}"
     );
     assert!(copy.contains("inside_of = \"echo\""), "{copy}");
@@ -599,6 +599,15 @@ fn what_is_refused() {
     )
     .unwrap_err();
     assert_eq!(refused.code, "unknown-instance");
+    // ADR 0054: an inner input a connection takes is no export's (one input, one connection); a parameter's base is.
+    let refused = run(
+        &start,
+        "voice",
+        &[op(serde_json::json!({"op": "export.connect", "role": "input", "name": "in", "port": "amp.in"}))],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "fan-in");
+    assert!(run(&start, "voice", &[op(serde_json::json!({"op": "export.connect", "role": "parameter", "name": "level", "port": "amp.db"}))]).is_ok());
     let refused = run(
         &start,
         "voice",

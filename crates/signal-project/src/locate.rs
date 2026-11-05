@@ -215,6 +215,9 @@ impl<'a> Locator<'a> {
             | GraphWarning::ConstantBeyondRange { from, to, .. } => {
                 self.connection_or_instance(from, to)
             }
+            GraphWarning::FanIn { to, from } => from
+                .get(1)
+                .and_then(|from| self.connection_or_instance(from, to)),
             GraphWarning::NoSinkReachable { instance } => self.instance_key(instance),
             // ADR 0042, 0043: at the value as written (the outermost that wins).
             GraphWarning::ParameterCorrected { parameter, .. } => self.winning_value(parameter),

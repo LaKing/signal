@@ -38,6 +38,7 @@ half = { module = "std.const", value = 0.5 }
 square_gate = { module = "std.compare", mode = 3 }
 square = { module = "std.scale", mul = 2, add = -1 }
 random = { module = "std.random", lo = -1, hi = 1 }
+random_trigger = { module = "std.merge" }  # each wrap, the start and a reset (ADR 0054: events meet in a merge)
 start = { module = "std.const", value = 1 }
 start_edge = { module = "std.edge" }
 
@@ -64,9 +65,10 @@ connections = [
   { from = "phasor.phase", to = "square_gate.a" },
   { from = "half.out", to = "square_gate.b" },
   { from = "square_gate.out", to = "square.in" },
-  { from = "phasor.wrap", to = "random.trigger" },
+  { from = "phasor.wrap", to = "random_trigger.a" },
   { from = "start.out", to = "start_edge.in" },
-  { from = "start_edge.rise", to = "random.trigger" },
+  { from = "start_edge.rise", to = "random_trigger.b" },
+  { from = "random_trigger.out", to = "random.trigger" },
   # The chosen shape: 0 sine, 1 triangle, 2 saw, 3 square, 4 random.
   { from = "shape.out", to = "shape_lim.in" },
   { from = "shape_lim.out", to = "shape_step.in" },
@@ -89,7 +91,7 @@ connections = [
 ]
 
 [exports]
-inputs = { reset = ["phasor.reset", "random.trigger"] }
+inputs = { reset = ["phasor.reset", "random_trigger.c"] }
 outputs = { out = "pick_0.out", sine = "sine.out", triangle = "triangle.out", saw = "saw.out", square = "square.out", random = "random.out" }
 
 # Each exported parameter with its own range (ADR 0042).

@@ -561,6 +561,16 @@ pub enum GraphWarning {
         /// The parameter's range.
         range: Range,
     },
+    /// ADR 0054 phase 1: several connections into one input or parameter (a
+    /// fan-in). It still sums (a signal) or merges (events) in canonical
+    /// source order; summing and merging belong to a module (`std.add`,
+    /// `std.mix`, `std.merge`), and phase 2 makes this an error.
+    FanIn {
+        /// The input port or parameter.
+        to: PortAddress,
+        /// Its sources, as connected, in canonical order.
+        from: Vec<PortAddress>,
+    },
     /// No sink instance is reachable from this instance, so its output is not
     /// observed. It still runs (ADR 0016 §1).
     NoSinkReachable {
@@ -609,6 +619,18 @@ impl fmt::Display for GraphWarning {
                 range.max,
                 effective.max(range.min).min(range.max)
             ),
+            GraphWarning::FanIn { to, from } => {
+                let sources = from
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "{to}: {} connections into one input ({sources}); they are summed (events merged), but one input takes one connection: sum with std.add or std.mix, merge events with std.merge (ADR 0054)",
+                    from.len()
+                )
+            }
             GraphWarning::NoSinkReachable { instance } => {
                 write!(f, "{instance}: no sink is reachable; its output is unused")
             }

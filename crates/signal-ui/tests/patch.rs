@@ -121,12 +121,13 @@ fn round_trip(transport: Transport, project: &str, level: &str, ops: Value) {
 }
 
 fn every_op_round_trips_on_kick_pulse_physical_av_and_a_composite(transport: Transport) {
+    // Each wire into the new svf's free input (ADR 0054: the files' inputs may each take one already).
     let svf = json!({"op": "instance.add", "name": "svf", "module": "std.svf", "params": {"cutoff_hz": 800}, "x": 100, "y": -40});
     round_trip(
         transport,
         "kick",
         "",
-        json!([svf, {"op": "connection.add", "from": "svf.lp", "to": "out.l", "scale": 0.5},
+        json!([svf, {"op": "connection.add", "from": "lfo.out", "to": "svf.in", "scale": 0.5},
             {"op": "connection.scale", "from": "lfo.out", "to": "drums.kick_decay", "scale": 60},
             {"op": "connection.scale", "from": "accent.out", "to": "drums.kick_drive", "scale": 1},
             {"op": "instance.remove", "name": "accent"},
@@ -136,8 +137,8 @@ fn every_op_round_trips_on_kick_pulse_physical_av_and_a_composite(transport: Tra
         transport,
         "pulse",
         "",
-        json!([svf, {"op": "connection.add", "from": "svf.lp", "to": "out.r"},
-            {"op": "connection.scale", "from": "env.out", "to": "filter.cutoff_hz", "scale": 1000},
+        json!([svf, {"op": "connection.add", "from": "osc.out", "to": "svf.in"},
+            {"op": "connection.scale", "from": "env.out", "to": "cutoff_mod.a", "scale": 1000},
             {"op": "instance.remove", "name": "drift"},
             {"op": "connection.remove", "from": "osc.out", "to": "filter.in"}]),
     );
@@ -145,7 +146,7 @@ fn every_op_round_trips_on_kick_pulse_physical_av_and_a_composite(transport: Tra
         transport,
         "physical-av",
         "",
-        json!([svf, {"op": "connection.add", "from": "svf.lp", "to": "out.l"},
+        json!([svf, {"op": "connection.add", "from": "env.out", "to": "svf.in"},
             {"op": "connection.scale", "from": "env.out", "to": "sparks.rate", "scale": 2000},
             {"op": "instance.remove", "name": "kicks"},
             {"op": "connection.remove", "from": "transport.beat", "to": "hub.in"}]),
@@ -154,7 +155,7 @@ fn every_op_round_trips_on_kick_pulse_physical_av_and_a_composite(transport: Tra
         transport,
         "kick",
         "kick",
-        json!([svf, {"op": "connection.add", "from": "svf.lp", "to": "vca.a"},
+        json!([svf, {"op": "connection.add", "from": "osc.out", "to": "svf.in"},
             {"op": "connection.scale", "from": "pitch_env.out", "to": "osc.freq", "scale": 100},
             {"op": "instance.remove", "name": "feedback"},
             {"op": "connection.remove", "from": "amp_env.out", "to": "vca.b"}]),
@@ -892,7 +893,7 @@ fn a_library_composite_is_added_by_a_patch(transport: Transport) {
             &first,
             json!([{"op": "instance.add", "name": "echo", "module": "lib.tape_echo",
                 "params": {"time_ms": 300}, "x": 10, "y": 20},
-                {"op": "connection.add", "from": "echo.out", "to": "out.l", "scale": 0.25}]),
+                {"op": "connection.add", "from": "drums.out", "to": "echo.in", "scale": 0.25}]),
         ),
         "patched",
     );

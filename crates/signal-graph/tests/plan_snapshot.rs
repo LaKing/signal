@@ -55,6 +55,14 @@ fn connections_resolve_through_exports() {
     assert_eq!(
         plan.warnings,
         [
+            // The mix sums the voice and the echo's return by a fan-in (ADR 0054 phase 1: a warning).
+            GraphWarning::FanIn {
+                to: port_addr("/drums/mix.in"),
+                from: vec![
+                    port_addr("/drums/echo.out"),
+                    port_addr("/drums/kick/vca.out")
+                ],
+            },
             GraphWarning::NoSinkReachable {
                 instance: addr("/drums/kick/pitch_env")
             },

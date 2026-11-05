@@ -205,6 +205,25 @@ pub(crate) fn validate(
         }
     }
 
+    // ADR 0054 phase 1: an input or parameter with several connections (connections are in canonical order).
+    let mut into: BTreeMap<&PortAddress, Vec<PortAddress>> = BTreeMap::new();
+    for connection in &graph.connections {
+        let written = converted
+            .get(&connection.from.instance())
+            .unwrap_or(&connection.from);
+        into.entry(&connection.to)
+            .or_default()
+            .push(written.clone());
+    }
+    for (to, from) in into {
+        if from.len() > 1 {
+            warnings.push(GraphWarning::FanIn {
+                to: to.clone(),
+                from,
+            });
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {

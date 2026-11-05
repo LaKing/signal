@@ -1,7 +1,7 @@
 {
   "audio_fnv1a64": "2098a0463bed9a29",
   "frames": 384000,
-  "log_fnv1a64": "46d365354ffe090e",
+  "log_fnv1a64": "4ccb3027678da7a8",
   "provenance": {
     "library_composite_hashes": {
       "lib.analog_clap": "e33a489272af9605",
@@ -9,14 +9,14 @@
       "lib.analog_hat": "a7e11fe5c9457571",
       "lib.analog_kick": "bba79b7ff6d40eee",
       "lib.analog_rim": "80227bc1ea036e36",
-      "lib.analog_snare": "f28907fae88d2cad",
+      "lib.analog_snare": "dc96022635074494",
       "lib.analog_tom": "40ed87fe8d79c96e",
       "lib.ar_env": "502851fc6d7c6bb4",
       "lib.crossfade": "e5ab4339b35e2d9d",
-      "lib.ladder_voice": "811a572e26470f4e",
-      "lib.lfo_shapes": "77911060d3967c76",
+      "lib.ladder_voice": "94a006d10e43cd06",
+      "lib.lfo_shapes": "b21140bd62524853",
       "lib.stereo_width": "2292f191d65b31c4",
-      "lib.tape_echo": "5775f8760cf1f211"
+      "lib.tape_echo": "86dc5f33ec97ccf7"
     },
     "project_file_hashes": {
       "patterns/drums.toml": "bc929ae84981ba3b",

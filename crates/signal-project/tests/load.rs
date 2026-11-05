@@ -133,7 +133,13 @@ fn example_loads_into_the_description_model() {
 #[test]
 fn example_plans_without_warnings() {
     let planned = example().plan(&registry()).unwrap();
-    assert!(planned.warnings.is_empty(), "{:?}", planned.warnings);
+    // But the voice's two oscillators summed into its shaper: a fan-in, kept as a fixture of the sum (ADR 0054 phase 1).
+    let (fan_ins, others): (Vec<_>, Vec<_>) = planned
+        .warnings
+        .iter()
+        .partition(|w| w.to_string().contains("connections into one input"));
+    assert!(others.is_empty(), "{others:?}");
+    assert_eq!(fan_ins.len(), 1, "{fan_ins:?}");
     let addresses: Vec<_> = planned
         .plan
         .instances

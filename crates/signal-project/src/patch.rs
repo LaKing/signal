@@ -2044,6 +2044,16 @@ impl Patching<'_> {
                 if m.conns.iter().any(|c| &c.from == from && &c.to == to) {
                     return Err(bad(format!("{from} → {to} is already connected")));
                 }
+                // ADR 0054: one connection per input; summing and merging are modules.
+                if let Some(c) = m.conns.iter().find(|c| &c.to == to) {
+                    return Err(refused(
+                        "fan-in",
+                        format!(
+                            "{to} already takes {}: one input takes one connection (sum with std.add or std.mix, merge events with std.merge)",
+                            c.from
+                        ),
+                    ));
+                }
                 let entry = connection_entry(m.aot, from, to, *scale);
                 let mut inv = Vec::new();
                 add_connection(&mut self.text, &entry, &mut inv).map_err(written)?;

@@ -136,6 +136,14 @@ expression: plan
   },
   "warnings": [
     {
+      "warning": "fan_in",
+      "to": "/drums/mix.in",
+      "from": [
+        "/drums/echo.out",
+        "/drums/kick/vca.out"
+      ]
+    },
+    {
       "warning": "no_sink_reachable",
       "instance": "/drums/kick/pitch_env"
     },

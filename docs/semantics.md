@@ -34,6 +34,8 @@ A signal input's value is the sum of its connections' values, in **canonical sou
 
 An input its library restricts (ADR 0024) has at most one connection, at scale 1, from the output it names; a plan that connects it otherwise is not built.
 
+**One connection per input** (ADR 0054, phase 1): an input or a parameter with more than one connection still sums them as above (events merge, §4), with a `fan_in` warning; editors refuse to make one, and summing belongs to `std.add` or `std.mix`, merging events to `std.merge`. Phase 2 makes it an error.
+
 An unconnected input reads 0; whether an input has a connection at all is a property of the plan that a primitive may ask (`Inputs::is_connected`, ADR 0033), constant between swaps; what a library signals between its own primitives, such as a seek (`std.playhead.jump`), is an ordinary event. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so the fixed order is what makes sums bit-stable.
 
 ## 4. Events

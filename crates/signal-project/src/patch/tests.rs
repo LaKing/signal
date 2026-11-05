@@ -269,8 +269,18 @@ fn kick_pulse_physical_av_and_a_composite_round_trip() {
         let text = read(path);
         let m = map(&text, &Scheme::LEVEL).unwrap();
         let first = &m.conns[0];
+        // A wire into a new instance's free input, in one patch (ADR 0054: the file's inputs may each take one already).
+        let _ = to;
+        let (after, _) = round_trip(
+            &text,
+            None,
+            level,
+            &[add("svf", "std.svf"), connect(from, "svf.in")],
+        );
+        if kick {
+            plans(&after, &composites).unwrap_or_else(|e| panic!("{path} / svf: {e}"));
+        }
         let mut ops = vec![
-            connect(from, to),
             add("svf", "std.svf"),
             scale(&first.from, &first.to, 0.25),
             scale(&first.from, &first.to, 1.0),
@@ -311,7 +321,7 @@ fn appended_entries_are_written_in_the_files_style() {
                 edits: None,
                 layout: None,
             },
-            connect("svf.lp", "out.l"),
+            connect("drums.out", "svf.in"),
         ],
         &ctx(""),
     )
@@ -322,7 +332,7 @@ fn appended_entries_are_written_in_the_files_style() {
         "out = { module = \"std.audio_out\", gain = 0.75 }\nsvf = { module = \"std.svf\", cutoff_hz = 500, q = 2 }\n\n[wiring]"
     ), "{}", patched.text);
     assert!(patched.text.contains(
-        "  { from = \"drums.out\", to = \"out.r\" },\n  { from = \"svf.lp\", to = \"out.l\" },\n]\n"
+        "  { from = \"drums.out\", to = \"out.r\" },\n  { from = \"drums.out\", to = \"svf.in\" },\n]\n"
     ));
     // Everything else byte for byte: removing the two additions gives the file.
     let without = patched
@@ -331,7 +341,7 @@ fn appended_entries_are_written_in_the_files_style() {
             "svf = { module = \"std.svf\", cutoff_hz = 500, q = 2 }\n",
             "",
         )
-        .replace("  { from = \"svf.lp\", to = \"out.l\" },\n", "");
+        .replace("  { from = \"drums.out\", to = \"svf.in\" },\n", "");
     assert_eq!(without, kick);
 }
 
@@ -434,6 +444,17 @@ fn ops_refuse_what_the_issue_lists() {
     assert_eq!(code(&[connect("a.out", "b.in")]), "bad-value");
     assert_eq!(code(&[connect("a", "b.in")]), "bad-value");
     assert_eq!(code(&[disconnect("a.out", "c.in")]), "bad-value");
+    // ADR 0054: one connection per input; moved there (its old one removed first) it is fine.
+    assert_eq!(code(&[connect("a.out", "c.in")]), "fan-in");
+    assert!(
+        apply(
+            &text,
+            None,
+            &[disconnect("b.out", "c.in"), connect("a.out", "c.in")],
+            &ctx("")
+        )
+        .is_ok()
+    );
     assert_eq!(code(&[scale("a.out", "b.in", f64::INFINITY)]), "bad-value");
     // The whole patch fails together.
     assert_eq!(
@@ -561,8 +582,8 @@ fn an_undo_over_a_newer_edit_of_what_it_restores_is_refused() {
     let redone = apply(&undone.text, None, &undone.inverse, &ctx("")).unwrap();
     assert_eq!(redone.text, unrelated.text);
     // A wire added here, scaled there: its undo would remove their scale.
-    let mine = apply(&text, None, &[connect("a.out", "c.in")], &ctx("")).unwrap();
-    let theirs = apply(&mine.text, None, &[scale("a.out", "c.in", 2.0)], &ctx("")).unwrap();
+    let mine = apply(&text, None, &[connect("a.out", "out.r")], &ctx("")).unwrap();
+    let theirs = apply(&mine.text, None, &[scale("a.out", "out.r", 2.0)], &ctx("")).unwrap();
     changed(&theirs.text, &mine.inverse);
     // An instance added here, its module changed there (by hand): refused;
     // a parameter committed there: undone (`undo_holds_across_a_commit`).
@@ -617,7 +638,7 @@ fn an_undo_finds_its_wire_after_an_earlier_one_was_removed() {
     let redone = apply(&undone.text, None, &undone.inverse, &ctx("")).unwrap();
     assert_eq!(redone.text, theirs);
     // A wire added at the end; an earlier one removed elsewhere.
-    let mine = apply(&text, None, &[connect("a.out", "c.in")], &ctx("")).unwrap();
+    let mine = apply(&text, None, &[connect("a.out", "out.r")], &ctx("")).unwrap();
     let theirs = without_first(&mine.text);
     let undone = apply(&theirs, None, &mine.inverse, &ctx("")).unwrap();
     assert_eq!(undone.text, without_first(&text));

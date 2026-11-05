@@ -132,9 +132,10 @@ fn kick_is_described_as_written_with_its_nested_composites() {
 #[test]
 fn pulse_has_its_seventeen_instances_and_no_converter() {
     let s = structure("pulse");
-    assert_eq!(names(&s["top"]).len(), 17);
+    // Seventeen, and the two sums ADR 0054 made instances of their own.
+    assert_eq!(names(&s["top"]).len(), 19);
     assert_eq!(names(&s["top"])[..3], ["transport", "seq", "glide"]);
-    assert_eq!(s["top"]["connections"].as_array().unwrap().len(), 20);
+    assert_eq!(s["top"]["connections"].as_array().unwrap().len(), 22);
     assert!(every_converter(&s["top"]).is_empty());
     assert_eq!(s["composites"], json!({}));
 }
