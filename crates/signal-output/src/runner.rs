@@ -21,6 +21,7 @@ use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Meter, to_device};
 use crate::fade::Fade;
+use crate::inputs::RunInput;
 use crate::scope::{ScopeBlock, ScopeControl, ScopeCounts, ScopeError, Scopes, scopes};
 use crate::vectors::{
     VectorControl, VectorCounts, VectorError, VectorSnapshot, VectorUnbound, Vectors, vectors,
@@ -89,6 +90,7 @@ pub fn realtime_routed(
         scopes,
         vectors,
         fade: Fade::default(),
+        inputs: Vec::new(),
     };
     let controller = Controller {
         controller,
@@ -141,9 +143,20 @@ pub struct Runner {
     /// The device fade (`crate::fade`, ADR 0036): steady unless a driver
     /// asks.
     fade: Fade,
+    /// The capture sides it feeds (ADR 0038 §7), from
+    /// [`set_inputs`](Runner::set_inputs).
+    inputs: Vec<RunInput>,
 }
 
 impl Runner {
+    /// The capture sides this run's sources read (ADR 0038 §7): each before
+    /// every block, bound by address at each swap. Control thread, before
+    /// the Runner goes to its driver; replaces any set before. A source no
+    /// input serves reads 0.
+    pub fn set_inputs(&mut self, inputs: Vec<RunInput>) {
+        self.inputs = inputs;
+    }
+
     /// Runs one callback: `out` holds `out.len() / channels` frames of
     /// `channels` interleaved device channels. The engine runs them
     /// ([`signal_engine::Runner::process`]); each frame's audio-sink channels
@@ -178,6 +191,7 @@ impl Runner {
                 ceilinged: &mut self.ceilinged,
                 scopes: &mut self.scopes,
                 vectors: &mut self.vectors,
+                inputs: &mut self.inputs,
             };
             self.runner.process(frames, &mut device)
         };
@@ -331,6 +345,7 @@ struct Device<'a> {
     ceilinged: &'a mut u64,
     scopes: &'a mut Scopes,
     vectors: &'a mut Vectors,
+    inputs: &'a mut [RunInput],
 }
 
 impl SinkOutput for Device<'_> {
@@ -344,7 +359,16 @@ impl SinkOutput for Device<'_> {
         }
         self.scopes.bind(engine);
         self.vectors.bind(engine);
+        for input in self.inputs.iter_mut() {
+            input.bind(engine);
+        }
         true
+    }
+
+    fn sources(&mut self, engine: &mut Engine, frames: usize) {
+        for input in self.inputs.iter_mut() {
+            input.fill(engine, frames, self.at);
+        }
     }
 
     fn block(&mut self, engine: &Engine, frames: usize) {

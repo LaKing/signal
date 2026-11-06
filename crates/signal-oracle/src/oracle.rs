@@ -297,6 +297,9 @@ struct Inst {
     live: Vec<f64>,
     /// Per signal output row: the output port it belongs to.
     row_ports: Vec<PortAddress>,
+    /// A source's external rows over the run, from the script (ADR 0038
+    /// §7); empty for every other instance.
+    external: Vec<Vec<f64>>,
     /// Per descriptor port: whether a connection reaches it (ADR 0033).
     connected: Vec<bool>,
     /// Per descriptor port: whether a swap since its last call changed its
@@ -428,7 +431,18 @@ impl Plan {
                 }
             };
             let i = plan.instances.len();
+            let external = if descriptor.source.is_some() {
+                script
+                    .inputs
+                    .iter()
+                    .find(|input| input.instance == spec.address)
+                    .map(|input| input.rows.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let mut inst = Inst {
+                external,
                 address: spec.address.clone(),
                 type_name: spec.type_name.clone(),
                 descriptor,
@@ -982,9 +996,26 @@ impl Plan {
                     sink.start_call(1);
                 }
                 let params: Vec<f64> = inst.params.iter().map(|p| p.effective).collect();
+                // A source's external rows at this frame (one per output
+                // row), 0 where the script gives none.
+                let external: Vec<f64> = if inst.descriptor.source.is_some() {
+                    let at = usize::try_from(n).unwrap_or(usize::MAX);
+                    (0..inst.outputs.len())
+                        .map(|r| {
+                            inst.external
+                                .get(r)
+                                .and_then(|row| row.get(at))
+                                .copied()
+                                .unwrap_or(0.0)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends)
                     .with_connected(&inst.connected)
-                    .with_sources_changed(&inst.sources_changed);
+                    .with_sources_changed(&inst.sources_changed)
+                    .with_external(&external);
                 let mut out = Outputs::new(1, &mut outputs, &mut inst.sinks);
                 let ok = match &mut inst.primitive {
                     Primitive::Direct(module) => {

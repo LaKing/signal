@@ -105,6 +105,7 @@ const fn descriptor(
         parameters: &[DRIVE],
         feedthrough: Feedthrough::Direct,
         sink: None,
+        source: None,
         latency: None,
         reproducibility: Reproducibility::BitExact,
         category: Some("filter"),

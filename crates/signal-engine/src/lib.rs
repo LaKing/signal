@@ -66,6 +66,7 @@ mod realtime;
 #[doc(hidden)]
 pub mod shared;
 mod sink;
+mod source;
 mod sync;
 mod tasks;
 mod units;
@@ -103,4 +104,5 @@ pub use realtime::{
 #[doc(hidden)]
 pub use shared::{Exclusivity, HookPoint, exclusivity};
 pub use sink::{Sink, SinkOutput};
+pub use source::Source;
 pub use wake::{Computation, MakeWaiter, RtOptions, RtPolicy, Spread, Waiter, WakeStats};

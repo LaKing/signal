@@ -107,7 +107,7 @@ expression: text
       "properties": {
         "capture": {
           "default": null,
-          "description": "The capture side's layout (not built yet).",
+          "description": "The capture side's layout: `mono` or `stereo` (ADR 0038 §7).",
           "type": [
             "string",
             "null"
@@ -327,6 +327,8 @@ expression: text
             "std.allpass_delay",
             "std.and",
             "std.atan2",
+            "std.audio_in",
+            "std.audio_in_mono",
             "std.audio_out",
             "std.audio_tap",
             "std.biquad",

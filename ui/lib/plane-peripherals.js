@@ -217,10 +217,47 @@ export function newRoleName(taken = []) {
   for (let n = 2; ; n++) if (!names.has(`cue_${n}`)) return `cue_${n}`;
 }
 
-/** The inventory's entry of box `key` as the Setup names a device (`{name, id, signature}`), or null. */
-export function deviceEntry(devices, key) {
-  const d = (devices?.devices ?? []).find((x) => deviceKey(x) === key && x.direction === 'output');
+/** The inventory's entry of box `key` as the Setup names a device (`{name, id, signature}`), its output (or, with `direction` `input`, its input); null without one. */
+export function deviceEntry(devices, key, direction = 'output') {
+  const d = (devices?.devices ?? []).find((x) => deviceKey(x) === key && x.direction === direction);
   return d ? { name: d.name, id: d.id ?? undefined, signature: '' } : null;
+}
+
+/** A new capture role's name (ADR 0038 §1; the person renames it in the text): `input`, then `input_2`, … */
+export function newInputRoleName(taken = []) {
+  const names = new Set(taken);
+  if (!names.has('input')) return 'input';
+  for (let n = 2; ; n++) if (!names.has(`input_${n}`)) return `input_${n}`;
+}
+
+/**
+ * What a cable dragged from a device's capture port writes (ADR 0038 §7,
+ * the owner's "connect the AT2020 to the Mac Studio Speakers", 2026-11-06):
+ * the signals meet in explicit device slots, never a drawn device. A new
+ * mono capture slot of a new role (`device.add` with `capture`) bound to
+ * the port's channel (`device.route` with `side: capture`), wired into the
+ * role the drop lands on, or into a new stereo output (`device.add`, its
+ * `device.route`) on free channels. `{ops, routes, note}`.
+ */
+function captureDrop(drag, drop, { bindings, instances, main, devices, scope }) {
+  const none = { ops: [], route: null, routes: [], note: null };
+  if (!drop) return { ...none, note: 'drop an input on a device’s output to play it there' };
+  const taken = [...bindings.map((b) => b.role), ...instances];
+  const role = newInputRoleName(taken);
+  const ops = [{ op: 'device.add', name: role, capture: 'mono', role }];
+  const routes = [{ type: 'device.route', side: 'capture', role, channels: drag.port.channels.slice(0, 1), device: deviceEntry(devices, drag.box, 'input'), scope }];
+  const occupant = bindings.find((b) => b.device === drop.box && b.channels.includes(drop.channel));
+  const into = (ports) => ports.forEach((port) => ops.push({ op: 'connection.add', from: `${role}.m`, to: strip(port) }));
+  if (occupant) {
+    into(occupant.ports);
+    return { ops, route: null, routes, note: `${role} · ${drag.port.name} into ${occupant.role}` };
+  }
+  const play = newRoleName([...taken, role]);
+  ops.push({ op: 'device.add', name: play, play: 'stereo', role: play });
+  into([`/${play}.l`, `/${play}.r`]);
+  const deviceOf = (box) => (box === main?.key ? null : deviceEntry(devices, box));
+  routes.push({ type: 'device.route', role: play, channels: landingChannels(drop.port, 2, drop.port.channels[0]), device: deviceOf(drop.box), scope });
+  return { ops, route: null, routes, note: `${role} · ${drag.port.name} → ${play} on ${drop.port.name}: new slots (rename their roles in project.toml)` };
 }
 
 const strip = (address) => String(address).replace(/^\//, '');
@@ -246,6 +283,7 @@ const sideOf = (label) => (/(^|_)(l|left)$/.test(label) ? 'l' : /(^|_)(r|right)$
  */
 export function cableDrop(drag, drop, { bindings = [], instances = [], main = null, devices = null, scope = 'machine' } = {}) {
   const none = { ops: [], route: null, note: null };
+  if (drag?.kind === 'capture') return captureDrop(drag, drop, { bindings, instances, main, devices, scope });
   const deviceOf = (box) => (box === main?.key ? null : deviceEntry(devices, box));
   if (drag?.kind === 'move') {
     const cable = drag.cable;

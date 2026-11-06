@@ -44,6 +44,7 @@ const fn descriptor(
         parameters: &[],
         feedthrough,
         sink: None,
+        source: None,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
         category: None,
@@ -183,6 +184,7 @@ fn changed_sources_reach_divided_state_output_and_suspended_instances_alike() {
     // its first sources by the second, resumed at 250.
     let swaps = vec![(101, plan("d", 1)), (203, plan("c", 2))];
     let script = Script {
+        inputs: Vec::new(),
         sample_rate: 1000,
         seed: 3,
         frames: 300,

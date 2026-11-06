@@ -18,7 +18,11 @@ use signal_output::{Driver, DriverError, Runner};
 use serde::Serialize;
 use signal_output::adapter::{AdapterConfig, clock_adapter};
 
+use signal_core::InstanceAddress;
+use signal_output::inputs::{InputCounts, InputRecord, InputSource, RunInput};
+
 use crate::callback::{CallbackControl, FeedControl, OutputCallback};
+use crate::capture::{AdaptedSource, CaptureFeed, SideFeed, SideSink, capture_ring};
 use crate::config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
     fault_message, rate_moved, start_failure,
@@ -333,6 +337,75 @@ struct Running {
     workers: Workers,
     /// The clock callback's feed slots, one per secondary device.
     feeds: FeedControl,
+    /// The input devices' streams (ADR 0038 §8), stopped after the output.
+    inputs: Vec<Stream>,
+}
+
+/// One capture side of a run (ADR 0038 §7): its source and the device's
+/// input channels it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureSideSpec {
+    /// The source instance.
+    pub address: InstanceAddress,
+    /// Its role.
+    pub role: String,
+    /// Its channels.
+    pub width: usize,
+    /// Per port, the device's input channel (from 0); `None`: 0.
+    pub channels: Vec<Option<usize>>,
+}
+
+/// An input device a run captures from, and its capture sides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureSpec {
+    /// The device.
+    pub selector: DeviceSelector,
+    /// Its name, as the Setup names it.
+    pub name: String,
+    /// Its capture sides.
+    pub sides: Vec<CaptureSideSpec>,
+}
+
+/// An input device's status (ADR 0038 §10, ADR 0052 §6).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CaptureStatus {
+    /// The device's name.
+    pub name: String,
+    /// The roles captured from it.
+    pub roles: Vec<String>,
+    /// `engine` (the clock device's input, a ring) or `adapted`.
+    pub clock: &'static str,
+    /// `locking`, `locked`, `suspect` or `absent` (adapted); `engine` reads
+    /// `locked` while it runs.
+    pub state: SecondaryState,
+    /// Its nominal rate.
+    pub rate: Option<u32>,
+    /// How far its clock runs from the clock device's, ppm (adapted).
+    pub drift_ppm: f64,
+    /// Frames its sources read as 0 (the ring ran short, or it is gone).
+    pub missing: u64,
+    /// The largest |sample| its sources read since the start (a level).
+    pub peak: f32,
+    /// Why it is not captured, when it is not.
+    pub reason: Option<String>,
+}
+
+/// An input device of a running driver.
+struct Capture {
+    spec: CaptureSpec,
+    rate: Option<u32>,
+    adapted: bool,
+    stats: Arc<SecondaryStats>,
+    counts: Vec<Arc<InputCounts>>,
+    reason: Option<String>,
+}
+
+/// What an opened input device gives the run.
+struct OpenedCapture {
+    stream: Stream,
+    inputs: Vec<RunInput>,
+    records: Vec<InputRecord>,
+    capture: Capture,
 }
 
 /// A secondary output device of a routed run (ADR 0052 §1): a device other
@@ -382,6 +455,38 @@ pub struct SecondaryStatus {
     pub rebuilds: u64,
     /// Why it is not playing, when it is not.
     pub reason: Option<String>,
+}
+
+impl Capture {
+    fn status(&self) -> CaptureStatus {
+        let now = self.stats.snapshot();
+        let gone = self.stats.is_gone();
+        let state = if self.reason.is_some() || gone {
+            SecondaryState::Absent
+        } else if self.adapted {
+            now.state
+        } else {
+            SecondaryState::Locked
+        };
+        CaptureStatus {
+            name: self.spec.name.clone(),
+            roles: self.spec.sides.iter().map(|s| s.role.clone()).collect(),
+            clock: if self.adapted { "adapted" } else { "engine" },
+            state,
+            rate: self.rate,
+            drift_ppm: if self.adapted { now.drift_ppm } else { 0.0 },
+            missing: self
+                .counts
+                .iter()
+                .map(|c| c.missing.load(std::sync::atomic::Ordering::Relaxed))
+                .sum(),
+            peak: self.counts.iter().map(|c| c.peak()).fold(0.0, f32::max),
+            reason: self
+                .reason
+                .clone()
+                .or_else(|| gone.then(|| "the device went away or its stream failed".to_owned())),
+        }
+    }
 }
 
 /// One secondary device of a driver, and its stream while it plays.
@@ -646,6 +751,15 @@ pub struct CoreAudioDriver {
     secondaries: Vec<Secondary>,
     /// The time base of every callback's time ([`callback_time`]).
     epoch: Instant,
+    /// The input devices (ADR 0038 §8).
+    captures: Vec<CaptureSpec>,
+    /// Frames of record ring per capture side, when the run records its
+    /// inputs (ADR 0038 §9).
+    record_frames: Option<usize>,
+    /// The last start's input devices.
+    captured: Vec<Capture>,
+    /// The last start's records, until taken.
+    records: Vec<InputRecord>,
 }
 
 impl CoreAudioDriver {
@@ -776,6 +890,10 @@ impl CoreAudioDriver {
             scheduling: None,
             secondaries: Vec::new(),
             epoch: Instant::now(),
+            captures: Vec::new(),
+            record_frames: None,
+            captured: Vec::new(),
+            records: Vec::new(),
         })
     }
 
@@ -787,6 +905,156 @@ impl CoreAudioDriver {
     pub fn with_secondaries(mut self, specs: Vec<SecondarySpec>) -> CoreAudioDriver {
         self.secondaries = specs.into_iter().map(Secondary::new).collect();
         self
+    }
+
+    /// With the input devices `specs` (ADR 0038 §7–8): each start opens
+    /// their streams and feeds the run's sources from them, through a ring
+    /// for the clock device's input, a clock adapter for another device's
+    /// (ADR 0052 §8). With `record_frames`, each capture side's words are
+    /// recorded into a ring of that many frames
+    /// ([`take_input_records`](CoreAudioDriver::take_input_records)). An
+    /// input that cannot be opened never fails the run: its sources read 0
+    /// and its status says why.
+    pub fn with_captures(
+        mut self,
+        specs: Vec<CaptureSpec>,
+        record_frames: Option<usize>,
+    ) -> CoreAudioDriver {
+        self.captures = specs;
+        self.record_frames = record_frames;
+        self
+    }
+
+    /// [`with_captures`](CoreAudioDriver::with_captures) on a driver held
+    /// by reference (control thread, before a start).
+    pub fn set_captures(&mut self, specs: Vec<CaptureSpec>, record_frames: Option<usize>) {
+        self.captures = specs;
+        self.record_frames = record_frames;
+    }
+
+    /// The input devices' status.
+    pub fn captures(&self) -> Vec<CaptureStatus> {
+        self.captured.iter().map(Capture::status).collect()
+    }
+
+    /// The last start's input records (ADR 0038 §9), once.
+    pub fn take_input_records(&mut self) -> Vec<InputRecord> {
+        std::mem::take(&mut self.records)
+    }
+
+    /// Opens input device `spec` for the run (control thread): its stream
+    /// at the rate it runs at with its own buffer, and one [`RunInput`] per
+    /// capture side.
+    fn open_capture(&self, spec: &CaptureSpec) -> Result<OpenedCapture, String> {
+        let name = spec.name.clone();
+        let device = find(Direction::Input, &spec.selector).map_err(|e| e.to_string())?;
+        let info = info(&device, Direction::Input, None).map_err(|e| e.to_string())?;
+        let state = state_of(&device);
+        let rate = state
+            .rate
+            .or_else(|| current_rate(&device, Direction::Input))
+            .ok_or_else(|| format!("{name}: its rate cannot be read"))?;
+        let period = state.buffer.unwrap_or(FALLBACK_PERIOD);
+        let choice = match choose_input(&info, rate, period) {
+            Err(AudioError::BufferSize { min, max, .. }) => {
+                let mut choice =
+                    choose_input(&info, rate, period.clamp(min, max)).map_err(|e| e.to_string())?;
+                choice.buffer = period;
+                choice
+            }
+            other => other.map_err(|e| e.to_string())?,
+        };
+        let channels = usize::from(choice.channels);
+        let clock_rate = self.choice.sample_rate;
+        let clock_period = self.plan.period as usize;
+        let clock_max = self.choice.max_frames as usize;
+        // One crystal: the clock device's own input needs no converter.
+        let adapted =
+            id_of(&device).is_none() || id_of(&device) != id_of(&self.device) || rate != clock_rate;
+        let max_frames = (choice.max_frames as usize).max(period as usize);
+        let stats = Arc::new(SecondaryStats::default());
+        let mut feeds = Vec::new();
+        let mut inputs = Vec::new();
+        let mut records = Vec::new();
+        let mut counts = Vec::new();
+        for side in &spec.sides {
+            let channels_of = side
+                .channels
+                .iter()
+                .map(|c| c.filter(|&c| c < channels))
+                .collect();
+            let (sink, source): (SideSink, Box<dyn InputSource>) = if adapted {
+                let config = AdapterConfig::new(
+                    side.width.max(1),
+                    rate,
+                    clock_rate,
+                    period as usize,
+                    clock_period,
+                );
+                let (input, output) = clock_adapter(config).map_err(|e| format!("{name}: {e}"))?;
+                (
+                    SideSink::Adapter(input),
+                    Box::new(AdaptedSource::new(output, self.epoch, Arc::clone(&stats))),
+                )
+            } else {
+                let (tx, rx) = capture_ring(side.width, period as usize, clock_period);
+                (SideSink::Ring(tx), Box::new(rx))
+            };
+            feeds.push(SideFeed::new(channels_of, sink, max_frames));
+            let (input, record) = RunInput::new(
+                side.address.clone(),
+                side.width,
+                source,
+                clock_max,
+                self.record_frames,
+            );
+            counts.push(input.counts());
+            inputs.push(input);
+            records.extend(record);
+        }
+        let mut feed = CaptureFeed::new(feeds, self.epoch);
+        let errors = Arc::clone(&stats);
+        let config = StreamConfig {
+            channels: choice.channels,
+            sample_rate: rate,
+            buffer_size: BufferSize::Default,
+        };
+        let stream = device
+            .build_input_stream(
+                config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| feed.capture(data, channels),
+                move |error: cpal::Error| {
+                    errors.stream_error();
+                    if matches!(
+                        error.kind(),
+                        cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable
+                    ) {
+                        errors.device_gone();
+                    }
+                },
+                None,
+            )
+            .map_err(|e| format!("{name}: {e}"))?;
+        if let Some(after) = state_of(&device).rate
+            && after != rate
+        {
+            drop(stream);
+            return Err(rate_moved(&name, rate, after));
+        }
+        stream.play().map_err(|e| format!("{name}: {e}"))?;
+        Ok(OpenedCapture {
+            stream,
+            inputs,
+            records,
+            capture: Capture {
+                spec: spec.clone(),
+                rate: Some(rate),
+                adapted,
+                stats,
+                counts,
+                reason: None,
+            },
+        })
     }
 
     /// The secondary devices' status, in the routing's order.
@@ -1014,6 +1282,31 @@ impl Driver for CoreAudioDriver {
         }
         // Before the first block: the workers enter real-time scheduling.
         let mut runner = runner;
+        // The input devices (ADR 0038 §8), opened before the output so the
+        // run's first block finds its sources fed; one that fails reads 0.
+        let mut input_streams = Vec::new();
+        let mut run_inputs = Vec::new();
+        self.captured.clear();
+        self.records.clear();
+        for spec in self.captures.clone() {
+            match self.open_capture(&spec) {
+                Ok(opened) => {
+                    input_streams.push(opened.stream);
+                    run_inputs.extend(opened.inputs);
+                    self.records.extend(opened.records);
+                    self.captured.push(opened.capture);
+                }
+                Err(reason) => self.captured.push(Capture {
+                    spec,
+                    rate: None,
+                    adapted: false,
+                    stats: Arc::new(SecondaryStats::default()),
+                    counts: Vec::new(),
+                    reason: Some(reason),
+                }),
+            }
+        }
+        runner.set_inputs(run_inputs);
         let fade = fade_frames(self.choice.sample_rate);
         runner.fade_in(fade);
         let workers = runner.workers();
@@ -1108,6 +1401,7 @@ impl Driver for CoreAudioDriver {
             control,
             workers,
             feeds,
+            inputs: input_streams,
         });
         // The secondary devices, once the clock device plays: one that
         // cannot be opened is reported in its status, not refused.
@@ -1127,6 +1421,7 @@ impl Driver for CoreAudioDriver {
             mut control,
             workers,
             feeds,
+            inputs,
         }) = self.running.take()
         else {
             return Ok(None);
@@ -1158,6 +1453,9 @@ impl Driver for CoreAudioDriver {
         // dropped here, on this thread.
         drop(stream);
         drop(feeds);
+        for input in inputs {
+            let _ = input.pause();
+        }
         // The secondary devices play out what their adapters hold (the
         // fade-out), then stop.
         let rate = self.choice.sample_rate;

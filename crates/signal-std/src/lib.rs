@@ -23,6 +23,8 @@
 //! | `std.transport` | [`Transport`] | direct | `event` |
 //! | `std.audio_out` | [`AudioOut`] | direct, audio sink | `io` |
 //! | `std.audio_tap` | [`AudioTap`] | direct, the tap of `std.audio_out` (ADR 0035 §3) | `io` |
+//! | `std.audio_in` | [`AudioIn`] | direct source, a device slot's stereo capture side (ADR 0038 §7) | `io` |
+//! | `std.audio_in_mono` | [`AudioInMono`] | direct source, a device slot's mono capture side | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
 //! | `std.onepole` | [`OnePole`] | direct | `filter` |
@@ -164,6 +166,7 @@
 mod add;
 mod adsr;
 mod arith;
+mod audio_in;
 mod audio_out;
 mod audio_tap;
 mod biquad;
@@ -229,6 +232,7 @@ mod testing;
 pub use add::Add;
 pub use adsr::Adsr;
 pub use arith::{Div, Floor, Fract, Mod, Neg, Round, Sign};
+pub use audio_in::{AudioIn, AudioInMono};
 pub use audio_out::AudioOut;
 pub use audio_tap::AudioTap;
 pub use biquad::Biquad;
@@ -424,6 +428,8 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Transport>(),
         direct::<AudioOut>(),
         direct::<AudioTap>(),
+        direct::<AudioIn>(),
+        direct::<AudioInMono>(),
         direct::<Osc>(),
         direct::<Svf>(),
         direct::<OnePole>(),
@@ -837,7 +843,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 76] = [
+    const NAMES: [&str; 78] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -850,6 +856,8 @@ mod tests {
         "std.transport",
         "std.audio_out",
         "std.audio_tap",
+        "std.audio_in",
+        "std.audio_in_mono",
         "std.osc",
         "std.svf",
         "std.onepole",
@@ -1089,7 +1097,7 @@ mod tests {
         }
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
         // The M2.10-2 types (`std.merge`, ADR 0054, sits among the event types before them).
-        for name in NAMES[41..].iter().copied().chain(vectors) {
+        for name in NAMES[43..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");

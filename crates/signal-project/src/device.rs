@@ -12,7 +12,12 @@
 //!   and is the device slot `{ play = "stereo", role = "main" }`"), so a
 //!   device slot's ports are `l`, `r` and `gain`, as every existing
 //!   project's main output. The other layouts are reported as not built
-//!   yet; `capture` (input) likewise.
+//!   yet.
+//! - `capture`: a layout name for the input side (ADR 0038 §7). This
+//!   version plans `stereo` as `std.audio_in` (outputs `l`, `r`) and `mono`
+//!   as `std.audio_in_mono` (output `m`), sources whose frames the driver
+//!   writes; a slot with both `play` and `capture` (one box) is not built
+//!   yet.
 //! - `role`: what it is for, `[a-z][a-z0-9_]*`, default `main`.
 //! - `kind`: `"audio"`, the default and the only kind built.
 //! - Device slots are top-level instances of `project.toml`: a composite
@@ -25,9 +30,9 @@
 
 use std::collections::BTreeMap;
 
-use signal_core::{Direction, InstanceAddress, PortShape, SinkKind};
+use signal_core::{Direction, InstanceAddress, PortShape, SinkKind, SourceKind};
 use signal_graph::ExecutionPlan;
-use signal_output::{MAIN, PlaySide};
+use signal_output::{CaptureSide, MAIN, PlaySide};
 
 use crate::Project;
 
@@ -47,13 +52,21 @@ pub const LAYOUTS: [(&str, &[&str]); 5] = [
 /// The layouts this version plans.
 pub const BUILT_LAYOUTS: [&str; 1] = ["stereo"];
 
-/// A device slot as written: its role and its play side's layout.
+/// The module a planned stereo capture side is (ADR 0038 §7).
+pub const STEREO_SOURCE: &str = "std.audio_in";
+
+/// The module a planned mono capture side is.
+pub const MONO_SOURCE: &str = "std.audio_in_mono";
+
+/// A device slot as written: its role and its sides' layouts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSlot {
     /// Its role.
     pub role: String,
-    /// Its play side's layout (`stereo`).
-    pub play: String,
+    /// Its play side's layout (`stereo`), if it plays.
+    pub play: Option<String>,
+    /// Its capture side's layout (`mono`, `stereo`), if it captures.
+    pub capture: Option<String>,
 }
 
 /// Whether `role` is a role's name: `[a-z][a-z0-9_]*`.
@@ -86,6 +99,46 @@ pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
             "`{other}` is not a layout (mono, stereo, quad, 5.1, 7.1)"
         )),
     }
+}
+
+/// The module a device slot's `capture` side plans as, or why it does not.
+pub(crate) fn planned_source(capture: &str) -> Result<&'static str, String> {
+    match capture {
+        "stereo" => Ok(STEREO_SOURCE),
+        "mono" => Ok(MONO_SOURCE),
+        other if layout_channels(other).is_some() => Err(format!(
+            "the capture layout `{other}` is not built yet; this version captures `mono` and `stereo` (ADR 0038)"
+        )),
+        other => Err(format!(
+            "`{other}` is not a layout (mono, stereo, quad, 5.1, 7.1)"
+        )),
+    }
+}
+
+/// Every audio source of `plan` with its role (ADR 0038 §7): the device
+/// slot's written role, `main` for any other. In plan order.
+pub fn capture_sides(project: &Project, plan: &ExecutionPlan) -> Vec<CaptureSide> {
+    let devices = project.device_slots();
+    plan.instances
+        .iter()
+        .filter(|i| matches!(i.descriptor.source, Some(SourceKind::Audio)))
+        .map(|i| {
+            let role = top_level_name(&i.address)
+                .and_then(|name| devices.get(name))
+                .map_or_else(|| MAIN.to_owned(), |d| d.role.clone());
+            let width = i
+                .descriptor
+                .ports
+                .iter()
+                .filter(|p| p.direction == Direction::Out && p.shape == PortShape::Signal)
+                .count();
+            CaptureSide {
+                address: i.address.clone(),
+                role,
+                width,
+            }
+        })
+        .collect()
 }
 
 /// Every audio sink of `plan` with its role (ADR 0038 §3): a device slot's
@@ -161,5 +214,8 @@ mod tests {
         assert_eq!(planned_module("stereo"), Ok(STEREO_SINK));
         assert!(planned_module("5.1").unwrap_err().contains("not built yet"));
         assert!(planned_module("hexa").unwrap_err().contains("not a layout"));
+        assert_eq!(planned_source("stereo"), Ok(STEREO_SOURCE));
+        assert_eq!(planned_source("mono"), Ok(MONO_SOURCE));
+        assert!(planned_source("5.1").unwrap_err().contains("not built yet"));
     }
 }

@@ -828,7 +828,9 @@ impl Runner {
         self.hang
             .version
             .store(self.engine.version(), Ordering::Relaxed);
-        let ran = self.engine.run_block(most.min(until));
+        let len = most.min(until).min(self.engine.capacity());
+        output.sources(&mut self.engine, len);
+        let ran = self.engine.run_block(len);
         if ran > 0 {
             output.block(&self.engine, ran);
         }
@@ -1455,6 +1457,7 @@ mod tests {
                 parameters: &[],
                 feedthrough: Feedthrough::Direct,
                 sink: None,
+                source: None,
                 latency: None,
                 reproducibility: signal_core::Reproducibility::BitExact,
                 category: None,
@@ -1480,6 +1483,7 @@ mod tests {
                 parameters: &[],
                 feedthrough: Feedthrough::Direct,
                 sink: Some(SinkKind::Audio),
+                source: None,
                 latency: None,
                 reproducibility: signal_core::Reproducibility::BitExact,
                 category: None,

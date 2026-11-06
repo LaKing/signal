@@ -570,6 +570,7 @@ const WATCH: signal_core::ModuleDescriptor = signal_core::ModuleDescriptor {
     parameters: &[],
     feedthrough: signal_core::Feedthrough::Direct,
     sink: None,
+    source: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
     category: None,

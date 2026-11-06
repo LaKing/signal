@@ -726,6 +726,7 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         })
         .collect();
     let script = Script {
+        inputs: Vec::new(),
         sample_rate: draw.rate,
         seed: draw.seed ^ 0x5eed,
         frames,
@@ -1083,6 +1084,7 @@ fn one_graph_with_every_divisor_and_size_matches_in_every_configuration() {
             },
         ],
         swaps: Vec::new(),
+        inputs: Vec::new(),
     };
     let mut setups = Vec::new();
     for block in [1, 3, 64, 256] {
@@ -1145,6 +1147,7 @@ fn a_panic_in_a_one_tick_call_discards_later_parameter_events() {
         events: vec![set(10, 1, 1.0), set(65, 2, 0.5)],
         edits: Vec::new(),
         swaps: Vec::new(),
+        inputs: Vec::new(),
     };
     let mut setups = Vec::new();
     for threads in [1, 4] {

@@ -53,6 +53,7 @@ pub mod adapter;
 mod audio;
 mod driver;
 pub mod fade;
+pub mod inputs;
 mod render;
 pub mod routing;
 mod runner;
@@ -66,8 +67,8 @@ pub use render::{
     render_sides, render_with,
 };
 pub use routing::{
-    Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedSide, Routing, SecondaryRoute,
-    SoundSystem, route,
+    CaptureSide, Captured, Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedCapture,
+    RoutedSide, Routing, SecondaryRoute, SoundSystem, route, route_captures,
 };
 pub use runner::{
     Controller, ReadySwap, Runner, ceiling_level, hold, realtime, realtime_routed, realtime_with,

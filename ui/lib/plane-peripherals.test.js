@@ -278,3 +278,43 @@ test('cable drags: create a new output on free channels, join a bound role, move
   assert.deepEqual(cableDrop({ kind: 'move', cable }, null, context).ops, [{ op: 'connection.remove', from: 'limiter.out', to: 'out.l' }]);
   assert.deepEqual(cableDrop({ kind: 'create', pin }, null, context), { ops: [], route: null, note: null });
 });
+
+// ADR 0038 §7, the owner's "connect the AT2020 to the Mac Studio Speakers" (2026-11-06).
+test('an input dragged onto free channels of a device makes two explicit slots and two bindings', () => {
+  const devices = { devices: [ssl(0, 'output'), speakers(1), mic(2)], output: { found: 0 } };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } } };
+  const { bindings, main, boxes } = peripherals({ setup, devices, endpoints: MAIN });
+  const micBox = boxes.find((b) => b.outputs.length && !b.inputs.length);
+  const speakerBox = boxes.find((b) => b.name === 'MacBook Pro Speakers');
+  const drop = { box: speakerBox.key, port: speakerBox.inputs[0], channel: 1 };
+  const result = cableDrop({ kind: 'capture', box: micBox.key, port: micBox.outputs[0] }, drop, { bindings, instances: ['out'], main, devices });
+  assert.deepEqual(result.ops, [
+    { op: 'device.add', name: 'input', capture: 'mono', role: 'input' },
+    { op: 'device.add', name: 'cue', play: 'stereo', role: 'cue' },
+    { op: 'connection.add', from: 'input.m', to: 'cue.l' },
+    { op: 'connection.add', from: 'input.m', to: 'cue.r' },
+  ]);
+  assert.equal(result.routes.length, 2);
+  assert.deepEqual([result.routes[0].side, result.routes[0].role, result.routes[0].channels], ['capture', 'input', [1]]);
+  assert.equal(result.routes[0].device.name, micBox.name);
+  assert.deepEqual([result.routes[1].role, result.routes[1].channels, result.routes[1].device.name], ['cue', [1, 2], 'MacBook Pro Speakers']);
+});
+
+test('an input dragged onto a role already playing is wired into it; nothing dropped writes nothing', () => {
+  const devices = { devices: [ssl(0, 'output'), mic(1)], output: { found: 0 } };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } } };
+  const { bindings, main, boxes } = peripherals({ setup, devices, endpoints: MAIN });
+  const micBox = boxes.find((b) => b.outputs.length && !b.inputs.length);
+  const sslBox = boxes.find((b) => b.key === main.key);
+  const drag = { kind: 'capture', box: micBox.key, port: micBox.outputs[0] };
+  const result = cableDrop(drag, { box: sslBox.key, port: sslBox.inputs[0], channel: 1 }, { bindings, instances: ['out'], main, devices });
+  assert.deepEqual(result.ops, [
+    { op: 'device.add', name: 'input', capture: 'mono', role: 'input' },
+    { op: 'connection.add', from: 'input.m', to: 'out.l' },
+    { op: 'connection.add', from: 'input.m', to: 'out.r' },
+  ]);
+  assert.equal(result.routes.length, 1);
+  const nothing = cableDrop(drag, null, { bindings, main, devices });
+  assert.deepEqual([nothing.ops, nothing.routes], [[], []]);
+  assert.match(nothing.note, /drop an input/);
+});

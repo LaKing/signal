@@ -1720,11 +1720,11 @@ fn device_slot(
         ));
         fine = false;
     }
-    if let Some(capture) = &spec.capture {
+    if let (Some(_), Some(capture)) = (&spec.play, &spec.capture) {
         problems.push((
             capture.span().start,
             format!(
-                "{instance}: a device slot's `capture` (audio input) is not built yet (ADR 0038, M4.1)"
+                "{instance}: a device slot that both plays and captures (one box, ADR 0038 §3) is not built yet; use one slot for each side"
             ),
         ));
         fine = false;
@@ -1744,27 +1744,37 @@ fn device_slot(
         Some(role) => role.get_ref().clone(),
         None => signal_output::MAIN.to_owned(),
     };
-    let module = match &spec.play {
-        Some(play) => match device::planned_module(play.get_ref()) {
+    let module = match (&spec.play, &spec.capture) {
+        (Some(play), _) => match device::planned_module(play.get_ref()) {
             Ok(module) => Some(module),
             Err(reason) => {
                 problems.push((play.span().start, format!("{instance}: {reason}")));
                 None
             }
         },
-        None => {
-            if spec.capture.is_none() {
-                problems.push((
-                    at,
-                    format!("{instance}: a device slot needs `play` (or `capture`)"),
-                ));
+        // ADR 0038 §7: a capture side plans as a source.
+        (None, Some(capture)) => match device::planned_source(capture.get_ref()) {
+            Ok(module) => Some(module),
+            Err(reason) => {
+                problems.push((capture.span().start, format!("{instance}: {reason}")));
+                None
             }
+        },
+        (None, None) => {
+            problems.push((
+                at,
+                format!("{instance}: a device slot needs `play` or `capture`"),
+            ));
             None
         }
     };
     let module = module.filter(|_| fine)?;
-    let play = spec.play.as_ref().map(|p| p.get_ref().clone())?;
-    Some((device::DeviceSlot { role, play }, module))
+    let slot = device::DeviceSlot {
+        role,
+        play: spec.play.as_ref().map(|p| p.get_ref().clone()),
+        capture: spec.capture.as_ref().map(|c| c.get_ref().clone()),
+    };
+    Some((slot, module))
 }
 
 /// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or

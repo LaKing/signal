@@ -148,7 +148,12 @@ pub enum Op {
         /// Its name at the level (the top level only).
         name: String,
         /// Its play side's layout (`stereo`).
-        play: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        play: Option<String>,
+        /// Its capture side's layout (`mono`, `stereo`; ADR 0038 §7);
+        /// exactly one of `play` and `capture`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture: Option<String>,
         /// Its role.
         role: String,
         /// Its schematic position.
@@ -2306,6 +2311,7 @@ impl Patching<'_> {
             Op::DeviceAdd {
                 name,
                 play,
+                capture,
                 role,
                 x,
                 y,
@@ -2321,13 +2327,23 @@ impl Patching<'_> {
                 if !crate::device::valid_role(role) {
                     return Err(bad(format!("`{role}`: a role is [a-z][a-z0-9_]*")));
                 }
-                crate::device::planned_module(play).map_err(bad)?;
+                let side = match (play, capture) {
+                    (Some(play), None) => {
+                        crate::device::planned_module(play).map_err(bad)?;
+                        ("play", play)
+                    }
+                    (None, Some(capture)) => {
+                        crate::device::planned_source(capture).map_err(bad)?;
+                        ("capture", capture)
+                    }
+                    _ => return Err(bad("a device slot is added with `play` or `capture`")),
+                };
                 if self.level_map()?.entries.iter().any(|e| &e.name == name) {
                     return Err(bad(format!("the level already has an instance `{name}`")));
                 }
                 let (x, y) = (coordinate(*x, "x")?, coordinate(*y, "y")?);
                 let mut device = InlineTable::new();
-                device.insert("play", Value::from(play.as_str()));
+                device.insert(side.0, Value::from(side.1.as_str()));
                 device.insert("role", Value::from(role.as_str()));
                 let mut table = InlineTable::new();
                 table.insert("device", Value::InlineTable(device));

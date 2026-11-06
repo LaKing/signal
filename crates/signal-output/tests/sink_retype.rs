@@ -38,6 +38,7 @@ impl DirectPrimitive for Half {
             parameters: &[],
             feedthrough: Feedthrough::Direct,
             sink: None,
+            source: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
             category: None,

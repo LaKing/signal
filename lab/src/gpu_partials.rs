@@ -155,6 +155,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::StateOutput,
     sink: None,
+    source: None,
     latency: Some(BlockLatency {
         latency_blocks: LATENCY_BLOCKS,
         block_frames: BLOCK_FRAMES as u32,

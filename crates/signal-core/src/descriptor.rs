@@ -344,6 +344,17 @@ pub enum SinkKind {
     Audio,
 }
 
+/// The external origin of a source module's outputs (ADR 0038 §7, the
+/// mirror of [`SinkKind`]): the driver writes them, block by block, through
+/// the engine. The engine attaches no meaning to a kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceKind {
+    /// Reads audio from the driver's input.
+    Audio,
+}
+
 /// Everything a module type declares about itself, available without an instance.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ModuleDescriptor {
@@ -360,6 +371,11 @@ pub struct ModuleDescriptor {
     pub feedthrough: Feedthrough,
     /// `Some` if the module has an external effect.
     pub sink: Option<SinkKind>,
+    /// `Some` if its signal outputs come from outside (ADR 0038 §7): the
+    /// engine hands it the driver's frames as its external rows
+    /// ([`Inputs::external`](crate::Inputs::external)).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceKind>,
     /// `Some` for a state-output type whose output is late by whole blocks
     /// of its own (ADR 0019 §3), e.g. a GPU-backed module.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -485,6 +501,7 @@ mod tests {
             parameters: &[],
             feedthrough: Feedthrough::Direct,
             sink: None,
+            source: None,
             latency: None,
             reproducibility: Reproducibility::BitExact,
             category: None,

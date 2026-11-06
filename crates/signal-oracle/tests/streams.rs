@@ -66,6 +66,7 @@ fn the_oracle_derives_streams_from_their_keys() {
         events: Vec::new(),
         edits: Vec::new(),
         swaps: Vec::new(),
+        inputs: Vec::new(),
     };
     let graph = graph_of(&plan, 3);
     let oracle = signal_oracle::run(&registry, &graph, &script).unwrap();

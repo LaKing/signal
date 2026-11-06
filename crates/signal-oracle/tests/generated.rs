@@ -667,6 +667,7 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         })
         .collect();
     let script = Script {
+        inputs: Vec::new(),
         sample_rate: draw.rate,
         seed: draw.seed ^ 0x5eed,
         frames: draw.frames,

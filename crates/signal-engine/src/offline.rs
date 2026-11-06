@@ -121,6 +121,8 @@ pub fn run_offline(
         let len = usize::try_from(len)
             .map_or(block, |len| len.min(block))
             .max(1);
+        let len = len.min(engine.capacity());
+        output.sources(engine, len);
         let ran = engine.run_block(len);
         if let Some(failure) = engine.failure() {
             return Err(OfflineError::EngineFailed(failure));

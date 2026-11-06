@@ -50,6 +50,7 @@ const fn latent(type_name: &'static str) -> ModuleDescriptor {
         parameters: &[],
         feedthrough: Feedthrough::StateOutput,
         sink: None,
+        source: None,
         latency: Some(BlockLatency {
             latency_blocks: 1,
             block_frames: BLOCK as u32,

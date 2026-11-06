@@ -185,6 +185,12 @@ pub struct Setup {
     /// (`[play.<role>]`); a role not here is not heard (`main` plays on
     /// `output_channels`, else channels 1 to its width).
     pub play: BTreeMap<String, PlayEntry>,
+    /// ADR 0038 §4, §7: where each capture role reads on this machine, by
+    /// role (`[capture.<role>]`: its input `device`, the Setup's `input`
+    /// or the system default input without one, and its input `channels`
+    /// from 1). A role not here captures `main`'s; `main` not here, the
+    /// default input's channels 1 to its width.
+    pub capture: BTreeMap<String, PlayEntry>,
     /// The last project folder opened.
     pub last_project: Option<PathBuf>,
     /// The window's size when last closed.
@@ -212,6 +218,7 @@ impl Default for Setup {
             cpu_workers: None,
             output_channels: None,
             play: BTreeMap::new(),
+            capture: BTreeMap::new(),
             last_project: None,
             window: None,
             rt_policy: RtPolicy::default(),
@@ -250,6 +257,8 @@ struct File<'a> {
     /// Last: TOML writes tables after the plain keys.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     play: &'a BTreeMap<String, PlayEntry>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    capture: &'a BTreeMap<String, PlayEntry>,
 }
 
 /// `gpu_devices`: `"all"`, or a list of adapter ids (strings) or indices.
@@ -438,6 +447,26 @@ impl Setup {
                     }
                     _ => bad("must be tables [play.<role>]".to_owned()),
                 },
+                "capture" => match value {
+                    toml::Value::Table(roles) => {
+                        for (role, entry) in roles {
+                            if !signal_project::device::valid_role(&role) {
+                                problems.push(format!(
+                                    "{file}: capture.{role}: a role is [a-z][a-z0-9_]*; ignored"
+                                ));
+                                continue;
+                            }
+                            match play_entry(entry) {
+                                Ok(entry) => {
+                                    setup.capture.insert(role, entry);
+                                }
+                                Err(reason) => problems
+                                    .push(format!("{file}: capture.{role}: {reason}; ignored")),
+                            }
+                        }
+                    }
+                    _ => bad("must be tables [capture.<role>]".to_owned()),
+                },
                 "gpu_devices" => match gpu_devices(&value) {
                     Some(selection) => setup.gpu_devices = selection,
                     None => bad(
@@ -484,6 +513,7 @@ impl Setup {
                 GpuDevices::Only(entries) => Some(entries),
             },
             play: &self.play,
+            capture: &self.capture,
         };
         toml::to_string(&file).unwrap_or_default()
     }

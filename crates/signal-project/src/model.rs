@@ -800,7 +800,7 @@ pub(crate) struct DeviceSpec {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub(crate) play: Option<Spanned<String>>,
-    /// The capture side's layout (not built yet).
+    /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7).
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub(crate) capture: Option<Spanned<String>>,

@@ -5,9 +5,10 @@
 //! back and is dropped here, never on the audio thread.
 
 use signal_audio::{
-    AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
-    InputCallback, InputCapture, InputMeters, Resolution, Scheduling, SecondarySpec,
-    SecondaryStatus, StatsSnapshot, choose_input, choose_output, rate_moved, rate_notice, resolve,
+    AudioError, CaptureSideSpec, CaptureSpec, CaptureStatus, ChannelMap, CoreAudioDriver,
+    DeviceInfo, DeviceRef, DeviceSelector, Direction, InputCallback, InputCapture, InputMeters,
+    Resolution, Scheduling, SecondarySpec, SecondaryStatus, StatsSnapshot, choose_input,
+    choose_output, labels, rate_moved, rate_notice, resolve,
 };
 use signal_output::{Driver, DriverError, NullDriver, Runner};
 
@@ -167,6 +168,22 @@ impl Output {
     pub fn poll_secondaries(&mut self) -> Vec<String> {
         match self {
             Output::Device(driver) => driver.poll_secondaries(),
+            Output::Null(..) => Vec::new(),
+        }
+    }
+
+    /// Captures `specs` from the next start (ADR 0038 §7–8); the null
+    /// driver captures nothing (its sources read 0).
+    pub fn set_captures(&mut self, specs: Vec<CaptureSpec>) {
+        if let Output::Device(driver) = self {
+            driver.set_captures(specs, None);
+        }
+    }
+
+    /// The input devices' status (none for the null driver).
+    pub fn captures(&self) -> Vec<CaptureStatus> {
+        match self {
+            Output::Device(driver) => driver.captures(),
             Output::Null(..) => Vec::new(),
         }
     }
@@ -500,6 +517,104 @@ pub fn open_routed(
     opened
         .map(|output| (output, routing))
         .map_err(|error| error.to_string())
+}
+
+/// The input devices a run of `project`'s `plan` captures from (ADR 0038
+/// §4, §7): its capture sides routed on the Setup's `[capture.<role>]`, the
+/// Setup's `input` (else the system default input) for a binding without a
+/// device and for `main` without a binding. Each device is found by
+/// identity; one that cannot be is noted and its sides read 0. Nothing
+/// for the null driver.
+pub fn capture_specs(
+    backend: &Backend,
+    devices: &[DeviceInfo],
+    setup: &Setup,
+    sides: &[signal_output::CaptureSide],
+    notes: &mut Vec<String>,
+) -> Vec<CaptureSpec> {
+    if sides.is_empty() {
+        return Vec::new();
+    }
+    if matches!(backend, Backend::Null(_)) {
+        notes.push("the null driver captures nothing; the project's inputs read 0".to_owned());
+        return Vec::new();
+    }
+    // Every device a binding names, by label, with its selector.
+    let mut selectors: Vec<(String, DeviceSelector)> = Vec::new();
+    let mut find = |entry: &DeviceEntry, notes: &mut Vec<String>| -> Option<String> {
+        match selector(devices, entry, Direction::Input) {
+            Ok((selector, device)) => {
+                let label = labels(devices, Direction::Input)
+                    .into_iter()
+                    .find(|(i, _)| devices.get(*i).is_some_and(|d| std::ptr::eq(d, device)))
+                    .map_or_else(|| device.name.clone(), |(_, l)| l);
+                if !selectors.iter().any(|(l, _)| *l == label) {
+                    selectors.push((label.clone(), selector));
+                }
+                Some(label)
+            }
+            Err(reason) => {
+                notes.push(format!("input {}: {reason}", entry.name));
+                None
+            }
+        }
+    };
+    let default_input = match &setup.input {
+        Some(entry) => find(entry, notes),
+        None => devices
+            .iter()
+            .find(|d| d.direction == Direction::Input && d.default)
+            .and_then(|d| {
+                let entry = DeviceEntry {
+                    name: d.name.clone(),
+                    id: d.id.clone(),
+                    signature: String::new(),
+                };
+                find(&entry, notes)
+            }),
+    };
+    let mut bindings = std::collections::BTreeMap::new();
+    for (role, entry) in &setup.capture {
+        let device = match &entry.device {
+            Some(device) => match find(device, notes) {
+                Some(label) => Some(label),
+                None => continue,
+            },
+            None => None,
+        };
+        bindings.insert(role.clone(), (device, entry.channels.clone()));
+    }
+    let (routed, routing_notes) =
+        signal_output::route_captures(sides, &bindings, default_input.as_deref());
+    notes.extend(routing_notes);
+    let mut specs: Vec<CaptureSpec> = Vec::new();
+    for side in routed {
+        let signal_output::Captured::Device(label) = &side.from else {
+            continue;
+        };
+        let Some((_, selector)) = selectors.iter().find(|(l, _)| l == label) else {
+            continue;
+        };
+        let spec_side = CaptureSideSpec {
+            address: side.address.clone(),
+            role: side.role.clone(),
+            width: side.width,
+            channels: side
+                .channels
+                .iter()
+                .map(|c| c.map(|c| usize::from(c).saturating_sub(1)))
+                .collect(),
+        };
+        match specs.iter_mut().find(|s| s.name == *label) {
+            Some(spec) => spec.sides.push(spec_side),
+            None => specs.push(CaptureSpec {
+                selector: selector.clone(),
+                name: label.clone(),
+                sides: vec![spec_side],
+            }),
+        }
+    }
+    specs
 }
 
 /// The secondary devices of `routing` (ADR 0052), each found by the Setup's

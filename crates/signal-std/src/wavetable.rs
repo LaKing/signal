@@ -76,6 +76,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    source: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
     category: Some(crate::category::GENERATOR),

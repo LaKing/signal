@@ -40,6 +40,7 @@ const RECORDER: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    source: None,
     latency: None,
     reproducibility: Reproducibility::BitExact,
     category: None,
@@ -118,6 +119,7 @@ fn the_oracle_and_the_engine_give_the_same_generations() {
         .map(|(with_b, version)| plan(&registry, with_b, version))
         .collect();
     let script = Script {
+        inputs: Vec::new(),
         sample_rate: 48_000,
         seed: 3,
         frames: 400,

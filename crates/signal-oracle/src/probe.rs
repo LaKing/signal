@@ -38,6 +38,7 @@ const PROBE: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: Some(SinkKind::Audio),
+    source: None,
     latency: None,
     reproducibility: Reproducibility::BitExact,
     category: None,

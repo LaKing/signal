@@ -1019,7 +1019,7 @@ export class SignalPlane extends HTMLElement {
     const groups = { cables: svg('g'), boxes: svg('g'), pins: svg('g') };
     const pinAt = new Map();
     // What a cable drag can start from or land on (plane units).
-    this.hits = { pins: [], ports: [], ends: [] };
+    this.hits = { pins: [], ports: [], ends: [], captures: [] };
     for (const stack of this.model.plane.stacks) {
       const s = this.stacks.get(stack.name);
       const rect = this.layout.stacks.get(stack.name);
@@ -1071,6 +1071,8 @@ export class SignalPlane extends HTMLElement {
         g.append(svg('rect', { class: 'port', x: r.x + r.w - 6 - half, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4 }));
         g.append(svg('text', { class: 'port-name', x: r.x + r.w - 24, y: r.y + p.y + 44, 'text-anchor': 'end' }, p.name));
         if (!p.rest) for (const pin of p.pins) g.append(svg('circle', { class: 'jack', cx: r.x + r.w, cy: r.y + pin.y, r: 8 }));
+        // A capture jack starts a cable (ADR 0038 §7): its input played on a device's output.
+        if (b.present && !p.rest) for (const pin of p.pins) this.hits.captures.push({ box: b.key, port: { ...p, channels: [pin.channel] }, x: r.x + r.w, y: r.y + pin.y });
       }
       groups.boxes.append(g);
     }
@@ -1125,6 +1127,9 @@ export class SignalPlane extends HTMLElement {
     const near = (h) => Math.hypot(h.x - p.x, h.y - p.y) <= reach;
     const end = this.hits?.ends.find(near);
     if (end) return { kind: 'move', cable: end.cable, from: end.from };
+    const inside = (h) => h.row && p.x >= h.row.x && p.x <= h.row.x + h.row.w && p.y >= h.row.y && p.y <= h.row.y + h.row.h;
+    const capture = this.hits?.captures.find((h) => near(h) || inside(h));
+    if (capture) return { kind: 'capture', box: capture.box, port: capture.port, from: { x: capture.x, y: capture.y } };
     const hit = this.hits?.pins.find(near);
     if (!hit) return null;
     const siblings = (this.model.pins.get(hit.stack) ?? []).filter((q) => q.side === 'out' && q !== hit.pin && q.instrument === hit.pin.instrument);
@@ -1162,7 +1167,7 @@ export class SignalPlane extends HTMLElement {
     const drop = d.target ? { box: d.target.box, port: d.target.port, channel: d.target.channel } : null;
     const instances = (this.graph?.top?.instances ?? []).map((i) => i.name);
     const result = cableDrop(d, drop, { bindings: this.model.bindings, instances, main: this.model.main, devices: this.devices, scope: event.shiftKey ? 'project' : 'machine' });
-    if (!result.ops.length && !result.route) {
+    if (!result.ops.length && !result.route && !result.routes?.length) {
       if (result.note) this.say(result.note);
       return;
     }
@@ -1180,7 +1185,7 @@ export class SignalPlane extends HTMLElement {
    * keeps the outputs it started with): refused while playing, it is
    * written stopped and played again.
    */
-  async writeSetupCable({ ops, route }) {
+  async writeSetupCable({ ops, route, routes }) {
     // ADR 0049: of the opening the graph shown is of.
     const patch = () => this.request(named({ type: 'patch', level: '', base: this.graph?.files?.[''] ?? null, ops }, graphGeneration(this.graph)));
     let restart = false;
@@ -1195,8 +1200,8 @@ export class SignalPlane extends HTMLElement {
           await patch();
         }
       }
-      if (route) {
-        await this.request(route).catch((error) => {
+      for (const one of routes ?? (route ? [route] : [])) {
+        await this.request(one).catch((error) => {
           // Refused: what the Setup holds now is read again (a saved one comes as the `setup` push).
           this.readSetup();
           throw error;
@@ -1228,6 +1233,8 @@ export class SignalPlane extends HTMLElement {
       name.append(svg('title', {}, b.name));
       box.append(name, svg('text', { class: 'small-kind', x: x + 20, y: y + 82 }, channelSummary(b)));
       g.append(box);
+      // A device that captures starts a cable from its row: its first input (ADR 0038 §7).
+      if (b.present && b.outputs.length) this.hits.captures.push({ box: b.key, port: b.outputs[0], x: x + s.w, y: y + s.h / 2, row: { x, y, w: s.w, h: s.h } });
     });
     return g;
   }

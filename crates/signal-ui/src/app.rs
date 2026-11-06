@@ -200,6 +200,11 @@ pub fn start(
         let output = open_output(backend, devices, setup, rate, width, seed, notes)?;
         (output, Vec::new())
     };
+    // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
+    let captures = signal_project::device::capture_sides(project, &plan);
+    output.set_captures(crate::player::capture_specs(
+        backend, devices, setup, &captures, notes,
+    ));
     // ADR 0036: the engine is sized for the period the device runs at (its
     // own while it runs for another app).
     let buffer = output.period().unwrap_or(setup.buffer);

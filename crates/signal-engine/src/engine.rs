@@ -21,7 +21,7 @@ use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
     Feedthrough, Frame, Inputs, InstanceAddress, LossCause, MAX_VECTOR_WIDTH, ModuleDescriptor,
     Outputs, PortAddress, PortKind, PortShape, PrepareContext, Primitive, Range, Registry,
-    Reproducibility, RngStream, SinkKind, StateOutputPrimitive, Table, fnv1a64_words,
+    Reproducibility, RngStream, SinkKind, SourceKind, StateOutputPrimitive, Table, fnv1a64_words,
 };
 use signal_graph::ExecutionPlan;
 
@@ -40,6 +40,7 @@ use crate::shared::{Access, CallView, Job, Layout, Parts, PlanCells, Reader, Win
 #[cfg(feature = "test-hooks")]
 use crate::shared::{Armed, HookPoint, Refuse};
 use crate::sink::Sink;
+use crate::source::Source;
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
 use crate::wake::{MakeWaiter, RtPolicy, WakeStats};
@@ -429,6 +430,12 @@ pub(crate) struct Slot {
     /// engine hands a sink's inputs to the driver's output, whatever the
     /// kind).
     sink: Option<SinkKind>,
+    /// The external origin its descriptor declares, if any (ADR 0038 §7:
+    /// the driver writes its external rows, one per signal output row).
+    source: Option<SourceKind>,
+    /// Its external rows in the plan's external buffer (a source's; empty
+    /// for every other instance).
+    external: Span<usize>,
     /// Declares a latency (ADR 0019 §3): asked [`StateOutputPrimitive::due`]
     /// before each `emit`.
     latent: bool,
@@ -595,6 +602,8 @@ pub(crate) struct Lane {
     call_signals: Vec<f64>,
     call_params: Vec<f64>,
     call_outputs: Vec<f64>,
+    /// A source's external rows for the call (ADR 0038 §7).
+    call_external: Vec<f64>,
     modulation: Vec<f64>,
     saved_params: Vec<(Base, Option<f64>)>,
     saved: Saved,
@@ -692,6 +701,10 @@ pub(crate) struct PlanState {
     capacity: usize,
     /// Summed signal inputs of the last frame.
     signal_in: Vec<f64>,
+    /// The sources' external rows for the next block (ADR 0038 §7), row
+    /// major, `capacity` frames each: what the driver writes before a
+    /// block ([`Engine::source_rows_mut`]).
+    external: Vec<f64>,
     signal_sources: Vec<Vec<(usize, f64)>>,
     /// What readers saw of every signal output in the last frame.
     outputs: Vec<f64>,
@@ -792,6 +805,8 @@ impl PlanState {
         let mut primitives = Vec::with_capacity(plan.instances.len());
         let mut survivors = Vec::new();
         let mut signal_inputs = 0;
+        // The sources' external rows (ADR 0038 §7), in instance order.
+        let mut external_rows = 0usize;
         let mut event_inputs = Vec::new();
         let mut output_audio = Vec::new();
         let mut output_ports = Vec::new();
@@ -973,6 +988,14 @@ impl PlanState {
             slots.push(Slot {
                 feedthrough: descriptor.feedthrough,
                 sink: descriptor.sink,
+                source: descriptor.source,
+                external: if descriptor.source.is_some() {
+                    let rows = output_audio.len() - starts.2;
+                    external_rows += rows;
+                    external_rows - rows..external_rows
+                } else {
+                    external_rows..external_rows
+                },
                 latent: descriptor.latency.is_some(),
                 latency: descriptor.latency,
                 latent_frames: 0,
@@ -1254,6 +1277,7 @@ impl PlanState {
                 call_signals: vec![0.0; most(|s| s.signal_in.len()) * capacity],
                 call_params: vec![0.0; most(|s| s.params.len()) * capacity],
                 call_outputs: vec![0.0; most(|s| s.signal_out.len()) * capacity],
+                call_external: vec![0.0; most(|s| s.external.len()) * capacity],
                 modulation: vec![0.0; capacity],
                 saved_params: Vec::with_capacity(most(|s| s.params.len())),
                 saved: Saved::default(),
@@ -1357,6 +1381,7 @@ impl PlanState {
             tasks,
             capacity,
             signal_in: vec![0.0; signal_inputs],
+            external: vec![0.0; external_rows * capacity],
             signal_sources,
             outputs: vec![0.0; outputs],
             output_audio,
@@ -2410,6 +2435,9 @@ impl Engine {
             a = b;
         }
 
+        // The sources' rows were read: the next block's start at 0 (a
+        // driver that writes none gives 0, never this block's again).
+        self.plan.external.fill(0.0);
         let used = self.boundary.used.saturating_sub(used_before);
         let unused = (self.staged_boundaries.len() as u64).saturating_sub(used);
         self.boundary_unused = self.boundary_unused.saturating_add(unused);
@@ -2607,6 +2635,8 @@ impl Engine {
         let plan = &mut self.plan;
         let fx = Fixed {
             units: &plan.units,
+            external: &plan.external,
+            capacity: plan.capacity,
             signal_sources: &plan.signal_sources,
             event_inputs: &plan.event_inputs,
             outputs: &plan.outputs,
@@ -3165,6 +3195,58 @@ impl Engine {
             })
     }
 
+    /// The running plan's sources (ADR 0038 §7, the mirror of
+    /// [`sinks`](Engine::sinks)): every instance whose descriptor declares a
+    /// source kind, in instance order, with its kind and its external rows
+    /// (one per signal output row). A driver writes their frames before
+    /// each block ([`source_rows_mut`](Engine::source_rows_mut)); rows it
+    /// does not write read 0. Allocates nothing.
+    pub fn sources(&self) -> impl Iterator<Item = Source<'_>> {
+        self.plan
+            .cells
+            .slots
+            .get()
+            .iter()
+            .zip(&self.plan.instances)
+            .enumerate()
+            .filter_map(|(i, (slot, address))| {
+                Some(Source {
+                    id: InstanceId(i),
+                    kind: slot.source?,
+                    address,
+                    rows: slot.external.len(),
+                })
+            })
+    }
+
+    /// The block capacity *K*: the most frames one
+    /// [`run_block`](Engine::run_block) runs.
+    pub fn capacity(&self) -> usize {
+        self.plan.capacity
+    }
+
+    /// Source `instance`'s external rows for the next block (ADR 0038 §7):
+    /// row-major, [`capacity`](Engine::capacity) frames each; the driver
+    /// writes frames `0..k` of each row before
+    /// [`run_block(k)`](Engine::run_block). `None` for an instance that is
+    /// not a source. Every block reads them and leaves them at 0, so a row
+    /// not written reads 0. Allocates nothing.
+    pub fn source_rows_mut(&mut self, instance: InstanceId) -> Option<&mut [f64]> {
+        let rows = self
+            .plan
+            .cells
+            .slots
+            .get()
+            .get(instance.0)?
+            .external
+            .clone();
+        if rows.is_empty() {
+            return None;
+        }
+        let k = self.plan.capacity;
+        self.plan.external.get_mut(rows.start * k..rows.end * k)
+    }
+
     /// The address of `instance`.
     pub fn instance_address(&self, instance: InstanceId) -> Option<&InstanceAddress> {
         self.plan.instances.get(instance.0)
@@ -3281,6 +3363,10 @@ impl Engine {
 #[derive(Clone, Copy)]
 struct Fixed<'x> {
     units: &'x Units,
+    /// The sources' external rows (ADR 0038 §7) and their stride, the
+    /// block capacity.
+    external: &'x [f64],
+    capacity: usize,
     signal_sources: &'x [Vec<(usize, f64)>],
     event_inputs: &'x [EventInput],
     outputs: &'x [f64],
@@ -3373,6 +3459,7 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
         Mode::Running => {
             let ports = (v.slot.signal_in.len(), v.slot.params.len());
             load_call(v.lane, (&v.signal_in, &v.param_rows), ports, a, len);
+            load_external(fx, v.slot, v.lane, a, len);
             for sink in v.sinks.iter_mut() {
                 sink.start_call(len);
             }
@@ -3523,6 +3610,22 @@ fn first_tick(fx: &Fixed<'_>, d: u64, a: usize, b: usize) -> Option<usize> {
 fn ticks_from(d: u64, t1: usize, b: usize) -> usize {
     let d = usize::try_from(d).unwrap_or(usize::MAX).max(1);
     (b - t1 - 1) / d + 1
+}
+
+/// Copies a source's external rows for block frames `a..a + len` into its
+/// lane's call buffer, row-major (ADR 0038 §7). Nothing for another
+/// instance. Allocates nothing.
+#[inline(always)]
+fn load_external(fx: &Fixed<'_>, slot: &Slot, lane: &mut Lane, a: usize, len: usize) {
+    for (r, row) in slot.external.clone().enumerate() {
+        let from = row * fx.capacity + a;
+        if let (Some(to), Some(from)) = (
+            lane.call_external.get_mut(r * len..(r + 1) * len),
+            fx.external.get(from..from + len),
+        ) {
+            to.copy_from_slice(from);
+        }
+    }
 }
 
 /// Copies the instance's summed signal inputs and effective parameter values
@@ -3941,7 +4044,12 @@ fn process(
         &slot.sources_changed
     } else {
         &[]
-    });
+    })
+    .with_external(
+        lane.call_external
+            .get(..slot.external.len() * len)
+            .unwrap_or(&[]),
+    );
     let mut outputs = Outputs::new(
         len,
         lane.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
@@ -4251,6 +4359,7 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
             let Some(slot) = w.slots.get_mut(i) else {
                 return;
             };
+            load_external(fx, slot, w.lane, a, len);
             let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
             for sink in sinks.iter_mut() {
                 sink.start_call(len);

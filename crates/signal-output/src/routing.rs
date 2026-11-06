@@ -354,6 +354,111 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
     }
 }
 
+/// A capture side of the plan with its role (ADR 0038 §7): what the
+/// project captures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureSide {
+    /// The source instance.
+    pub address: InstanceAddress,
+    /// Its role (`main`, `voice`, …).
+    pub role: String,
+    /// Its signal outputs (its channels, in port order).
+    pub width: usize,
+}
+
+/// Where a capture side's frames come from on this machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Captured {
+    /// From an input device (its name, as the binding names it), through a
+    /// ring when it is the clock device, a clock adapter otherwise (ADR
+    /// 0038 §8, ADR 0052 §8): the driver decides.
+    Device(String),
+    /// No input binds it, or its device is not present: it reads 0.
+    Silent(String),
+}
+
+/// One capture side as routed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutedCapture {
+    /// The source instance.
+    pub address: InstanceAddress,
+    /// Its role.
+    pub role: String,
+    /// The role whose binding it captures from: its own, or `main` (an
+    /// unknown capture role falls back to it, ADR 0038 §4).
+    pub captured_as: String,
+    /// Its channels.
+    pub width: usize,
+    /// Per port, the device's input channel (from 1) it reads; `None`: 0.
+    pub channels: Vec<Option<u16>>,
+    /// Where from.
+    pub from: Captured,
+}
+
+/// Routes `sides` on the machine's capture bindings (ADR 0038 §4, §7):
+/// `bindings` by role, each a device (its name; `None`: the machine's
+/// default input) and its input channels from 1. A role without a binding
+/// captures `main`'s, with a notice (capturing the same channels twice
+/// mixes nothing); without either it captures the default input's
+/// channels 1 to its width. Canonical order: role, then address. Returns
+/// the routed sides and the notices.
+pub fn route_captures(
+    sides: &[CaptureSide],
+    bindings: &BTreeMap<String, (Option<String>, Vec<u16>)>,
+    default_input: Option<&str>,
+) -> (Vec<RoutedCapture>, Vec<String>) {
+    let mut ordered: Vec<&CaptureSide> = sides.iter().collect();
+    ordered.sort_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)));
+    let mut notices = Vec::new();
+    let mut routed = Vec::with_capacity(ordered.len());
+    for side in ordered {
+        let who = format!("{} ({})", side.role, side.address);
+        let (captured_as, binding) = match bindings.get(&side.role) {
+            Some(binding) => (side.role.clone(), Some(binding)),
+            None => {
+                if side.role != MAIN {
+                    notices.push(format!(
+                        "{who}: nothing binds capture role `{}` here ([capture.{}] in the Setup); it captures main's input",
+                        side.role, side.role
+                    ));
+                }
+                (MAIN.to_owned(), bindings.get(MAIN))
+            }
+        };
+        let (device, wanted): (Option<String>, Vec<u16>) = match binding {
+            Some((device, channels)) => (
+                device.clone().or_else(|| default_input.map(str::to_owned)),
+                channels.clone(),
+            ),
+            None => (
+                default_input.map(str::to_owned),
+                (1..=side.width)
+                    .filter_map(|c| u16::try_from(c).ok())
+                    .collect(),
+            ),
+        };
+        let channels: Vec<Option<u16>> = (0..side.width)
+            .map(|port| wanted.get(port).copied().filter(|&c| c > 0))
+            .collect();
+        let from = match device {
+            Some(name) => Captured::Device(name),
+            None => {
+                notices.push(format!("{who}: no input device here; it reads 0"));
+                Captured::Silent("no input device".to_owned())
+            }
+        };
+        routed.push(RoutedCapture {
+            address: side.address.clone(),
+            role: side.role.clone(),
+            captured_as,
+            width: side.width,
+            channels,
+            from,
+        });
+    }
+    (routed, notices)
+}
+
 fn unheard(side: &PlaySide, heard: Heard) -> RoutedSide {
     RoutedSide {
         address: side.address.clone(),
@@ -546,6 +651,46 @@ mod tests {
         assert_eq!(routing.notices.len(), 2);
         assert!(routing.notices[0].contains("played by position"));
         assert!(routing.notices[1].contains("device channel 5 does not exist (the device has 4)"));
+    }
+
+    fn capture(address: &str, role: &str, width: usize) -> CaptureSide {
+        CaptureSide {
+            address: address.parse().unwrap(),
+            role: role.to_owned(),
+            width,
+        }
+    }
+
+    /// ADR 0038 §4: a capture role the machine binds reads its device's
+    /// channels; an unknown one falls back to main's, with a notice;
+    /// without any binding main is the default input's 1 to its width.
+    #[test]
+    fn capture_roles_route_to_their_inputs_or_fall_back_to_main() {
+        let sides = [capture("/mic", "voice", 1), capture("/room", MAIN, 2)];
+        let bindings: BTreeMap<String, (Option<String>, Vec<u16>)> =
+            [("voice".to_owned(), (Some("AT2020USB+".to_owned()), vec![1]))].into();
+        let (routed, notices) = route_captures(&sides, &bindings, Some("SSL 2+"));
+        assert!(notices.is_empty(), "{notices:?}");
+        // Canonical order: `main` < `voice`.
+        assert_eq!(routed[0].role, MAIN);
+        assert_eq!(routed[0].from, Captured::Device("SSL 2+".to_owned()));
+        assert_eq!(routed[0].channels, [Some(1), Some(2)]);
+        assert_eq!(routed[1].from, Captured::Device("AT2020USB+".to_owned()));
+        assert_eq!(routed[1].channels, [Some(1)]);
+
+        let (routed, notices) = route_captures(
+            &[capture("/mic", "voice", 1)],
+            &BTreeMap::new(),
+            Some("SSL 2+"),
+        );
+        assert_eq!(routed[0].captured_as, MAIN);
+        assert_eq!(routed[0].from, Captured::Device("SSL 2+".to_owned()));
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("captures main's input"));
+
+        let (routed, notices) = route_captures(&[capture("/mic", MAIN, 2)], &BTreeMap::new(), None);
+        assert!(matches!(routed[0].from, Captured::Silent(_)));
+        assert_eq!(notices, ["main (/mic): no input device here; it reads 0"]);
     }
 
     /// The same project and sound system route the same whatever order the

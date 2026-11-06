@@ -25,6 +25,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     )],
     feedthrough: Feedthrough::Direct,
     sink: Some(SinkKind::Audio),
+    source: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
     category: Some(crate::category::IO),

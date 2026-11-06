@@ -84,6 +84,19 @@ pub struct Script {
     pub edits: Vec<Edit>,
     /// Plan swaps, at most one per frame.
     pub swaps: Vec<Swap>,
+    /// What the driver writes for sources (ADR 0038 §7); a source or a
+    /// frame not listed reads 0.
+    pub inputs: Vec<SourceInput>,
+}
+
+/// A source's external rows over the run (ADR 0038 §7): `rows[r][n]` is
+/// signal output row *r* at frame *n*.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceInput {
+    /// The source instance.
+    pub instance: InstanceAddress,
+    /// Per row, its value per frame.
+    pub rows: Vec<Vec<f64>>,
 }
 
 /// An external event.

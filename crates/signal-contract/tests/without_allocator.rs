@@ -28,6 +28,7 @@ impl DirectPrimitive for Silence {
             parameters: &[],
             feedthrough: Feedthrough::Direct,
             sink: None,
+            source: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
             category: None,

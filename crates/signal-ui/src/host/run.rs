@@ -542,6 +542,15 @@ impl Host {
                 self.setup.cpu_workers.unwrap_or(0),
             )
         };
+        // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
+        let captures = signal_project::device::capture_sides(&project, &plan);
+        output.set_captures(crate::player::capture_specs(
+            &self.backend,
+            &self.devices,
+            &self.setup,
+            &captures,
+            &mut notes,
+        ));
         // ADR 0036: the period the device runs at (its own while in use).
         let buffer = output.period().unwrap_or(buffer);
         let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));

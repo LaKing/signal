@@ -64,6 +64,10 @@ pub struct PrepareContext {
 ///   whether the plan swapped in since the instance's last call gives it
 ///   another set of sources (source port, scale) than the plan before. Only
 ///   the first call after such a swap sees it, at its first frame.
+/// - `external` (ADR 0038 §7): a source type's external rows (its
+///   descriptor declares [`SourceKind`](crate::SourceKind)), what the driver
+///   wrote for these frames, row-major as `signals`: one row per signal
+///   output. Empty for every other type.
 #[derive(Clone, Copy, Debug)]
 pub struct Inputs<'a> {
     frames: usize,
@@ -74,6 +78,7 @@ pub struct Inputs<'a> {
     table: Option<&'a Table>,
     connected: &'a [bool],
     sources_changed: &'a [bool],
+    external: &'a [f64],
 }
 
 impl<'a> Inputs<'a> {
@@ -94,7 +99,22 @@ impl<'a> Inputs<'a> {
             table: None,
             connected: &[],
             sources_changed: &[],
+            external: &[],
         }
+    }
+
+    /// These views with a source type's external rows (ADR 0038 §7), laid
+    /// out as `signals`: what the engine hands a source instance.
+    pub fn with_external(self, external: &'a [f64]) -> Inputs<'a> {
+        Inputs { external, ..self }
+    }
+
+    /// External row `row` of a source type (ADR 0038 §7), one value per
+    /// frame: what the driver wrote for its signal output `row` (an audio
+    /// device's channel, a recorded input, a render fixture). Empty for a
+    /// row past them, and for a type that is not a source.
+    pub fn external(&self, row: usize) -> &'a [f64] {
+        block(self.external, row, self.frames)
     }
 
     /// These views with the instance's table (ADR 0028 §4): what the engine
@@ -442,6 +462,7 @@ impl EventSink {
 ///     }],
 ///     feedthrough: Feedthrough::Direct,
 ///     sink: None,
+///     source: None,
 ///     latency: None,
 ///     reproducibility: signal_core::Reproducibility::BitExact,
 ///     category: None,
@@ -539,6 +560,7 @@ pub trait DirectPrimitive: Send {
 ///     parameters: &[],
 ///     feedthrough: Feedthrough::StateOutput,
 ///     sink: None,
+///     source: None,
 ///     latency: None,
 ///     reproducibility: signal_core::Reproducibility::BitExact,
 ///     category: None,

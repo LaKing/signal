@@ -567,7 +567,7 @@ impl Walk<'_> {
                 // layout; `std.audio_out` is `main`, stereo.
                 if def.name.is_empty() {
                     let device = match self.project.device_slots().get(name) {
-                        Some(slot) => Some(json!({"role": slot.role, "play": slot.play, "written": true})),
+                        Some(slot) => Some(json!({"role": slot.role, "play": slot.play, "capture": slot.capture, "written": true})),
                         None if instance.module == crate::device::STEREO_SINK => Some(
                             json!({"role": signal_output::MAIN, "play": "stereo", "written": false}),
                         ),

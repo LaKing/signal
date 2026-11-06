@@ -203,7 +203,7 @@ impl SecondaryStats {
         }
     }
 
-    fn publish(&self, output: &AdapterOutput) {
+    pub(crate) fn publish(&self, output: &AdapterOutput) {
         let status = output.status();
         if !self.is_gone() {
             let state = match status.state {

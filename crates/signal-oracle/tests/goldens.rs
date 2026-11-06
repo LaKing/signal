@@ -43,6 +43,7 @@ fn golden(name: &str) {
         events: Vec::new(),
         edits: Vec::new(),
         swaps: Vec::new(),
+        inputs: Vec::new(),
     };
     let oracle = signal_oracle::run(&registry, &graph_of(&planned.plan, 7), &script).unwrap();
     let setup = Setup {

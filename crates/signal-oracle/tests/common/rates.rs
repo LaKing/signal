@@ -87,6 +87,7 @@ fn descriptor(
         parameters: leak(parameters),
         feedthrough,
         sink: None,
+        source: None,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
         category: None,

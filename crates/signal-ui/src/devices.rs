@@ -415,6 +415,35 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
     let device = device_of(message)?;
     let scope = scope_of(message)?;
     let mut notes = Vec::new();
+    // ADR 0038 §4, §7: a capture role's input channels, the Setup's
+    // `[capture.<role>]` (its device: the Setup's input without one).
+    match message.get("side").and_then(Value::as_str) {
+        None | Some("play") => {}
+        Some("capture") => {
+            if scope == Scope::Project {
+                return Err(refused(
+                    "not-built",
+                    "a capture role is bound in the Setup (scope \"machine\"); devices.local.toml binds play roles only for now",
+                ));
+            }
+            setup
+                .capture
+                .insert(role.clone(), PlayEntry { channels, device });
+            return Ok(Routed {
+                role,
+                scope,
+                setup_changed: true,
+                local_written: false,
+                notes,
+            });
+        }
+        Some(other) => {
+            return Err(refused(
+                "bad-value",
+                format!("side is \"play\" or \"capture\", not \"{other}\""),
+            ));
+        }
+    }
     match scope {
         Scope::Machine => {
             if role == MAIN {
@@ -696,6 +725,49 @@ mod tests {
             system.roles["gone"].placement,
             Placement::Missing(..)
         ));
+    }
+
+    /// ADR 0038 §7: `side: capture` binds a capture role in the Setup's
+    /// `[capture.<role>]`, its device as given; the project scope is
+    /// refused for it.
+    #[test]
+    fn a_capture_route_writes_the_setup_capture_table() {
+        let mut setup = Setup {
+            output: Some(entry(&ssl())),
+            ..Setup::default()
+        };
+        let at2020 = json!({"name": "AT2020USB+", "id": "coreaudio:at", "signature": ""});
+        let routed = route(
+            &json!({"side": "capture", "role": "input", "channels": [1], "device": at2020}),
+            &mut setup,
+            None,
+        )
+        .unwrap();
+        assert!(routed.setup_changed);
+        assert_eq!(setup.capture["input"].channels, vec![1]);
+        assert_eq!(
+            setup.capture["input"]
+                .device
+                .as_ref()
+                .map(|d| d.name.as_str()),
+            Some("AT2020USB+")
+        );
+        assert!(setup.play.is_empty());
+        let refused = route(
+            &json!({"side": "capture", "role": "input", "channels": [1], "scope": "project"}),
+            &mut setup,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "not-built");
+        assert!(
+            route(
+                &json!({"side": "middle", "role": "x", "channels": [1]}),
+                &mut setup,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

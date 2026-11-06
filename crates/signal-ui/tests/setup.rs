@@ -48,6 +48,19 @@ fn full() -> Setup {
             },
         )]
         .into(),
+        // ADR 0038 §7: a capture role on another input.
+        capture: [(
+            "voice".to_owned(),
+            PlayEntry {
+                channels: vec![1],
+                device: Some(DeviceEntry {
+                    name: "AT2020USB+".to_owned(),
+                    id: Some("coreaudio:at2020".to_owned()),
+                    signature: String::new(),
+                }),
+            },
+        )]
+        .into(),
     }
 }
 

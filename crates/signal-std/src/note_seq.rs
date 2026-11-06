@@ -77,6 +77,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     parameters: &[PPQ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    source: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
     category: Some(crate::category::EVENT),

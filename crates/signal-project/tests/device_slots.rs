@@ -2,13 +2,15 @@
 //! a layout and a role, never hardware; `stereo` plans as `std.audio_out`
 //! (its ports `l`, `r`, `gain`), so the plan is the one a `std.audio_out`
 //! of the same name gives, and the role is handed beside the plan
-//! (`device::play_sides`). Two outputs of one role are a plan error; the
-//! layouts not built yet, capture, a role that is no name, a device slot
-//! in a composite and a device slot with module keys are refused with
-//! their reason.
+//! (`device::play_sides`). A `capture` side plans as a source,
+//! `std.audio_in` or `std.audio_in_mono`, its role handed beside the plan
+//! (`device::capture_sides`, ADR 0038 §7). Two outputs of one role are a
+//! plan error; the layouts not built yet, a slot that both plays and
+//! captures, a role that is no name, a device slot in a composite and a
+//! device slot with module keys are refused with their reason.
 
 use signal_core::Registry;
-use signal_project::device::{main_side, play_sides};
+use signal_project::device::{capture_sides, main_side, play_sides};
 use signal_project::session::sink_of;
 use signal_project::{Project, SourceFile};
 
@@ -69,7 +71,10 @@ fn a_cue_device_slot_is_a_stereo_play_side_of_its_role() {
     ))
     .unwrap();
     let slot = project.device_slots().get("cue").unwrap();
-    assert_eq!((slot.role.as_str(), slot.play.as_str()), ("cue", "stereo"));
+    assert_eq!(
+        (slot.role.as_str(), slot.play.as_deref()),
+        ("cue", Some("stereo"))
+    );
     let plan = project.plan(&registry).unwrap().plan;
     let sides = play_sides(&project, &plan);
     let described: Vec<(String, String, usize)> = sides
@@ -140,8 +145,12 @@ fn what_is_not_built_or_not_valid_is_refused_with_its_reason() {
             "cue: `hexa` is not a layout",
         ),
         (
-            "{ device = { capture = \"stereo\" } }",
-            "cue: a device slot's `capture` (audio input) is not built yet",
+            "{ device = { play = \"stereo\", capture = \"stereo\" } }",
+            "cue: a device slot that both plays and captures (one box, ADR 0038 §3) is not built yet",
+        ),
+        (
+            "{ device = { capture = \"5.1\" } }",
+            "cue: the capture layout `5.1` is not built yet",
         ),
         (
             "{ device = { play = \"stereo\", role = \"Cue\" } }",
@@ -153,7 +162,7 @@ fn what_is_not_built_or_not_valid_is_refused_with_its_reason() {
         ),
         (
             "{ device = { role = \"cue\" } }",
-            "cue: a device slot needs `play`",
+            "cue: a device slot needs `play` or `capture`",
         ),
         (
             "{ device = { play = \"stereo\", role = \"cue\", channels = [3, 4] } }",
@@ -194,5 +203,44 @@ fn a_composite_names_no_device_slot() {
     assert!(
         found.contains("a device slot is a top-level instance of project.toml"),
         "{found}"
+    );
+}
+
+/// ADR 0038 §7: a capture side is a source of its role, `std.audio_in`
+/// (stereo) or `std.audio_in_mono`, wired from its outputs.
+#[test]
+fn a_capture_slot_is_a_source_of_its_role() {
+    let text = "schema_version = 1\n[project]\nname = \"listen\"\nsample_rate = 48000\n\
+         [instances]\nmic = { device = { capture = \"mono\", role = \"voice\" } }\n\
+         room = { device = { capture = \"stereo\" } }\nout = { module = \"std.audio_out\" }\n\
+         [wiring]\nconnections = [\n  { from = \"mic.m\", to = \"out.l\" },\n  { from = \"room.r\", to = \"out.r\" },\n]\n";
+    let project = load(text).unwrap();
+    let slot = project.device_slots().get("mic").unwrap();
+    assert_eq!(slot.capture.as_deref(), Some("mono"));
+    assert_eq!(slot.play, None);
+    let plan = project.plan(&registry()).unwrap().plan;
+    let types: Vec<(String, &str)> = plan
+        .instances
+        .iter()
+        .map(|i| (i.address.to_string(), i.type_name))
+        .collect();
+    assert!(
+        types.contains(&("/mic".to_owned(), "std.audio_in_mono")),
+        "{types:?}"
+    );
+    assert!(
+        types.contains(&("/room".to_owned(), "std.audio_in")),
+        "{types:?}"
+    );
+    let sides: Vec<(String, String, usize)> = capture_sides(&project, &plan)
+        .iter()
+        .map(|s| (s.address.to_string(), s.role.clone(), s.width))
+        .collect();
+    assert_eq!(
+        sides,
+        [
+            ("/mic".to_owned(), "voice".to_owned(), 1),
+            ("/room".to_owned(), "main".to_owned(), 2),
+        ]
     );
 }

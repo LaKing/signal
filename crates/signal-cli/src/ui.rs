@@ -89,7 +89,7 @@ pub(crate) fn run(
         }
     };
     check(play)?;
-    if !play.route.is_empty() {
+    if !play.route.is_empty() || !play.capture.is_empty() {
         return Err(Failure::Usage(
             "signal ui routes roles with the Setup's [play.<role>] (--setup, docs/project-format.md §9); --route is signal play's"
                 .to_owned(),

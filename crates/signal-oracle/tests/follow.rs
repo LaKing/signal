@@ -95,6 +95,7 @@ fn script() -> (ExecutionPlan, Vec<ExecutionPlan>, Script) {
         (1600, plan(None, None, 4)),
     ];
     let script = Script {
+        inputs: Vec::new(),
         sample_rate: 1000,
         seed: 5,
         frames: 2000,

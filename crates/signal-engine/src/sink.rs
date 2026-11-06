@@ -38,4 +38,14 @@ pub trait SinkOutput {
     /// [`Engine::sink_input_at`] for frames `0..frames`, and the effective
     /// parameter values [`Engine::parameter_at_frame`].
     fn block(&mut self, engine: &Engine, frames: usize);
+
+    /// Before a block of `frames` frames: writes the sources' external rows
+    /// (ADR 0038 §7) for frames `0..frames` through
+    /// [`Engine::source_rows_mut`], the driver's input side beside its
+    /// output. The default writes none: every source reads 0. In real time
+    /// it runs on the audio thread, under the same rules as
+    /// [`block`](SinkOutput::block).
+    fn sources(&mut self, engine: &mut Engine, frames: usize) {
+        let _ = (engine, frames);
+    }
 }

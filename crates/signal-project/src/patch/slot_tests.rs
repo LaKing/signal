@@ -139,6 +139,39 @@ fn the_fixture_plans() {
     plans(HOST).unwrap();
 }
 
+/// ADR 0038 §7: `device.add` with `capture` writes a capture slot, a
+/// source of its role; exactly one of `play` and `capture`; a capture
+/// layout not built is refused.
+#[test]
+fn a_capture_slot_is_added_and_undone() {
+    let (text, _) = round_trip(
+        HOST,
+        &[op(
+            serde_json::json!({"op": "device.add", "name": "input", "capture": "mono", "role": "input"}),
+        )],
+    );
+    assert!(
+        text.contains("input = { device = { capture = \"mono\", role = \"input\" } }\n"),
+        "{text}"
+    );
+    plans(&text).unwrap();
+    let refused = |json: serde_json::Value| {
+        apply(HOST, None, &[op(json)], &ctx())
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        refused(
+            serde_json::json!({"op": "device.add", "name": "x", "capture": "5.1", "role": "x"})
+        )
+        .contains("not built yet")
+    );
+    assert!(
+        refused(serde_json::json!({"op": "device.add", "name": "x", "play": "stereo", "capture": "mono", "role": "x"}))
+            .contains("with `play` or `capture`")
+    );
+}
+
 /// ADR 0038 §3 (M4.1): `device.add` writes a device slot (a layout and a
 /// role, never hardware) and its connections in one patch; the undo puts
 /// the file back byte for byte; what is not built, a bad role and a

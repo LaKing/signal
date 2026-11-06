@@ -363,6 +363,12 @@ impl Host {
                 .as_ref()
                 .map(|run| run.output.secondaries())
                 .unwrap_or_default(),
+            // ADR 0038 §10: the playing run's input devices.
+            "captures": self
+                .run
+                .as_ref()
+                .map(|run| run.output.captures())
+                .unwrap_or_default(),
         })
     }
 

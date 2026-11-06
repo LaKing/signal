@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use clap::{Args, ValueEnum};
 use serde_json::json;
 use signal_audio::{
-    BufferRequest, CallbackStats, CoreAudioDriver, Demotions, DeviceSelector, JoinPlan, Scheduling,
-    SecondarySpec, SecondaryState, SecondaryStatus, StatsSnapshot, live_rate, output_period,
-    rate_notice, rt_thread,
+    BufferRequest, CallbackStats, CaptureSideSpec, CaptureSpec, CaptureStatus, CoreAudioDriver,
+    Demotions, DeviceSelector, JoinPlan, Scheduling, SecondarySpec, SecondaryState,
+    SecondaryStatus, StatsSnapshot, live_rate, output_period, rate_notice, rt_thread,
 };
 use signal_core::{Frame, Registry};
 use signal_engine::{
@@ -109,6 +109,14 @@ pub(crate) struct PlayArgs {
     /// output device, by name, through a clock adapter (ADR 0052).
     #[arg(long, value_name = "ROLE[@DEVICE]=CHANNELS", value_parser = parse_route)]
     pub(crate) route: Vec<RouteArg>,
+    /// Captures role ROLE from these input channels, for this run only
+    /// (ADR 0038 §4, §7): `--capture voice@AT2020USB+=1`. Without a device,
+    /// the system's default input; repeatable. A capture role with none
+    /// captures main's; main without one, the default input's channels 1
+    /// to its width. Through a clock adapter when the input is not the
+    /// output device (ADR 0052 §8). CoreAudio only.
+    #[arg(long, value_name = "ROLE[@DEVICE]=CHANNELS", value_parser = parse_route)]
+    pub(crate) capture: Vec<RouteArg>,
 }
 
 /// One `--route`: a role, the device it plays on (`None`: the output
@@ -190,6 +198,8 @@ struct Ended {
     joined: Option<JoinPlan>,
     /// The secondary devices as the run ended (ADR 0052; CoreAudio only).
     secondaries: Vec<SecondaryStatus>,
+    /// The input devices as the run ended (ADR 0038 §8; CoreAudio only).
+    captures: Vec<CaptureStatus>,
 }
 
 /// A distribution in µs, for the JSON.
@@ -490,6 +500,63 @@ pub(crate) fn run(
     } else {
         (width, Vec::new(), None, Vec::new())
     };
+    // ADR 0038 §7: every capture side, routed on the inputs `--capture`
+    // names (the default input otherwise).
+    let captures = signal_project::device::capture_sides(&project, &plan);
+    let captures = if captures.is_empty() {
+        Vec::new()
+    } else if null {
+        eprintln!(
+            "signal: the null driver captures nothing; {} read 0",
+            captures
+                .iter()
+                .map(|c| c.address.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Vec::new()
+    } else {
+        let list = signal_audio::devices().unwrap_or_default();
+        let default_input = list
+            .iter()
+            .find(|d| d.direction == signal_audio::Direction::Input && d.default)
+            .map(|d| d.name.clone());
+        let bindings = args
+            .capture
+            .iter()
+            .map(|c| (c.role.clone(), (c.device.clone(), c.channels.clone())))
+            .collect();
+        let (routed, notices) =
+            signal_output::route_captures(&captures, &bindings, default_input.as_deref());
+        for notice in &notices {
+            eprintln!("signal: {notice}");
+        }
+        let mut specs: Vec<CaptureSpec> = Vec::new();
+        for side in routed {
+            let signal_output::Captured::Device(name) = &side.from else {
+                continue;
+            };
+            let spec_side = CaptureSideSpec {
+                address: side.address.clone(),
+                role: side.role.clone(),
+                width: side.width,
+                channels: side
+                    .channels
+                    .iter()
+                    .map(|c| c.map(|c| usize::from(c) - 1))
+                    .collect(),
+            };
+            match specs.iter_mut().find(|s| s.name == *name) {
+                Some(spec) => spec.sides.push(spec_side),
+                None => specs.push(CaptureSpec {
+                    selector: DeviceSelector::Name(name.clone()),
+                    name: name.clone(),
+                    sides: vec![spec_side],
+                }),
+            }
+        }
+        specs
+    };
     let seed = project.seed;
     let selector = args
         .device
@@ -598,7 +665,7 @@ pub(crate) fn run(
             &mut control,
             runner,
             width,
-            (routes, secondaries),
+            (routes, secondaries, captures),
             limit,
             &stop,
         )?
@@ -724,6 +791,7 @@ pub(crate) fn run(
             })),
             "audio": args.record_audio.as_ref().map(|p| p.display().to_string()),
             "secondaries": ended.secondaries,
+            "captures": ended.captures,
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
@@ -773,6 +841,12 @@ pub(crate) fn run(
                 .secondaries
                 .iter()
                 .map(|s| format!("\n{}", secondary_line(s)))
+                .chain(
+                    ended
+                        .captures
+                        .iter()
+                        .map(|c| format!("\n{}", capture_line(c)))
+                )
                 .collect::<String>()
         ));
     }
@@ -864,6 +938,7 @@ fn play_null(
         fault: None,
         joined: None,
         secondaries: Vec::new(),
+        captures: Vec::new(),
     })
 }
 
@@ -915,6 +990,28 @@ fn secondary_line(s: &SecondaryStatus) -> String {
     line
 }
 
+/// An input device's status line (ADR 0038 §10): `AT2020USB+ (voice):
+/// capture, adapted, locked, +12.0 ppm, peak 0.31, 0 missing`.
+fn capture_line(c: &CaptureStatus) -> String {
+    let mut line = format!(
+        "{} ({}): capture, {}, {}",
+        c.name,
+        c.roles.join(", "),
+        c.clock,
+        c.state.name()
+    );
+    if c.state != SecondaryState::Absent {
+        if c.clock == "adapted" {
+            line.push_str(&format!(", {:+.1} ppm", c.drift_ppm));
+        }
+        line.push_str(&format!(", peak {:.3}, {} missing", c.peak, c.missing));
+    }
+    if let Some(reason) = &c.reason {
+        line.push_str(&format!(" ({reason})"));
+    }
+    line
+}
+
 /// CoreAudio: the device calls the Runner on its own thread; this thread
 /// polls at least once per buffer period (so `Stamp::Default`, two buffers
 /// ahead, is not yet run) and applies file changes.
@@ -923,7 +1020,11 @@ fn play_device(
     control: &mut Control<'_>,
     runner: Runner,
     width: usize,
-    (routes, secondaries): (Option<Vec<Option<usize>>>, Vec<SecondarySpec>),
+    (routes, secondaries, captures): (
+        Option<Vec<Option<usize>>>,
+        Vec<SecondarySpec>,
+        Vec<CaptureSpec>,
+    ),
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
@@ -945,7 +1046,8 @@ fn play_device(
         }
     }
     .map_err(|e| device(&e))?
-    .with_secondaries(secondaries);
+    .with_secondaries(secondaries)
+    .with_captures(captures, None);
     let map = driver.map();
     if !map.dropped().is_empty() {
         eprintln!(
@@ -975,6 +1077,9 @@ fn play_device(
     report_scheduling(&scheduling);
     for secondary in driver.secondaries() {
         eprintln!("signal: {}", secondary_line(&secondary));
+    }
+    for capture in driver.captures() {
+        eprintln!("signal: {}", capture_line(&capture));
     }
     let interval = Duration::from_secs_f64(f64::from(driver.period()) / f64::from(rate))
         .min(Duration::from_millis(1));
@@ -1018,6 +1123,7 @@ fn play_device(
     let stats = driver.stats();
     // As they played, before the stop takes their streams down.
     let secondaries_at_stop = driver.secondaries();
+    let captures_at_stop = driver.captures();
     // The adapter's counts as of the last callback, should the device not
     // hand the runner back.
     let adapter_counts = (
@@ -1044,6 +1150,7 @@ fn play_device(
     control.controller.poll(&mut Recording(&mut control.live));
     Ok(Ended {
         secondaries: secondaries_at_stop,
+        captures: captures_at_stop,
         status,
         clipped: counts.0,
         meter_overflows: counts.1,

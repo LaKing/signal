@@ -256,6 +256,7 @@ fn descriptor(op: Op, width: usize) -> ModuleDescriptor {
         parameters: Box::leak(parameters.into_boxed_slice()),
         feedthrough: Feedthrough::Direct,
         sink: None,
+        source: None,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
         category: Some(crate::category::CORE),
