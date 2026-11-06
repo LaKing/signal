@@ -192,15 +192,18 @@ test('a role the machine does not bind is not heard; two roles on one channel ar
   assert.deepEqual(setupCables(pins, bindings).map((c) => c.channel), [1], 'a refused channel has no cable');
 });
 
-test('a role on another device is another clock: drawn there, dashed, not heard', () => {
+test('a role on another device is adapted (ADR 0052): drawn there, heard, its channels its own', () => {
   const devices = { devices: [ssl(0, 'output'), speakers(1)], output: { found: 0 } };
   const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, play: { cue: { channels: [1, 2], device: { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice' } } } } };
   const { bindings } = peripherals({ setup, devices, endpoints: MAIN_AND_CUE });
   assert.equal(bindings[1].device, 'id:coreaudio:BuiltInSpeakerDevice');
-  assert.equal(bindings[1].heard, false);
-  assert.match(bindings[1].note, /another clock/);
+  assert.equal(bindings[1].heard, true);
+  assert.match(bindings[1].note, /clock adapter/);
+  // cue's 1–2 on the speakers do not take main's 1–2 on the SSL 2+.
+  assert.deepEqual(bindings[0].channels, [1, 2]);
+  assert.deepEqual(bindings[1].channels, [1, 2]);
   const pins = new Map([['primary', [{ side: 'out', address: '/m.out', outside: ['/cue.l'] }]]]);
-  assert.equal(setupCables(pins, bindings)[0].dashed, true);
+  assert.equal(setupCables(pins, bindings)[0].dashed, false);
 });
 
 test('a device named for main is the clock: main is drawn and heard there', () => {

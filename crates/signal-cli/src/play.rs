@@ -16,7 +16,8 @@ use clap::{Args, ValueEnum};
 use serde_json::json;
 use signal_audio::{
     BufferRequest, CallbackStats, CoreAudioDriver, Demotions, DeviceSelector, JoinPlan, Scheduling,
-    StatsSnapshot, live_rate, output_period, rate_notice, rt_thread,
+    SecondarySpec, SecondaryState, SecondaryStatus, StatsSnapshot, live_rate, output_period,
+    rate_notice, rt_thread,
 };
 use signal_core::{Frame, Registry};
 use signal_engine::{
@@ -24,7 +25,8 @@ use signal_engine::{
     RunnerStatus, SentCommand, Spread, WakeStats,
 };
 use signal_output::{
-    Controller, Driver, NullDriver, RoleBinding, Runner, SoundSystem, realtime_routed, route,
+    Controller, Driver, NullDriver, Placement, RoleBinding, Runner, SoundSystem, realtime_routed,
+    route,
 };
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
@@ -103,16 +105,31 @@ pub(crate) struct PlayArgs {
     /// Plays role ROLE on these device channels of the output device, for
     /// this run only (ADR 0038 §6, M4.1): `--route cue=3,4`. Repeatable;
     /// `main` plays on channels 1 to its width without one, and a role
-    /// with none is not heard.
-    #[arg(long, value_name = "ROLE=CHANNELS", value_parser = parse_route)]
-    pub(crate) route: Vec<(String, Vec<u16>)>,
+    /// with none is not heard. `--route cue@DEVICE=1,2` plays it on another
+    /// output device, by name, through a clock adapter (ADR 0052).
+    #[arg(long, value_name = "ROLE[@DEVICE]=CHANNELS", value_parser = parse_route)]
+    pub(crate) route: Vec<RouteArg>,
 }
 
-/// `--route`'s value: `role=3,4`.
-pub(crate) fn parse_route(text: &str) -> Result<(String, Vec<u16>), String> {
-    let (role, channels) = text
-        .split_once('=')
-        .ok_or_else(|| format!("`{text}` is not ROLE=CHANNELS (cue=3,4)"))?;
+/// One `--route`: a role, the device it plays on (`None`: the output
+/// device) and its channels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RouteArg {
+    pub(crate) role: String,
+    pub(crate) device: Option<String>,
+    pub(crate) channels: Vec<u16>,
+}
+
+/// `--route`'s value: `role=3,4` or `role@Device name=1,2`.
+pub(crate) fn parse_route(text: &str) -> Result<RouteArg, String> {
+    let (target, channels) = text
+        .rsplit_once('=')
+        .ok_or_else(|| format!("`{text}` is not ROLE[@DEVICE]=CHANNELS (cue=3,4)"))?;
+    let (role, device) = match target.split_once('@') {
+        Some((role, device)) if !device.trim().is_empty() => (role, Some(device.trim().to_owned())),
+        Some(_) => return Err(format!("`{text}`: no device after `@`")),
+        None => (target, None),
+    };
     if !signal_project::device::valid_role(role) {
         return Err(format!("`{role}` is not a role: [a-z][a-z0-9_]*"));
     }
@@ -123,7 +140,11 @@ pub(crate) fn parse_route(text: &str) -> Result<(String, Vec<u16>), String> {
             _ => Err(format!("'{}' is not a device channel (1, 2, …)", c.trim())),
         })
         .collect::<Result<Vec<u16>, String>>()?;
-    Ok((role.to_owned(), channels))
+    Ok(RouteArg {
+        role: role.to_owned(),
+        device,
+        channels,
+    })
 }
 
 /// `--rt-policy`'s value.
@@ -167,6 +188,8 @@ struct Ended {
     /// How the device was joined (ADR 0036; CoreAudio only): whether it ran
     /// for another app, and the frames per callback it ran at.
     joined: Option<JoinPlan>,
+    /// The secondary devices as the run ended (ADR 0052; CoreAudio only).
+    secondaries: Vec<SecondaryStatus>,
 }
 
 /// A distribution in µs, for the JSON.
@@ -390,46 +413,82 @@ pub(crate) fn run(
     // ADR 0038 (M4.1): every play side, routed with `--route` on the output
     // device; one sink without a route plays as before.
     let sides = signal_project::device::play_sides(&project, &plan);
-    let (width, sinks, routes) = if sides.len() > 1 || !args.route.is_empty() {
+    let (width, sinks, routes, secondaries) = if sides.len() > 1 || !args.route.is_empty() {
+        // Listing is read-only: the output device's channels, so that a
+        // route past them is refused for that channel, not for the run, and
+        // whether another device a route names is present.
+        let list = if null {
+            Vec::new()
+        } else {
+            signal_audio::devices().unwrap_or_default()
+        };
+        let outputs = || {
+            list.iter()
+                .filter(|d| d.direction == signal_audio::Direction::Output)
+        };
+        let clock = outputs().find(|d| match &args.device {
+            Some(name) => &d.name == name,
+            None => d.default,
+        });
         let system = SoundSystem {
             roles: args
                 .route
                 .iter()
-                .map(|(role, channels)| (role.clone(), RoleBinding::clock(channels.clone())))
+                .map(|r| {
+                    let placement = match &r.device {
+                        None => Placement::Clock,
+                        Some(name) if clock.is_some_and(|c| &c.name == name) => Placement::Clock,
+                        // The null driver plays the clock device's channels
+                        // only: another device is not heard.
+                        Some(name) if null => Placement::Missing(
+                            name.clone(),
+                            "the null driver plays no other device".to_owned(),
+                        ),
+                        Some(name) if outputs().any(|d| &d.name == name) => {
+                            Placement::Other(name.clone())
+                        }
+                        Some(name) => {
+                            Placement::Missing(name.clone(), "no output of that name".to_owned())
+                        }
+                    };
+                    let binding = RoleBinding {
+                        placement,
+                        channels: r.channels.clone(),
+                    };
+                    (r.role.clone(), binding)
+                })
                 .collect(),
         };
-        // The output device's channels, so that a route past them is
-        // refused for that channel, not for the run (listing is read-only).
-        let channels = if null {
-            None
-        } else {
-            signal_audio::devices().ok().and_then(|list| {
-                list.iter()
-                    .filter(|d| d.direction == signal_audio::Direction::Output)
-                    .find(|d| match &args.device {
-                        Some(name) => &d.name == name,
-                        None => d.default,
-                    })
-                    .map(|d| {
-                        d.configs
-                            .iter()
-                            .map(|c| usize::from(c.channels))
-                            .max()
-                            .unwrap_or(0)
-                    })
-            })
-        };
+        let channels = clock.map(|d| {
+            d.configs
+                .iter()
+                .map(|c| usize::from(c.channels))
+                .max()
+                .unwrap_or(0)
+        });
         let routing = route(&sides, &system, channels);
         for notice in &routing.notices {
             eprintln!("signal: {notice}");
         }
+        let secondaries = routing
+            .secondaries()
+            .into_iter()
+            .map(|r| SecondarySpec {
+                selector: DeviceSelector::Name(r.device.clone()),
+                name: r.device,
+                roles: r.roles,
+                sources: r.sources,
+                targets: r.targets,
+            })
+            .collect::<Vec<_>>();
         (
             routing.width(),
             routing.addresses(),
             Some(routing.targets()),
+            secondaries,
         )
     } else {
-        (width, Vec::new(), None)
+        (width, Vec::new(), None, Vec::new())
     };
     let seed = project.seed;
     let selector = args
@@ -534,7 +593,15 @@ pub(crate) fn run(
     let ended = if null {
         play_null(args, &mut control, runner, width, limit, &stop)?
     } else {
-        play_device(args, &mut control, runner, width, routes, limit, &stop)?
+        play_device(
+            args,
+            &mut control,
+            runner,
+            width,
+            (routes, secondaries),
+            limit,
+            &stop,
+        )?
     };
 
     let mut live = control.live;
@@ -656,6 +723,7 @@ pub(crate) fn run(
                 "reason": b.reason,
             })),
             "audio": args.record_audio.as_ref().map(|p| p.display().to_string()),
+            "secondaries": ended.secondaries,
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
@@ -683,7 +751,7 @@ pub(crate) fn run(
              clipped samples {}\n\
              queue overflows {total}\n\
              late commands {}\n\
-             late GPU results {}",
+             late GPU results {}{}",
             status.next_frame.0,
             ended.device_channels,
             scheduling.threads,
@@ -700,7 +768,12 @@ pub(crate) fn run(
             stats.median_callback_ratio,
             ended.clipped,
             status.late,
-            status.late_results
+            status.late_results,
+            ended
+                .secondaries
+                .iter()
+                .map(|s| format!("\n{}", secondary_line(s)))
+                .collect::<String>()
         ));
     }
     Ok(())
@@ -790,7 +863,49 @@ fn play_null(
         demotions: Demotions::default(),
         fault: None,
         joined: None,
+        secondaries: Vec::new(),
     })
+}
+
+/// How often a CoreAudio run polls its secondary devices (ADR 0052 §6).
+const SECONDARY_POLL: Duration = Duration::from_millis(500);
+
+/// A secondary device's status line (ADR 0052 §6): `Speakers (cue):
+/// adapted, locked, +37.2 ppm, 7.3 ms, 0 slips`, the rates when they differ,
+/// why when it is not playing.
+fn secondary_line(s: &SecondaryStatus) -> String {
+    let mut line = format!(
+        "{} ({}): {}, {}",
+        s.name,
+        s.roles.join(", "),
+        s.clock,
+        s.state.name()
+    );
+    if let (Some(rate), Some(clock)) = (s.rate, s.clock_rate) {
+        line.push_str(&format!(
+            ", {} → {} kHz",
+            f64::from(clock) / 1e3,
+            f64::from(rate) / 1e3
+        ));
+    }
+    if s.state != SecondaryState::Absent {
+        line.push_str(&format!(", {:+.1} ppm", s.drift_ppm));
+        if let Some(ms) = s.latency_ms {
+            line.push_str(&format!(", {ms:.1} ms"));
+        }
+        line.push_str(&format!(
+            ", {} slip{}",
+            s.slips,
+            if s.slips == 1 { "" } else { "s" }
+        ));
+    }
+    if s.resyncs > 0 {
+        line.push_str(&format!(", rebuilt {}×", s.resyncs));
+    }
+    if let Some(reason) = &s.reason {
+        line.push_str(&format!(" ({reason})"));
+    }
+    line
 }
 
 /// CoreAudio: the device calls the Runner on its own thread; this thread
@@ -801,7 +916,7 @@ fn play_device(
     control: &mut Control<'_>,
     runner: Runner,
     width: usize,
-    routes: Option<Vec<Option<usize>>>,
+    (routes, secondaries): (Option<Vec<Option<usize>>>, Vec<SecondarySpec>),
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
@@ -822,7 +937,8 @@ fn play_device(
             )
         }
     }
-    .map_err(|e| device(&e))?;
+    .map_err(|e| device(&e))?
+    .with_secondaries(secondaries);
     let map = driver.map();
     if !map.dropped().is_empty() {
         eprintln!(
@@ -850,8 +966,12 @@ fn play_device(
         .cloned()
         .ok_or_else(|| Failure::Internal("the driver reported no scheduling".to_owned()))?;
     report_scheduling(&scheduling);
+    for secondary in driver.secondaries() {
+        eprintln!("signal: {}", secondary_line(&secondary));
+    }
     let interval = Duration::from_secs_f64(f64::from(driver.period()) / f64::from(rate))
         .min(Duration::from_millis(1));
+    let mut polled = Instant::now();
     let mut stopping: Option<Instant> = None;
     let mut demotions = Demotions::default();
     let mut fault = None;
@@ -860,6 +980,14 @@ fn play_device(
         control.step();
         // C6: macOS counts no demotions for a process; sample the policy.
         demotions.sample(&scheduling.ports);
+        // ADR 0052 §6: a secondary device gone is stopped, one back is
+        // rebuilt.
+        if polled.elapsed() >= SECONDARY_POLL {
+            polled = Instant::now();
+            for notice in driver.poll_secondaries() {
+                eprintln!("signal: {notice}");
+            }
+        }
         let status = control.controller.status();
         // A failed engine plays only silence: stop (docs/semantics.md §14).
         if limit.is_some_and(|limit| status.next_frame.0 >= limit) || status.failure.is_some() {
@@ -881,6 +1009,8 @@ fn play_device(
         }
     }
     let stats = driver.stats();
+    // As they played, before the stop takes their streams down.
+    let secondaries_at_stop = driver.secondaries();
     // The adapter's counts as of the last callback, should the device not
     // hand the runner back.
     let adapter_counts = (
@@ -906,6 +1036,7 @@ fn play_device(
     };
     control.controller.poll(&mut Recording(&mut control.live));
     Ok(Ended {
+        secondaries: secondaries_at_stop,
         status,
         clipped: counts.0,
         meter_overflows: counts.1,

@@ -357,6 +357,12 @@ impl Host {
             "input": input,
             "choices": choices,
             "compute": self.compute,
+            // ADR 0052 §6: the playing run's secondary devices.
+            "secondaries": self
+                .run
+                .as_ref()
+                .map(|run| run.output.secondaries())
+                .unwrap_or_default(),
         })
     }
 

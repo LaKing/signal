@@ -19,10 +19,11 @@
 //!   with no `main` side plays its first side in canonical order as main.
 //! - **Two roles on one device channel are never summed:** the later in
 //!   canonical order is refused for that channel and stays silent there.
-//! - **One clock in v1** (ADR 0038 §8): a role bound to another device than
-//!   the clock device is accepted as text but not heard. [`Placement`]
-//!   keeps the device per role, so a per-device clock adapter (a later ADR)
-//!   can take those roles instead of refusing them.
+//! - **Every device at once** (ADR 0052): a role bound to another present
+//!   device than the clock device is **adapted**: it plays on that device
+//!   through a clock adapter ([`crate::adapter`]), which the driver runs
+//!   ([`Routing::secondaries`]). Channels are taken per device: the same
+//!   channel number on two devices is two channels.
 //! - **Layouts are not converted yet** (ADR 0038 §5, phase 2): a side
 //!   whose width differs from its binding's channel count plays by
 //!   position; the rest is reported.
@@ -51,8 +52,9 @@ pub struct PlaySide {
 pub enum Placement {
     /// The clock device: the device the run plays on.
     Clock,
-    /// Another present device: another clock (ADR 0038 §8), not heard in
-    /// v1. Its name, for the notice.
+    /// Another present device: another clock, heard through a clock
+    /// adapter (ADR 0052). Its name, which [`Routing::secondaries`] groups
+    /// by.
     Other(String),
     /// A device the binding names that is not present: its name and why.
     Missing(String, String),
@@ -93,8 +95,9 @@ pub enum Heard {
     Clock,
     /// The machine describes no such role.
     Unrouted,
-    /// Bound to another device: another clock (ADR 0038 §8).
-    OtherClock(String),
+    /// On another present device, through a clock adapter (ADR 0052); some
+    /// channels may still be refused.
+    Adapted(String),
     /// Bound to a device that is not present.
     Missing(String),
 }
@@ -117,6 +120,28 @@ pub struct RoutedSide {
     pub heard: Heard,
 }
 
+/// The play sides one secondary device plays (ADR 0052 §1): which channels
+/// of the run's audio frame go where on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecondaryRoute {
+    /// The device's name, as the binding names it.
+    pub device: String,
+    /// The roles it plays, in canonical order.
+    pub roles: Vec<String>,
+    /// The channels of the run's audio frame it carries, in frame order:
+    /// the adapter's channels.
+    pub sources: Vec<usize>,
+    /// Per source, the device channel (from 0) it plays on.
+    pub targets: Vec<usize>,
+}
+
+impl SecondaryRoute {
+    /// The device channels it needs: up to its highest target.
+    pub fn device_width(&self) -> usize {
+        self.targets.iter().map(|t| t + 1).max().unwrap_or(1)
+    }
+}
+
 /// Every play side routed, in canonical order, and what to tell.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Routing {
@@ -137,18 +162,59 @@ impl Routing {
         self.sides.iter().map(|s| s.address.clone()).collect()
     }
 
-    /// Per channel of the run's audio frame, the device channel (from 0) it
-    /// plays on, if any.
+    /// Per channel of the run's audio frame, the clock device's channel
+    /// (from 0) it plays on, if any: an adapted side's channels are on
+    /// another device ([`secondaries`](Routing::secondaries)).
     pub fn targets(&self) -> Vec<Option<usize>> {
         self.sides
             .iter()
-            .flat_map(|s| s.channels.iter())
+            .flat_map(|s| {
+                let clock = s.heard == Heard::Clock;
+                s.channels.iter().map(move |c| c.filter(|_| clock))
+            })
             .map(|c| c.map(|c| usize::from(c).saturating_sub(1)))
             .collect()
     }
 
-    /// The device channels the routing needs: up to its highest target, at
-    /// least 1 (the width to choose the device's configuration for).
+    /// The secondary devices the routing plays on (ADR 0052), in the order
+    /// of their first side in canonical order, each with the frame's
+    /// channels it carries.
+    pub fn secondaries(&self) -> Vec<SecondaryRoute> {
+        let mut routes: Vec<SecondaryRoute> = Vec::new();
+        let mut at = 0;
+        for side in &self.sides {
+            if let Heard::Adapted(device) = &side.heard {
+                let index = match routes.iter().position(|r| r.device == *device) {
+                    Some(index) => index,
+                    None => {
+                        routes.push(SecondaryRoute {
+                            device: device.clone(),
+                            roles: Vec::new(),
+                            sources: Vec::new(),
+                            targets: Vec::new(),
+                        });
+                        routes.len() - 1
+                    }
+                };
+                if let Some(route) = routes.get_mut(index) {
+                    route.roles.push(side.role.clone());
+                    for (port, channel) in side.channels.iter().enumerate() {
+                        if let Some(channel) = channel {
+                            route.sources.push(at + port);
+                            route.targets.push(usize::from(*channel).saturating_sub(1));
+                        }
+                    }
+                }
+            }
+            at += side.width;
+        }
+        routes.retain(|r| !r.sources.is_empty());
+        routes
+    }
+
+    /// The clock device's channels the routing needs: up to its highest
+    /// target, at least 1 (the width to choose the device's configuration
+    /// for).
     pub fn device_width(&self) -> usize {
         self.targets()
             .into_iter()
@@ -164,15 +230,17 @@ impl Routing {
     }
 }
 
-/// Routes `sides` on the machine's `system` (ADR 0038 §4, §8), the clock
-/// device having `device_channels` channels (`None`: not known, nothing is
-/// refused for its range). See the module's rules.
+/// Routes `sides` on the machine's `system` (ADR 0038 §4, §8, ADR 0052),
+/// the clock device having `device_channels` channels (`None`: not known,
+/// nothing is refused for its range; a secondary device's range is checked
+/// when its stream opens). See the module's rules.
 pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<usize>) -> Routing {
     let mut ordered: Vec<&PlaySide> = sides.iter().collect();
     ordered.sort_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)));
     let has_main = ordered.iter().any(|s| s.role == MAIN);
     let mut notices = Vec::new();
-    let mut used: BTreeMap<u16, String> = BTreeMap::new();
+    // Per device (`None`: the clock device), the channels taken.
+    let mut used: BTreeMap<(Option<String>, u16), String> = BTreeMap::new();
     let mut roles_seen: BTreeSet<&str> = BTreeSet::new();
     let mut routed = Vec::with_capacity(ordered.len());
     for (k, side) in ordered.iter().enumerate() {
@@ -213,16 +281,9 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 continue;
             }
         };
-        match &binding.placement {
-            Placement::Clock => {}
-            Placement::Other(name) => {
-                notices.push(format!(
-                    "{who}: bound to {name}, another clock; not heard (make an aggregate device in \
-                     Audio MIDI Setup with drift correction, or wait for clock adapters)"
-                ));
-                routed.push(unheard(side, Heard::OtherClock(name.clone())));
-                continue;
-            }
+        let (device, heard) = match &binding.placement {
+            Placement::Clock => (None, Heard::Clock),
+            Placement::Other(name) => (Some(name.clone()), Heard::Adapted(name.clone())),
             Placement::Missing(name, reason) => {
                 notices.push(format!(
                     "{who}: {name} is not present ({reason}); not heard"
@@ -230,7 +291,12 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 routed.push(unheard(side, Heard::Missing(name.clone())));
                 continue;
             }
-        }
+        };
+        let limit = if device.is_none() {
+            device_channels
+        } else {
+            None
+        };
         if binding.channels.len() != side.width {
             notices.push(format!(
                 "{who}: {} channel{} on {} device channel{}; played by position (layouts are not \
@@ -247,10 +313,10 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 channels.push(None);
                 continue;
             };
-            if channel == 0 || device_channels.is_some_and(|n| usize::from(channel) > n) {
+            if channel == 0 || limit.is_some_and(|n| usize::from(channel) > n) {
                 notices.push(format!(
                     "{who}: device channel {channel} does not exist{}; not heard there",
-                    device_channels.map_or(String::new(), |n| format!(" (the device has {n})"))
+                    limit.map_or(String::new(), |n| format!(" (the device has {n})"))
                 ));
                 channels.push(None);
                 continue;
@@ -262,7 +328,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 channels.push(None);
                 continue;
             }
-            if let Some(owner) = used.get(&channel) {
+            if let Some(owner) = used.get(&(device.clone(), channel)) {
                 notices.push(format!(
                     "{who}: device channel {channel} already plays `{owner}`; two roles on one \
                      channel are never summed, so it is not heard there"
@@ -270,7 +336,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 channels.push(None);
                 continue;
             }
-            used.insert(channel, side.role.clone());
+            used.insert((device.clone(), channel), side.role.clone());
             channels.push(Some(channel));
         }
         routed.push(RoutedSide {
@@ -279,7 +345,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
             played_as,
             width: side.width,
             channels,
-            heard: Heard::Clock,
+            heard,
         });
     }
     Routing {
@@ -388,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn another_clock_and_a_missing_device_are_not_heard() {
+    fn another_clock_is_adapted_and_a_missing_device_is_not_heard() {
         let sides = [
             side("/out", MAIN, 2),
             side("/a", "alt", 2),
@@ -413,15 +479,61 @@ mod tests {
         let routing = route(&sides, &system, Some(2));
         assert_eq!(
             routing.sides[0].heard,
-            Heard::OtherClock("Fireface".to_owned())
+            Heard::Adapted("Fireface".to_owned())
         );
         assert_eq!(
             routing.sides[2].heard,
             Heard::Missing("BlackHole".to_owned())
         );
+        // The clock device's table leaves the adapted side out.
         assert_eq!(
             routing.targets(),
             [None, None, Some(0), Some(1), None, None]
+        );
+        assert_eq!(
+            routing.secondaries(),
+            [SecondaryRoute {
+                device: "Fireface".to_owned(),
+                roles: vec!["alt".to_owned()],
+                sources: vec![0, 1],
+                targets: vec![0, 1],
+            }]
+        );
+        assert_eq!(routing.notices.len(), 1, "{:?}", routing.notices);
+    }
+
+    /// Channels are taken per device: `main` on the clock's 1–2 and `alt`
+    /// on another device's 1–2 are four channels, and the clock device's
+    /// range does not limit the other's.
+    #[test]
+    fn channels_are_per_device() {
+        let sides = [
+            side("/out", MAIN, 2),
+            side("/a", "alt", 2),
+            side("/b", "bus", 2),
+        ];
+        let other = |channels| RoleBinding {
+            placement: Placement::Other("Speakers".to_owned()),
+            channels,
+        };
+        let system = system(&[("alt", other(vec![1, 2])), ("bus", other(vec![2, 6]))]);
+        let routing = route(&sides, &system, Some(2));
+        assert_eq!(
+            routing.targets(),
+            [None, None, None, None, Some(0), Some(1)]
+        );
+        let secondaries = routing.secondaries();
+        assert_eq!(secondaries.len(), 1);
+        assert_eq!(secondaries[0].roles, ["alt", "bus"]);
+        // `bus`'s channel 2 is `alt`'s on that device: refused there.
+        assert_eq!(secondaries[0].sources, [0, 1, 3]);
+        assert_eq!(secondaries[0].targets, [0, 1, 5]);
+        assert_eq!(secondaries[0].device_width(), 6);
+        assert_eq!(
+            routing.notices,
+            [
+                "bus (/b): device channel 2 already plays `alt`; two roles on one channel are never summed, so it is not heard there"
+            ]
         );
     }
 

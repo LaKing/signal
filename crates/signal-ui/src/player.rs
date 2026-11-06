@@ -6,8 +6,8 @@
 
 use signal_audio::{
     AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
-    InputCallback, InputCapture, InputMeters, Resolution, Scheduling, StatsSnapshot, choose_input,
-    choose_output, rate_moved, rate_notice, resolve,
+    InputCallback, InputCapture, InputMeters, Resolution, Scheduling, SecondarySpec,
+    SecondaryStatus, StatsSnapshot, choose_input, choose_output, rate_moved, rate_notice, resolve,
 };
 use signal_output::{Driver, DriverError, NullDriver, Runner};
 
@@ -150,6 +150,24 @@ impl Output {
         match self {
             Output::Device(driver) => driver.fault(),
             Output::Null(..) => None,
+        }
+    }
+
+    /// The secondary devices' status (ADR 0052; none for the null driver).
+    pub fn secondaries(&self) -> Vec<SecondaryStatus> {
+        match self {
+            Output::Device(driver) => driver.secondaries(),
+            Output::Null(..) => Vec::new(),
+        }
+    }
+
+    /// Control thread, now and then while running (ADR 0052 §6): stops a
+    /// secondary device that went away, rebuilds one that is back; what
+    /// changed, one line each.
+    pub fn poll_secondaries(&mut self) -> Vec<String> {
+        match self {
+            Output::Device(driver) => driver.poll_secondaries(),
+            Output::Null(..) => Vec::new(),
         }
     }
 
@@ -388,7 +406,10 @@ pub fn open_output(
 /// refused) go to `notes`; the Runner is built for
 /// [`Routing::addresses`](signal_output::Routing::addresses)
 /// ([`signal_output::realtime_routed`]), whose frame is
-/// [`Routing::width`](signal_output::Routing::width) channels.
+/// [`Routing::width`](signal_output::Routing::width) channels. On CoreAudio,
+/// a role the Setup binds to another present output plays there through a
+/// clock adapter (ADR 0052, [`CoreAudioDriver::with_secondaries`]); the null
+/// driver plays the clock device's channels only.
 #[allow(clippy::too_many_arguments)]
 pub fn open_routed(
     backend: &Backend,
@@ -447,8 +468,9 @@ pub fn open_routed(
     let opened = match backend {
         Backend::CoreAudio => {
             let selector = output.map_or(DeviceSelector::Default, |(s, _)| s);
+            let secondaries = secondary_specs(devices, setup, &routing, notes);
             CoreAudioDriver::open_routed(&selector, rate, setup.buffer_request(), routes)
-                .map(|driver| Output::Device(Box::new(driver)))
+                .map(|driver| Output::Device(Box::new(driver.with_secondaries(secondaries))))
         }
         Backend::Null(_) => {
             let played = output.as_ref().map(|(_, d)| d).or(clock);
@@ -478,6 +500,42 @@ pub fn open_routed(
     opened
         .map(|output| (output, routing))
         .map_err(|error| error.to_string())
+}
+
+/// The secondary devices of `routing` (ADR 0052), each found by the Setup's
+/// entry of its first role; one that cannot be opened by identity is noted
+/// and left out.
+fn secondary_specs(
+    devices: &[DeviceInfo],
+    setup: &Setup,
+    routing: &signal_output::Routing,
+    notes: &mut Vec<String>,
+) -> Vec<SecondarySpec> {
+    let mut specs = Vec::new();
+    for route in routing.secondaries() {
+        let entry = route
+            .roles
+            .iter()
+            .find_map(|role| setup.play.get(role)?.device.as_ref());
+        let Some(entry) = entry else {
+            continue;
+        };
+        match selector(devices, entry, Direction::Output) {
+            Ok((selector, _)) => specs.push(SecondarySpec {
+                selector,
+                name: route.device,
+                roles: route.roles,
+                sources: route.sources,
+                targets: route.targets,
+            }),
+            Err(reason) => notes.push(format!(
+                "{}: {reason}; {} not heard",
+                route.device,
+                route.roles.join(", ")
+            )),
+        }
+    }
+    specs
 }
 
 /// The Setup's input, metered only, and its channels; a note when it cannot

@@ -224,6 +224,8 @@ pub(super) struct Run {
     pub(super) current: Project,
     pub(super) watcher: Option<ProjectWatcher>,
     pub(super) watched: Instant,
+    /// When the secondary devices were last polled (ADR 0052 §6).
+    pub(super) polled: Instant,
     pub(super) retry: bool,
     /// The `project.toml` text `current` is known to hold (read before the
     /// last reload that applied, or written by a commit it took); `None`
@@ -256,6 +258,9 @@ pub(super) struct Run {
     pub(super) scheduling: Option<Scheduling>,
 }
 
+/// How often the host polls a run's secondary devices (ADR 0052 §6).
+const SECONDARY_POLL: Duration = Duration::from_millis(500);
+
 impl Host {
     /// The run's output stopped by the audio system (the device's rate
     /// changed, it went away). App mode: the run stops, with the reason in
@@ -271,6 +276,13 @@ impl Host {
             return;
         }
         let Some(fault) = run.output.fault() else {
+            // ADR 0052 §6: a secondary device gone is stopped, one back is
+            // rebuilt; the clock device's run goes on either way.
+            if run.polled.elapsed() >= SECONDARY_POLL {
+                run.polled = Instant::now();
+                let notices = run.output.poll_secondaries();
+                self.messages.extend(notices);
+            }
             return;
         };
         self.output_faulted(fault);
@@ -594,6 +606,7 @@ impl Host {
             current: project,
             watcher,
             watched: Instant::now(),
+            polled: Instant::now(),
             retry: false,
             file,
             rate,

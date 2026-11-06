@@ -162,9 +162,10 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
       const box = boxes.find((b) => b.key === (entry.device.id ? `id:${entry.device.id}` : `name:${entry.device.name}`));
       if (!box) return unheard(`${entry.device.name}: not present`);
       if (box.key !== main.key) {
+        // ADR 0052: another present device plays through a clock adapter.
         key = box.key;
-        heard = false;
-        note = 'another clock: not heard (an aggregate device plays several cards)';
+        heard = box.present !== false;
+        note = heard ? 'adapted: through a clock adapter' : 'not present';
       }
     }
     const box = boxes.find((b) => b.key === key);
@@ -174,9 +175,10 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
     const channels = [];
     for (let i = 0; i < width; i++) {
       const c = wanted[i];
-      const refused = !Number.isInteger(c) || c < 1 || c > limit || channels.includes(c) || (heard && used.has(c));
+      // Channels are taken per device (ADR 0052): channel 1 of two devices is two channels.
+      const refused = !Number.isInteger(c) || c < 1 || c > limit || channels.includes(c) || (heard && used.has(`${key}\u0000${c}`));
       channels.push(refused ? null : c);
-      if (!refused && heard) used.set(c, e.role);
+      if (!refused && heard) used.set(`${key}\u0000${c}`, e.role);
     }
     bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: key, channels, heard, note });
   });

@@ -11,8 +11,8 @@
 //!   file: renders never read them and the plan never changes with them.
 //! - **[`sound_system`]** resolves the merged bindings against the device
 //!   inventory into a [`SoundSystem`] for `signal_output::route`: a role on
-//!   the clock device, on another device (another clock, not heard in v1),
-//!   or on one that is absent.
+//!   the clock device, on another device (another clock, played through a
+//!   clock adapter, ADR 0052), or on one that is absent.
 //! - **[`route`] and [`unroute`]** are the protocol's `device.route` and
 //!   `device.unroute` (`docs/ui-protocol.md`): they change the Setup in
 //!   memory (the caller saves it and plays again) or write
@@ -30,7 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use signal_audio::{DeviceInfo, Direction, Resolution, resolve};
+use signal_audio::{DeviceInfo, Direction, Resolution, labels, resolve};
 use signal_output::{MAIN, Placement, RoleBinding, SoundSystem};
 use signal_project::device::valid_role;
 
@@ -199,7 +199,8 @@ pub fn clock_device<'a>(devices: &'a [DeviceInfo], setup: &Setup) -> Option<&'a 
 /// (absent: channels 1 to its width, `signal_output::route`'s default);
 /// every other role from `[play.<role>]`. A role naming no device, or the
 /// clock device, plays on the clock device; another present output is
-/// another clock; one not found is absent.
+/// another clock, played through a clock adapter (ADR 0052); one not found
+/// is absent.
 pub fn sound_system(setup: &Setup, devices: &[DeviceInfo]) -> SoundSystem {
     let clock = clock_device(devices, setup);
     let mut roles = BTreeMap::new();
@@ -224,7 +225,13 @@ pub fn sound_system(setup: &Setup, devices: &[DeviceInfo]) -> SoundSystem {
                     if same {
                         Placement::Clock
                     } else {
-                        Placement::Other(device.name.clone())
+                        // By its label, which tells same-named devices
+                        // apart: two identical cards are two secondaries.
+                        let label = labels(devices, Direction::Output)
+                            .into_iter()
+                            .find(|(i, _)| *i == index)
+                            .map_or_else(|| device.name.clone(), |(_, label)| label);
+                        Placement::Other(label)
                     }
                 }
                 Resolution::Missing { reason, .. } | Resolution::Ambiguous { reason, .. } => {

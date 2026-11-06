@@ -15,17 +15,21 @@ use signal_engine::{Computation, Workers};
 use signal_output::fade::fade_frames;
 use signal_output::{Driver, DriverError, Runner};
 
-use crate::callback::{CallbackControl, OutputCallback};
+use serde::Serialize;
+use signal_output::adapter::{AdapterConfig, clock_adapter};
+
+use crate::callback::{CallbackControl, FeedControl, OutputCallback};
 use crate::config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
     fault_message, rate_moved, start_failure,
 };
 use crate::device_props;
 use crate::input::{InputCallback, InputMeters};
-use crate::join::{BufferRequest, DeviceState, JoinPlan, plan_join};
+use crate::join::{BufferRequest, DeviceState, FALLBACK_PERIOD, JoinPlan, plan_join};
 use crate::map::ChannelMap;
 use crate::rt_thread::{self, Workgroup};
 use crate::scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
+use crate::secondary::{SecondaryCallback, SecondaryFeed, SecondaryState, SecondaryStats};
 use crate::stats::{CallbackStats, StreamFault};
 
 /// How long [`CoreAudioDriver::stop`] waits for the callback to hand the
@@ -294,11 +298,297 @@ fn join_moved(device: &str, open: JoinPlan, now: JoinPlan) -> String {
     format!("the device '{device}' changed since the run was prepared: {what}; play again")
 }
 
+/// How long a secondary device whose stream failed waits before it is
+/// opened again (ADR 0052 §6: on return its routes are rebuilt); each
+/// failed open doubles it, up to [`SECONDARY_RETRY_MAX`], so a device that
+/// keeps failing costs the control thread an open now and then only.
+const SECONDARY_RETRY: Duration = Duration::from_secs(1);
+
+/// The longest wait between two opens of a failing secondary device.
+const SECONDARY_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// The most [`CoreAudioDriver::stop`] lets the secondary devices play out
+/// what their adapters hold (the clock's fade-out included) before their
+/// streams stop: each waits its adapter's latency, its periods and its
+/// stop's fade.
+const SECONDARY_DRAIN_MAX: Duration = Duration::from_millis(250);
+
 /// What a started stream holds.
 struct Running {
     stream: Stream,
     control: CallbackControl,
     workers: Workers,
+    /// The clock callback's feed slots, one per secondary device.
+    feeds: FeedControl,
+}
+
+/// A secondary output device of a routed run (ADR 0052 §1): a device other
+/// than the clock device that roles play on through a clock adapter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecondarySpec {
+    /// The device.
+    pub selector: DeviceSelector,
+    /// Its name, as the Setup names it.
+    pub name: String,
+    /// The roles it plays.
+    pub roles: Vec<String>,
+    /// The channels of the run's audio frame it carries.
+    pub sources: Vec<usize>,
+    /// Per source, its device channel (from 0).
+    pub targets: Vec<usize>,
+}
+
+/// A secondary device's status (ADR 0052 §6), for `signal play`'s status
+/// line and `devices`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SecondaryStatus {
+    /// The device's name.
+    pub name: String,
+    /// The roles it plays.
+    pub roles: Vec<String>,
+    /// Always `adapted`: its clock is not the engine's.
+    pub clock: &'static str,
+    /// `starting`, `locking`, `locked` or `absent`.
+    pub state: SecondaryState,
+    /// Its nominal rate while its stream runs.
+    pub rate: Option<u32>,
+    /// The clock device's rate, when the two differ (the converter's
+    /// nominal ratio is `clock_rate / rate`).
+    pub clock_rate: Option<u32>,
+    /// How far its clock runs from the clock device's, ppm.
+    pub drift_ppm: f64,
+    /// From a frame's time on the clock device to its playing on this one,
+    /// ms: the adapter's latency plus the device's own.
+    pub latency_ms: Option<f64>,
+    /// Repeats and skips (ADR 0052 §3).
+    pub slips: u64,
+    /// Times its routes were rebuilt after the device came back.
+    pub resyncs: u64,
+    /// Why it is not playing, when it is not.
+    pub reason: Option<String>,
+}
+
+/// One secondary device of a driver, and its stream while it plays.
+struct Secondary {
+    spec: SecondarySpec,
+    stats: Arc<SecondaryStats>,
+    stream: Option<Stream>,
+    /// The open stream's rate and the device's own latency in frames.
+    open: Option<(u32, Option<u32>)>,
+    reason: Option<String>,
+    retry_at: Option<Instant>,
+    /// The wait before the next open after this one fails.
+    backoff: Duration,
+    /// The open stream's period, frames.
+    period: u32,
+    /// Streams opened (the first included).
+    opened: u64,
+}
+
+impl Secondary {
+    fn new(spec: SecondarySpec) -> Secondary {
+        Secondary {
+            spec,
+            stats: Arc::new(SecondaryStats::default()),
+            stream: None,
+            open: None,
+            reason: None,
+            retry_at: None,
+            backoff: SECONDARY_RETRY,
+            period: 0,
+            opened: 0,
+        }
+    }
+
+    /// Opens and plays the device's stream at the rate it runs at, with its
+    /// own buffer (Signal changes neither), its adapter's input going into
+    /// the clock callback's `slot`. `clock` is the clock device's rate,
+    /// period and largest callback. Control thread.
+    /// Returns a notice for channels the device lacks.
+    fn start(
+        &mut self,
+        clock: (u32, u32, u32),
+        clock_id: Option<&str>,
+        feeds: &mut FeedControl,
+        slot: usize,
+    ) -> Result<Option<String>, String> {
+        let (clock_rate, clock_period, clock_max) = clock;
+        let name = self.spec.name.clone();
+        let device = find(Direction::Output, &self.spec.selector).map_err(|e| e.to_string())?;
+        // A second stream on the clock device would sum roles on its
+        // channels (never summed, ADR 0038 §4): the routing put it on the
+        // clock, or the system default moved onto it since.
+        if clock_id.is_some() && id_of(&device).as_deref() == clock_id {
+            return Err(format!("{name}: it is the clock device now"));
+        }
+        let info = info(&device, Direction::Output, None).map_err(|e| e.to_string())?;
+        let state = state_of(&device);
+        let rate = state
+            .rate
+            .or_else(|| current_rate(&device, Direction::Output))
+            .ok_or_else(|| format!("{name}: its rate cannot be read"))?;
+        let period = state.buffer.unwrap_or(FALLBACK_PERIOD);
+        let width = self.spec.targets.iter().map(|t| t + 1).max().unwrap_or(1);
+        // The device's buffer is its own: never set, so not checked
+        // against the range (as the clock device's when it is in use).
+        let choice = match choose_output(&info, rate, period, width) {
+            Err(AudioError::BufferSize { min, max, .. }) => {
+                let mut choice = choose_output(&info, rate, period.clamp(min, max), width)
+                    .map_err(|e| e.to_string())?;
+                choice.buffer = period;
+                choice
+            }
+            other => other.map_err(|e| e.to_string())?,
+        };
+        let channels = usize::from(choice.channels);
+        let missing: Vec<String> = self
+            .spec
+            .targets
+            .iter()
+            .filter(|t| **t >= channels)
+            .map(|t| (t + 1).to_string())
+            .collect();
+        let (sources, targets): (Vec<usize>, Vec<usize>) = self
+            .spec
+            .sources
+            .iter()
+            .zip(&self.spec.targets)
+            .filter(|(_, t)| **t < channels)
+            .map(|(s, t)| (*s, *t))
+            .unzip();
+        if sources.is_empty() {
+            return Err(format!(
+                "{name}: none of its channels exists (the device has {channels})"
+            ));
+        }
+        let config = AdapterConfig::new(
+            sources.len(),
+            clock_rate,
+            rate,
+            clock_period as usize,
+            period as usize,
+        );
+        let (input, output) = clock_adapter(config).map_err(|e| format!("{name}: {e}"))?;
+        let stats = Arc::new(SecondaryStats::default());
+        let max_frames = (choice.max_frames as usize).max(period as usize);
+        let mut callback = SecondaryCallback::new(output, targets, max_frames, Arc::clone(&stats));
+        let errors = Arc::clone(&stats);
+        let stream_config = StreamConfig {
+            channels: choice.channels,
+            sample_rate: rate,
+            buffer_size: BufferSize::Default,
+        };
+        let stream = device
+            .build_output_stream(
+                stream_config,
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    let time = u64::try_from(info.timestamp().callback.as_nanos()).ok();
+                    callback.fill(data, channels, time);
+                },
+                move |error: cpal::Error| {
+                    errors.stream_error();
+                    if matches!(
+                        error.kind(),
+                        cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable
+                    ) {
+                        errors.device_gone();
+                    }
+                },
+                None,
+            )
+            .map_err(|e| format!("{name}: {e}"))?;
+        // cpal switches the rate while it builds when it differs: a rate
+        // that moved since the read would have been switched. Refuse.
+        if let Some(after) = state_of(&device).rate
+            && after != rate
+        {
+            drop(stream);
+            return Err(rate_moved(&name, rate, after));
+        }
+        if !feeds.set(
+            slot,
+            Some(SecondaryFeed::new(input, sources, clock_max as usize)),
+        ) {
+            return Err(format!("{name}: the clock callback took no feed"));
+        }
+        if let Err(error) = stream.play() {
+            feeds.set(slot, None);
+            return Err(format!("{name}: {error}"));
+        }
+        let latency = object_of(&device)
+            .ok()
+            .and_then(device_props::output_latency);
+        self.stats = stats;
+        self.stream = Some(stream);
+        self.open = Some((rate, latency));
+        self.reason = None;
+        self.retry_at = None;
+        self.backoff = SECONDARY_RETRY;
+        self.period = period;
+        self.opened += 1;
+        Ok((!missing.is_empty()).then(|| {
+            format!(
+                "{name}: device channel{} {} do{} not exist (the device has {channels}); not heard there",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", "),
+                if missing.len() == 1 { "es" } else { "" }
+            )
+        }))
+    }
+
+    /// How long its stream should play on after the clock stopped: its
+    /// adapter's latency, its periods (the stop detection) and the fade.
+    fn drain(&self, clock_rate: u32) -> Duration {
+        let Some((rate, _)) = self.open else {
+            return Duration::ZERO;
+        };
+        let latency = self.stats.snapshot().latency_frames / f64::from(clock_rate.max(1));
+        let periods = 3.0 * f64::from(self.period) / f64::from(rate.max(1));
+        Duration::from_secs_f64((latency + periods + 0.010).max(0.0)).min(SECONDARY_DRAIN_MAX)
+    }
+
+    /// Stops and drops its stream (control thread).
+    fn stop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.pause();
+            drop(stream);
+        }
+        self.open = None;
+    }
+
+    fn status(&self, clock_rate: u32) -> SecondaryStatus {
+        let now = self.stats.snapshot();
+        let playing = self.stream.is_some() && !self.stats.is_gone();
+        let rate = self.open.map(|(rate, _)| rate);
+        // Before its first callback the adapter has published nothing.
+        let latency_ms = self
+            .open
+            .filter(|_| playing && now.callbacks > 0)
+            .map(|(rate, own)| {
+                let adapter = now.latency_frames / f64::from(clock_rate.max(1));
+                let device = f64::from(own.unwrap_or(0)) / f64::from(rate.max(1));
+                (adapter + device) * 1000.0
+            });
+        SecondaryStatus {
+            name: self.spec.name.clone(),
+            roles: self.spec.roles.clone(),
+            clock: "adapted",
+            state: if playing {
+                now.state
+            } else if self.reason.is_some() || self.stats.is_gone() {
+                SecondaryState::Absent
+            } else {
+                SecondaryState::Starting
+            },
+            rate,
+            clock_rate: rate.filter(|r| *r != clock_rate).map(|_| clock_rate),
+            drift_ppm: if playing { now.drift_ppm } else { 0.0 },
+            latency_ms,
+            slips: now.slips,
+            resyncs: self.opened.saturating_sub(1),
+            reason: self.reason.clone(),
+        }
+    }
 }
 
 /// How a driver maps the Runner's audio frame to the device's channels.
@@ -330,6 +620,8 @@ pub struct CoreAudioDriver {
     stats: Arc<CallbackStats>,
     running: Option<Running>,
     scheduling: Option<Scheduling>,
+    /// The secondary devices (ADR 0052), in their slots' order.
+    secondaries: Vec<Secondary>,
 }
 
 impl CoreAudioDriver {
@@ -458,7 +750,82 @@ impl CoreAudioDriver {
             stats: Arc::new(CallbackStats::default()),
             running: None,
             scheduling: None,
+            secondaries: Vec::new(),
         })
+    }
+
+    /// With the secondary devices `specs` (ADR 0052): each start opens
+    /// their streams beside the clock device's, each stop stops them, and
+    /// [`poll_secondaries`](CoreAudioDriver::poll_secondaries) rebuilds one
+    /// that failed once it is back. A secondary device that cannot be opened
+    /// never fails the run: its status says why it is not heard.
+    pub fn with_secondaries(mut self, specs: Vec<SecondarySpec>) -> CoreAudioDriver {
+        self.secondaries = specs.into_iter().map(Secondary::new).collect();
+        self
+    }
+
+    /// The secondary devices' status, in the routing's order.
+    pub fn secondaries(&self) -> Vec<SecondaryStatus> {
+        self.secondaries
+            .iter()
+            .map(|s| s.status(self.choice.sample_rate))
+            .collect()
+    }
+
+    /// Control thread, now and then while running (ADR 0052 §6): a
+    /// secondary device whose stream reported it gone (unplugged, its rate
+    /// changed) is stopped, its feed emptied; one not playing is opened
+    /// again, at most every [`SECONDARY_RETRY`], with a fresh adapter at the
+    /// rate it runs at now. Returns what changed, one line each.
+    pub fn poll_secondaries(&mut self) -> Vec<String> {
+        let mut notices = Vec::new();
+        let clock = (
+            self.choice.sample_rate,
+            self.plan.period,
+            self.choice.max_frames,
+        );
+        let clock_id = id_of(&self.device);
+        let Some(running) = self.running.as_mut() else {
+            return notices;
+        };
+        running.feeds.collect();
+        let now = Instant::now();
+        for (slot, secondary) in self.secondaries.iter_mut().enumerate() {
+            if secondary.stream.is_some() && secondary.stats.is_gone() {
+                secondary.stop();
+                running.feeds.set(slot, None);
+                secondary.reason = Some("the device went away or its stream failed".to_owned());
+                secondary.retry_at = Some(now + SECONDARY_RETRY);
+                notices.push(format!(
+                    "{}: gone; {} not heard until it is back",
+                    secondary.spec.name,
+                    secondary.spec.roles.join(", ")
+                ));
+                continue;
+            }
+            if secondary.stream.is_none() && secondary.retry_at.is_none_or(|at| now >= at) {
+                let before = secondary.reason.clone();
+                match secondary.start(clock, clock_id.as_deref(), &mut running.feeds, slot) {
+                    Ok(missing) => {
+                        notices.push(format!(
+                            "{}: playing {} through a clock adapter",
+                            secondary.spec.name,
+                            secondary.spec.roles.join(", ")
+                        ));
+                        notices.extend(missing);
+                    }
+                    Err(reason) => {
+                        if before.as_deref() != Some(reason.as_str()) {
+                            notices.push(format!("{reason}; not heard"));
+                        }
+                        secondary.reason = Some(reason);
+                        secondary.retry_at = Some(now + secondary.backoff);
+                        secondary.backoff = (secondary.backoff * 2).min(SECONDARY_RETRY_MAX);
+                    }
+                }
+            }
+        }
+        notices
     }
 
     /// The frames a callback is expected to hold, decided at the open
@@ -615,7 +982,9 @@ impl Driver for CoreAudioDriver {
             self.choice.sample_rate,
             Arc::clone(&self.stats),
         );
-        let mut callback = callback.with_fade_out(fade);
+        let (mut callback, feeds) = callback
+            .with_fade_out(fade)
+            .with_feeds(self.secondaries.len());
         let config = StreamConfig {
             channels: self.choice.channels,
             sample_rate: self.choice.sample_rate,
@@ -649,7 +1018,10 @@ impl Driver for CoreAudioDriver {
         let built = {
             self.device.build_output_stream(
                 config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    let time = u64::try_from(info.timestamp().callback.as_nanos()).ok();
+                    callback.fill_at(data, time);
+                },
                 move |error: cpal::Error| {
                     stats.stream_error();
                     match error.kind() {
@@ -692,7 +1064,17 @@ impl Driver for CoreAudioDriver {
             stream,
             control,
             workers,
+            feeds,
         });
+        // The secondary devices, once the clock device plays: one that
+        // cannot be opened is reported in its status, not refused.
+        for secondary in &mut self.secondaries {
+            secondary.reason = None;
+            secondary.retry_at = None;
+            secondary.backoff = SECONDARY_RETRY;
+            secondary.opened = 0;
+        }
+        let _ = self.poll_secondaries();
         Ok(())
     }
 
@@ -701,6 +1083,7 @@ impl Driver for CoreAudioDriver {
             stream,
             mut control,
             workers,
+            feeds,
         }) = self.running.take()
         else {
             return Ok(None);
@@ -731,6 +1114,18 @@ impl Driver for CoreAudioDriver {
         // The callback, and the Runner if it was never handed back, are
         // dropped here, on this thread.
         drop(stream);
+        drop(feeds);
+        // The secondary devices play out what their adapters hold (the
+        // fade-out), then stop.
+        let rate = self.choice.sample_rate;
+        if let Some(drain) = self.secondaries.iter().map(|s| s.drain(rate)).max()
+            && !drain.is_zero()
+        {
+            thread::sleep(drain);
+        }
+        for secondary in &mut self.secondaries {
+            secondary.stop();
+        }
         match runner {
             Some(runner) => Ok(Some(runner)),
             None => Err(DriverError::Device(

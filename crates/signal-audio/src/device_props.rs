@@ -5,9 +5,11 @@
 //! (`kAudioDevicePropertyDeviceIsRunningSomewhere`) and for this one
 //! (`kAudioDevicePropertyDeviceIsRunning`), its I/O buffer
 //! (`kAudioDevicePropertyBufferFrameSize`), its nominal rate
-//! (`kAudioDevicePropertyNominalSampleRate`) and the physical format cpal
+//! (`kAudioDevicePropertyNominalSampleRate`), the physical format cpal
 //! reads on the device (`kAudioStreamPropertyPhysicalFormat`, for the
-//! measurements of ADR 0036). It never sets a property: what Signal changes
+//! measurements of ADR 0036) and its output latency and safety offset
+//! (`kAudioDevicePropertyLatency`, `kAudioDevicePropertySafetyOffset`, in
+//! the output scope: a secondary device's reported latency, ADR 0052 §3). It never sets a property: what Signal changes
 //! on a device, cpal changes while it builds a stream, and
 //! [`plan_join`](crate::join::plan_join) decides whether that may happen.
 //!
@@ -17,9 +19,10 @@
 //!
 //! The audit:
 //! - **Every read** passes a live local of exactly the type the property
-//!   writes (`u32` for the flags and the buffer, `f64` for the rate,
+//!   writes (`u32` for the flags, the buffer and the latencies, `f64` for the rate,
 //!   [`PhysicalFormat`] for the format), its size in the size argument, and
-//!   no qualifier (null, size 0). The value is used only on status 0, and
+//!   no qualifier (null, size 0), in the global scope or, for the
+//!   latencies, the output scope. The value is used only on status 0, and
 //!   only when CoreAudio says it wrote all of it.
 //! - **The device object** may be gone by the time it is read (unplugged):
 //!   CoreAudio then answers with an error status (`kAudioHardwareBadObjectError`),
@@ -35,9 +38,10 @@ use std::ptr::{NonNull, null};
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceIsRunning,
-    kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioDevicePropertyLatency,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
     kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-    kAudioStreamPropertyPhysicalFormat,
+    kAudioObjectPropertyScopeOutput, kAudioStreamPropertyPhysicalFormat,
 };
 
 use crate::join::DeviceState;
@@ -71,11 +75,11 @@ pub struct PhysicalFormat {
 
 const _: () = assert!(size_of::<PhysicalFormat>() == 40);
 
-/// A global property's address.
-fn address(selector: u32) -> AudioObjectPropertyAddress {
+/// A property's address in `scope`.
+fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress {
         mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain,
     }
 }
@@ -84,7 +88,12 @@ fn address(selector: u32) -> AudioObjectPropertyAddress {
 /// an error status or a short answer. `T` must be the property's own type
 /// (the callers below are the whole list).
 fn read<T: Copy + Default>(object: AudioObjectID, selector: u32) -> Option<T> {
-    let address = address(selector);
+    read_in(object, selector, kAudioObjectPropertyScopeGlobal)
+}
+
+/// [`read`] in `scope`.
+fn read_in<T: Copy + Default>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
+    let address = address(selector, scope);
     let mut value = T::default();
     let wanted = u32::try_from(size_of::<T>()).ok()?;
     let mut size = wanted;
@@ -131,6 +140,22 @@ pub fn nominal_rate(object: AudioObjectID) -> Option<u32> {
 /// `object`'s physical format as cpal reads it, on the device object.
 pub fn physical_format(object: AudioObjectID) -> Option<PhysicalFormat> {
     read::<PhysicalFormat>(object, kAudioStreamPropertyPhysicalFormat)
+}
+
+/// `object`'s output latency plus its safety offset, in frames: what the
+/// device adds after a callback's frames (ADR 0052 §3).
+pub fn output_latency(object: AudioObjectID) -> Option<u32> {
+    let latency = read_in::<u32>(
+        object,
+        kAudioDevicePropertyLatency,
+        kAudioObjectPropertyScopeOutput,
+    )?;
+    let offset = read_in::<u32>(
+        object,
+        kAudioDevicePropertySafetyOffset,
+        kAudioObjectPropertyScopeOutput,
+    )?;
+    latency.checked_add(offset)
 }
 
 /// `object`'s state as [`plan_join`](crate::join::plan_join) reads it.

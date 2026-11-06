@@ -66,7 +66,8 @@ pub use render::{
     render_sides, render_with,
 };
 pub use routing::{
-    Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedSide, Routing, SoundSystem, route,
+    Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedSide, Routing, SecondaryRoute,
+    SoundSystem, route,
 };
 pub use runner::{
     Controller, ReadySwap, Runner, ceiling_level, hold, realtime, realtime_routed, realtime_with,

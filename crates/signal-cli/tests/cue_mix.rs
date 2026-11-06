@@ -6,7 +6,8 @@
 //!   `devices/cue.wav` beside it; the render does not depend on the block
 //!   size or the thread count.
 //! - `signal play --driver null --route cue=3,4` plays both; without a route
-//!   the cue is said to be not heard, and main plays.
+//!   the cue is said to be not heard, and main plays; `--route cue@DEVICE=1,2`
+//!   names another device (ADR 0052), which the null driver does not play.
 //! - On the null driver with the Setup's sound system (main on 1–2, cue on
 //!   3–4 of a scripted 4-channel SSL 2+), the Runner's frame is cue then
 //!   main, and the channel map puts cue on device channels 3–4 and main on
@@ -168,6 +169,37 @@ fn play_routes_the_cue_or_says_it_is_not_heard() {
         "{}",
         String::from_utf8_lossy(&unrouted.stderr)
     );
+}
+
+/// ADR 0052: `--route cue@DEVICE=1,2` binds the cue to another device; the
+/// null driver plays no other device, so it says the cue is not heard there,
+/// and main plays. A bad `@` is refused at the command line.
+#[test]
+fn play_names_another_device_for_a_role() {
+    let dir = project_dir();
+    let dir = dir.to_str().unwrap();
+    let other = signal(&[
+        "play",
+        dir,
+        "--driver",
+        "null",
+        "--fast",
+        "--seconds",
+        "0.5",
+        "--route",
+        "cue@Some Speakers=1,2",
+    ]);
+    let stderr = String::from_utf8_lossy(&other.stderr);
+    assert!(other.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "cue (/cue): Some Speakers is not present (the null driver plays no other device); not heard"
+        ),
+        "{stderr}"
+    );
+    let bad = signal(&["play", dir, "--driver", "null", "--route", "cue@=1,2"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("no device after `@`"));
 }
 
 fn ssl() -> DeviceInfo {

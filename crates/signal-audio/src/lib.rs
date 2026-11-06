@@ -46,23 +46,27 @@ mod join;
 mod map;
 pub mod rt_thread;
 mod scheduling;
+mod secondary;
 mod select;
 mod stats;
 
-pub use callback::{CallbackControl, OutputCallback};
+pub use callback::{CallbackControl, FeedControl, OutputCallback};
 pub use config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
     fault_message, rate_moved, rate_notice, start_failure,
 };
 pub use coreaudio::{
-    CoreAudioDriver, DeviceSelector, InputCapture, device_state, devices, live_rate, output_period,
-    output_rate, physical_format,
+    CoreAudioDriver, DeviceSelector, InputCapture, SecondarySpec, SecondaryStatus, device_state,
+    devices, live_rate, output_period, output_rate, physical_format,
 };
 pub use input::{InputCallback, InputMeters};
 pub use join::{BufferRequest, DeviceState, FALLBACK_PERIOD, JoinPlan, plan_join};
 pub use map::ChannelMap;
 pub use scheduling::{
     Demotions, DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device,
+};
+pub use secondary::{
+    SecondaryCallback, SecondaryFeed, SecondarySnapshot, SecondaryState, SecondaryStats,
 };
 pub use select::{DeviceRef, Resolution, labels, resolve, signature};
 pub use stats::{CallbackStats, StatsSnapshot, StreamFault};

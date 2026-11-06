@@ -1,6 +1,7 @@
 //! The body of the device's audio callback: runs the [`Runner`] into a
-//! scratch buffer of the sink's channels, maps them to the device's, measures
-//! the callback, and hands the Runner back on request.
+//! scratch buffer of the sink's channels, maps them to the device's, feeds
+//! the secondary devices' adapters (ADR 0052), measures the callback, and
+//! hands the Runner back on request.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,6 +10,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use signal_output::Runner;
 
 use crate::map::ChannelMap;
+use crate::secondary::SecondaryFeed;
 use crate::stats::CallbackStats;
 
 /// What the audio callback holds: the Runner, a scratch buffer, the channel
@@ -31,6 +33,41 @@ pub struct OutputCallback {
     fade: u32,
     /// A stop was requested and the Runner is fading out.
     fading: bool,
+    /// The secondary devices' feeds (ADR 0052), by slot.
+    feeds: Vec<Option<SecondaryFeed>>,
+    /// Feeds to put into a slot (`None`: empty it), from [`FeedControl`].
+    feed_in: Option<Consumer<(usize, Option<SecondaryFeed>)>>,
+    /// Feeds taken out, for the control thread to drop.
+    feed_back: Option<Producer<SecondaryFeed>>,
+}
+
+/// The control thread's side of an [`OutputCallback`]'s feeds: puts a
+/// secondary device's feed into a slot or empties it, and takes the
+/// replaced feeds back to drop them off the audio thread.
+pub struct FeedControl {
+    commands: Producer<(usize, Option<SecondaryFeed>)>,
+    back: Consumer<SecondaryFeed>,
+    slots: usize,
+}
+
+impl FeedControl {
+    /// Puts `feed` into `slot` (`None`: empties it); the callback applies
+    /// it at its next start. False when the queue is full or the slot does
+    /// not exist (the feed is dropped here, on the control thread).
+    pub fn set(&mut self, slot: usize, feed: Option<SecondaryFeed>) -> bool {
+        self.collect();
+        slot < self.slots && self.commands.push((slot, feed)).is_ok()
+    }
+
+    /// Drops the feeds the callback took out (control thread).
+    pub fn collect(&mut self) {
+        while self.back.pop().is_ok() {}
+    }
+
+    /// The slots.
+    pub fn slots(&self) -> usize {
+        self.slots
+    }
 }
 
 /// The control thread's side of an [`OutputCallback`]: asks it to stop and
@@ -64,6 +101,9 @@ impl OutputCallback {
             stopping: false,
             fade: 0,
             fading: false,
+            feeds: Vec::new(),
+            feed_in: None,
+            feed_back: None,
         };
         let control = CallbackControl {
             stop: stop_tx,
@@ -72,11 +112,38 @@ impl OutputCallback {
         (callback, control)
     }
 
+    /// With `slots` empty slots for secondary devices' feeds (ADR 0052),
+    /// filled and emptied through the returned [`FeedControl`]. Control
+    /// thread: allocates the slots and queues.
+    pub fn with_feeds(mut self, slots: usize) -> (OutputCallback, FeedControl) {
+        let queue = (2 * slots).max(1);
+        let (commands, feed_in) = RingBuffer::new(queue);
+        let (feed_back, back) = RingBuffer::new(queue);
+        self.feeds = (0..slots).map(|_| None).collect();
+        self.feed_in = Some(feed_in);
+        self.feed_back = Some(feed_back);
+        let control = FeedControl {
+            commands,
+            back,
+            slots,
+        };
+        (self, control)
+    }
+
     /// One device callback: `data` holds frames of the device's channels,
     /// interleaved. Runs the Runner over them (silence once stopping or
     /// stopped), and records the callback's duration in the statistics.
     pub fn fill(&mut self, data: &mut [f32]) {
+        self.fill_at(data, None);
+    }
+
+    /// [`fill`](OutputCallback::fill) at the callback's host time `time_ns`
+    /// (nanoseconds, the clock all streams share), if known: each piece of
+    /// the run's frame also goes to the secondary devices' feeds, stamped
+    /// with its own time.
+    pub fn fill_at(&mut self, data: &mut [f32], time_ns: Option<u64>) {
         let start = Instant::now();
+        self.apply_feeds();
         if self.stop.pop().is_ok() && !self.fading {
             self.fading = true;
             if let Some(runner) = self.runner.as_mut() {
@@ -90,12 +157,20 @@ impl OutputCallback {
         match self.runner.as_mut() {
             Some(runner) if !self.stopping && sink > 0 && device > 0 => {
                 let piece = (self.scratch.len() / sink).max(1);
+                let frame_ns = 1e9 / f64::from(self.sample_rate.max(1));
+                let mut offset = 0u64;
                 for out in data.chunks_mut(piece * device) {
                     let n = out.len() / device;
                     if let Some(src) = self.scratch.get_mut(..n * sink) {
                         runner.process(src, sink);
                         self.map.scatter(src, out);
+                        let time =
+                            time_ns.map(|t| t.saturating_add((offset as f64 * frame_ns) as u64));
+                        for feed in self.feeds.iter_mut().flatten() {
+                            feed.push(src, sink, time);
+                        }
                     }
+                    offset += n as u64;
                     if let Some(rest) = out.get_mut(n * device..) {
                         rest.fill(0.0);
                     }
@@ -116,6 +191,35 @@ impl OutputCallback {
     pub fn with_fade_out(mut self, frames: u32) -> OutputCallback {
         self.fade = frames;
         self
+    }
+
+    /// Applies the feeds the control thread sent: a slot's old feed goes
+    /// back to it, never dropped here (a command waits while the return
+    /// queue is full).
+    fn apply_feeds(&mut self) {
+        let (Some(commands), Some(back)) = (self.feed_in.as_mut(), self.feed_back.as_mut()) else {
+            return;
+        };
+        while let Ok(slot) = commands.peek().map(|(slot, _)| *slot) {
+            let occupied = self.feeds.get(slot).is_some_and(Option::is_some);
+            if occupied && back.is_full() {
+                break;
+            }
+            let Ok((slot, feed)) = commands.pop() else {
+                break;
+            };
+            let Some(place) = self.feeds.get_mut(slot) else {
+                // Never sent ([`FeedControl::set`] checks); kept from the
+                // audio thread's drop all the same.
+                if let Some(feed) = feed {
+                    let _ = back.push(feed);
+                }
+                continue;
+            };
+            if let Some(old) = std::mem::replace(place, feed) {
+                let _ = back.push(old);
+            }
+        }
     }
 
     /// Once a stop was requested and the Runner has faded out (or there is

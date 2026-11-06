@@ -306,6 +306,7 @@ impl Host {
             current: project,
             watcher,
             watched: Instant::now(),
+            polled: Instant::now(),
             retry: false,
             file,
             rate: started.rate,
