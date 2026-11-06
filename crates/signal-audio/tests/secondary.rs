@@ -9,6 +9,9 @@
 //!   its slot mid-run included.
 //! - Two clocks in virtual time (44.1 kHz at +50 ppm against 48 kHz): the
 //!   secondary locks without a slip and plays the cue.
+//! - The output ceiling holds on the secondary device too: a square wave
+//!   at the ceiling, whose conversion overshoots it, reaches the device
+//!   within it, each held sample counted.
 
 signal_contract::install_counting_allocator!();
 
@@ -78,7 +81,7 @@ fn secondary(
     let config = AdapterConfig::new(route.sources.len(), RATE, rate, clock_period, period);
     let (input, output) = clock_adapter(config).unwrap();
     let stats = Arc::new(SecondaryStats::default());
-    let feed = SecondaryFeed::new(input, route.sources.clone(), 1_024);
+    let feed = SecondaryFeed::new(input, route.sources.clone(), 1_024, Arc::clone(&stats));
     let callback = SecondaryCallback::new(output, route.targets.clone(), 2_048, Arc::clone(&stats));
     (feed, callback, stats)
 }
@@ -207,4 +210,57 @@ fn a_drifting_secondary_at_another_rate_locks_and_plays_the_cue() {
     );
     assert!(cue_peak > 0.01, "the cue plays: {cue_peak}");
     assert!(now.latency_frames > 0.0);
+}
+
+/// The run's ceiling after the conversion: a 1 kHz square wave at ±`level`
+/// pushed at 48 kHz under `ceiling`, pulled at 44.1 kHz (the sinc
+/// converter rings past each edge); the device samples stay within the
+/// ceiling (or the device's range), and the samples held are counted.
+fn square_through(level: f32, ceiling: Option<f32>) -> (f32, u64) {
+    let config = AdapterConfig::new(2, RATE, 44_100, 256, 441);
+    let (input, output) = clock_adapter(config).unwrap();
+    let stats = Arc::new(SecondaryStats::default());
+    let mut feed = SecondaryFeed::new(input, vec![0, 1], 256, Arc::clone(&stats));
+    let mut device = SecondaryCallback::new(output, vec![0, 1], 441, Arc::clone(&stats));
+    let mut frame = vec![0.0f32; 256 * 2];
+    let mut pulled = vec![0.0f32; 441 * 2];
+    let (mut next_clock, mut next_device) = (0.0f64, 0.004f64);
+    let mut n = 0u64;
+    let mut peak = 0.0f32;
+    while next_device < 3.0 {
+        if next_clock <= next_device {
+            for f in frame.as_chunks_mut::<2>().0 {
+                let x = if (n / 24).is_multiple_of(2) {
+                    level
+                } else {
+                    -level
+                };
+                f.fill(x);
+                n += 1;
+            }
+            feed.push(&frame, 2, Some((next_clock * 1e9) as u64), ceiling);
+            next_clock += 256.0 / f64::from(RATE);
+        } else {
+            device.fill(&mut pulled, 2, Some((next_device * 1e9) as u64));
+            next_device += 441.0 / 44_100.0;
+            peak = pulled.iter().fold(peak, |p, x| p.max(x.abs()));
+        }
+    }
+    assert_eq!(stats.snapshot().state, SecondaryState::Locked);
+    (peak, stats.snapshot().held)
+}
+
+#[test]
+fn the_ceiling_holds_after_the_conversion() {
+    let (peak, held) = square_through(0.1, Some(0.1));
+    assert!(peak <= 0.1, "peak {peak}");
+    assert!(peak > 0.09, "the square plays: {peak}");
+    assert!(held > 0, "the overshoot is held and counted");
+    // No ceiling: the device's own range.
+    let (peak, held) = square_through(1.0, None);
+    assert!(peak <= 1.0, "peak {peak}");
+    assert!(held > 0);
+    // Well within the ceiling: nothing held.
+    let (_, held) = square_through(0.05, Some(0.1));
+    assert_eq!(held, 0);
 }

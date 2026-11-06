@@ -166,8 +166,9 @@ impl OutputCallback {
                         self.map.scatter(src, out);
                         let time =
                             time_ns.map(|t| t.saturating_add((offset as f64 * frame_ns) as u64));
+                        let ceiling = runner.ceiling();
                         for feed in self.feeds.iter_mut().flatten() {
-                            feed.push(src, sink, time);
+                            feed.push(src, sink, time, ceiling);
                         }
                     }
                     offset += n as u64;

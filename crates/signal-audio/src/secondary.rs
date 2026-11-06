@@ -6,10 +6,14 @@
 //!   channels its device plays (after the layout, `gain`, clamp and f32
 //!   conversion the Runner already did) and pushes them into the adapter's
 //!   ring, stamped with the piece's host time. The engine's output is not
-//!   touched: the feed only reads it.
+//!   touched: the feed only reads it. It also hands on the run's output
+//!   ceiling, which the device side enforces.
 //! - [`SecondaryCallback`], the device side: the secondary device's own
 //!   callback pulls exactly the frames it must deliver from the adapter's
-//!   converter and scatters them onto its device channels.
+//!   converter, holds them within the device's range and the ceiling (the
+//!   converter's interpolation and a slip's crossfade can overshoot what
+//!   the Runner held), counting each it held, and scatters them onto its
+//!   device channels.
 //! - [`SecondaryStats`]: what the device side publishes for the control
 //!   thread (state, correction, slips, latency) and the stream's fault.
 //!   Atomics only.
@@ -18,10 +22,11 @@
 //! the control thread when the route is made (`docs/realtime-rules.md`).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use serde::Serialize;
 use signal_output::adapter::{AdapterInput, AdapterOutput, AdapterState};
+use signal_output::hold;
 
 /// The engine side of one secondary device: gathers its channels of the
 /// run's audio frame and pushes them into its adapter.
@@ -32,25 +37,43 @@ pub struct SecondaryFeed {
     sources: Vec<usize>,
     /// One piece of gathered frames.
     gathered: Vec<f32>,
+    /// Where it hands on the run's ceiling: the device side's stats.
+    stats: Arc<SecondaryStats>,
 }
 
 impl SecondaryFeed {
     /// A feed of the run frame's channels `sources` into `input` (whose
     /// adapter carries `sources.len()` channels), for pieces of up to
-    /// `max_frames` frames. Control thread.
-    pub fn new(input: AdapterInput, sources: Vec<usize>, max_frames: usize) -> SecondaryFeed {
+    /// `max_frames` frames, handing the run's ceiling on to the device
+    /// side whose state is `stats`. Control thread.
+    pub fn new(
+        input: AdapterInput,
+        sources: Vec<usize>,
+        max_frames: usize,
+        stats: Arc<SecondaryStats>,
+    ) -> SecondaryFeed {
         let gathered = vec![0.0; max_frames.max(1) * sources.len().max(1)];
         SecondaryFeed {
             input,
             sources,
             gathered,
+            stats,
         }
     }
 
     /// Pushes the feed's channels of `frame` (interleaved, `width` channels
-    /// per frame), made at host time `time_ns` if known. A piece longer
-    /// than the feed was made for is pushed in parts. Real-time safe.
-    pub fn push(&mut self, frame: &[f32], width: usize, time_ns: Option<u64>) {
+    /// per frame), made at host time `time_ns` if known, under the run's
+    /// output ceiling `ceiling` ([`Runner::ceiling`](signal_output::Runner::ceiling);
+    /// `None`: the device's range alone). A piece longer than the feed was
+    /// made for is pushed in parts. Real-time safe.
+    pub fn push(
+        &mut self,
+        frame: &[f32],
+        width: usize,
+        time_ns: Option<u64>,
+        ceiling: Option<f32>,
+    ) {
+        self.stats.set_limit(ceiling);
         let channels = self.sources.len();
         if channels == 0 || width == 0 {
             return;
@@ -143,6 +166,22 @@ pub struct SecondaryStats {
     /// The stream reported the device gone or failed.
     gone: AtomicBool,
     stream_errors: AtomicU64,
+    /// The level the device side holds its samples within, as f32 bits:
+    /// the run's ceiling, at most 1 (the device's range).
+    limit: Limit,
+    /// Device samples held within it, since the stream started.
+    held: AtomicU64,
+}
+
+/// [`SecondaryStats::limit`]: 1 (the device's range) until a feed hands on
+/// a ceiling.
+#[derive(Debug)]
+struct Limit(AtomicU32);
+
+impl Default for Limit {
+    fn default() -> Limit {
+        Limit(AtomicU32::new(1.0f32.to_bits()))
+    }
 }
 
 /// A copy of [`SecondaryStats`].
@@ -167,6 +206,9 @@ pub struct SecondarySnapshot {
     pub callbacks: u64,
     /// Errors the stream reported.
     pub stream_errors: u64,
+    /// Device samples held within the device's range or the run's ceiling
+    /// after the conversion.
+    pub held: u64,
 }
 
 impl SecondaryStats {
@@ -181,6 +223,22 @@ impl SecondaryStats {
     /// Counts an error the stream reported.
     pub fn stream_error(&self) {
         self.stream_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Hands on the run's output ceiling (`None`: the device's range).
+    fn set_limit(&self, ceiling: Option<f32>) {
+        let level = ceiling.map_or(1.0, |c| {
+            if c.is_finite() {
+                c.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        self.limit.0.store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    fn limit(&self) -> f32 {
+        f32::from_bits(self.limit.0.load(Ordering::Relaxed))
     }
 
     /// Whether the stream reported the device gone.
@@ -200,6 +258,7 @@ impl SecondaryStats {
             stops: self.stops.load(Ordering::Relaxed),
             callbacks: self.callbacks.load(Ordering::Relaxed),
             stream_errors: self.stream_errors.load(Ordering::Relaxed),
+            held: self.held.load(Ordering::Relaxed),
         }
     }
 
@@ -267,6 +326,8 @@ impl SecondaryCallback {
         }
         let piece = (self.scratch.len() / channels).max(1);
         let frame_ns = self.frame_ns();
+        let limit = Some(self.stats.limit());
+        let mut held = 0u64;
         let mut offset = 0u64;
         for out in data.chunks_mut(piece * device_channels) {
             let frames = out.len() / device_channels;
@@ -281,11 +342,19 @@ impl SecondaryCallback {
             {
                 for (&x, &t) in s.iter().zip(&self.targets) {
                     if let Some(y) = d.get_mut(t) {
-                        *y = x;
+                        *y = if x.is_finite() {
+                            hold(x, limit, &mut held)
+                        } else {
+                            held += 1;
+                            0.0
+                        };
                     }
                 }
             }
             offset += frames as u64;
+        }
+        if held > 0 {
+            self.stats.held.fetch_add(held, Ordering::Relaxed);
         }
         self.stats.publish(&self.output);
     }

@@ -984,6 +984,9 @@ fn secondary_line(s: &SecondaryStatus) -> String {
     if s.rebuilds > 0 {
         line.push_str(&format!(", rebuilt {}×", s.rebuilds));
     }
+    if s.held > 0 {
+        line.push_str(&format!(", {} held", s.held));
+    }
     if let Some(reason) = &s.reason {
         line.push_str(&format!(" ({reason})"));
     }

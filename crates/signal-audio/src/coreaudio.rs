@@ -458,6 +458,10 @@ pub struct SecondaryStatus {
     pub resyncs: u64,
     /// Times its routes were rebuilt after the device came back.
     pub rebuilds: u64,
+    /// Samples held within the device's range or the output ceiling after
+    /// the conversion, in its current stream (the Runner's own clipped and
+    /// held counts are before it).
+    pub held: u64,
     /// Why it is not playing, when it is not.
     pub reason: Option<String>,
 }
@@ -638,7 +642,12 @@ impl Secondary {
         }
         if !feeds.set(
             slot,
-            Some(SecondaryFeed::new(input, sources, clock_max as usize)),
+            Some(SecondaryFeed::new(
+                input,
+                sources,
+                clock_max as usize,
+                Arc::clone(&stats),
+            )),
         ) {
             return Err(format!("{name}: the clock callback took no feed"));
         }
@@ -719,6 +728,7 @@ impl Secondary {
             slips: now.slips,
             resyncs: now.resyncs,
             rebuilds: self.opened.saturating_sub(1),
+            held: now.held,
             reason: self.reason.clone(),
         }
     }
