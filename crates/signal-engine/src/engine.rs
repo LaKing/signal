@@ -854,6 +854,9 @@ impl PlanState {
                     Some("a declared latency")
                 } else if descriptor.sink.is_some() {
                     Some("a sink")
+                } else if descriptor.source.is_some() {
+                    // ADR 0038 §7: a source's rows are per frame.
+                    Some("a source")
                 } else {
                     None
                 };

@@ -1194,7 +1194,7 @@ export class SignalPlane extends HTMLElement {
         try {
           await patch();
         } catch (error) {
-          if (!/outputs must stay/.test(error?.message ?? '')) throw error;
+          if (!/(outputs|inputs) must stay/.test(error?.message ?? '')) throw error;
           await this.request({ type: 'transport.stop' });
           restart = true;
           await patch();

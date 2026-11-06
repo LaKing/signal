@@ -314,6 +314,9 @@ test('an input dragged onto a role already playing is wired into it; nothing dro
     { op: 'connection.add', from: 'input.m', to: 'out.r' },
   ]);
   assert.equal(result.routes.length, 1);
+  // Shift (this project only) still binds the capture role in the Setup: devices.local.toml binds play roles only.
+  const shifted = cableDrop(drag, { box: sslBox.key, port: sslBox.inputs[0], channel: 1 }, { bindings, instances: ['out'], main, devices, scope: 'project' });
+  assert.equal(shifted.routes[0].scope, 'machine');
   const nothing = cableDrop(drag, null, { bindings, main, devices });
   assert.deepEqual([nothing.ops, nothing.routes], [[], []]);
   assert.match(nothing.note, /drop an input/);

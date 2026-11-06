@@ -96,3 +96,30 @@ fn the_output_is_the_input_and_the_record_what_the_engine_read() {
         (FRAMES - RECORDED) as u64
     );
 }
+
+/// A capture side the plan does not have (another address, or another
+/// width): the engine reads nothing, and the record says 0, as what it read.
+#[test]
+fn an_unbound_input_records_zeros() {
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let plan = plan(&registry);
+    let (input, record) = RunInput::new(
+        "/elsewhere".parse().unwrap(),
+        2,
+        Box::new(RecordedInput::new(vec![0.5; 512], 2)),
+        256,
+        Some(256),
+    );
+    let mut record = record.unwrap();
+    let (mut runner, _controller) =
+        realtime(&plan, &registry, RealtimeConfig::new(48_000, 1)).unwrap();
+    runner.set_inputs(vec![input]);
+    let mut out = vec![0.0f32; 128 * 2];
+    runner.process(&mut out, 2);
+    assert!(out.iter().all(|&x| x == 0.0));
+    let mut recorded = Vec::new();
+    record.drain(&mut recorded);
+    assert_eq!(recorded.len(), 256);
+    assert!(recorded.iter().all(|&x| x == 0.0));
+}

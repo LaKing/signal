@@ -335,6 +335,34 @@ fn same_sink(
             list(&now)
         ))]);
     }
+    // ADR 0038 §7: the run opens its inputs when it starts; a capture side
+    // added, removed or re-roled live would read 0 until a restart.
+    let captures = |project: &Project, plan: &signal_graph::ExecutionPlan| {
+        let mut sides: Vec<(String, String, usize)> = crate::device::capture_sides(project, plan)
+            .into_iter()
+            .map(|s| (s.address.to_string(), s.role, s.width))
+            .collect();
+        sides.sort();
+        sides
+    };
+    let (was, now) = (captures(old, before), captures(new, plan));
+    if was != now {
+        let list = |sides: &[(String, String, usize)]| {
+            if sides.is_empty() {
+                return "none".to_owned();
+            }
+            sides
+                .iter()
+                .map(|(address, role, _)| format!("{address} ({role})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(vec![new.instances_error(format!(
+            "the inputs must stay {} while the project plays (now {}); restart to change them",
+            list(&was),
+            list(&now)
+        ))]);
+    }
     Ok(())
 }
 

@@ -575,13 +575,12 @@ pub fn capture_specs(
     };
     let mut bindings = std::collections::BTreeMap::new();
     for (role, entry) in &setup.capture {
-        let device = match &entry.device {
-            Some(device) => match find(device, notes) {
-                Some(label) => Some(label),
-                None => continue,
-            },
-            None => None,
-        };
+        // A device not found keeps its role bound to it, so the role reads
+        // 0 (never main's input: an unplugged mic must not become the room
+        // mic on the speakers).
+        let device = entry.device.as_ref().map(|device| {
+            find(device, notes).unwrap_or_else(|| format!("{} (not present)", device.name))
+        });
         bindings.insert(role.clone(), (device, entry.channels.clone()));
     }
     let (routed, routing_notes) =

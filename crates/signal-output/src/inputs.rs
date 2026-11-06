@@ -166,6 +166,11 @@ impl RunInput {
             if peak > self.counts.peak() {
                 self.counts.peak.store(peak.to_bits(), Ordering::Relaxed);
             }
+            // Unbound (the plan has no such source): the engine reads
+            // nothing, and the record says 0, as what it read.
+            if self.id.is_none() {
+                buffer.fill(0.0);
+            }
             if let Some(rows) = self.id.and_then(|id| engine.source_rows_mut(id)) {
                 for (f, frame) in buffer.chunks_exact(width).enumerate() {
                     for (r, &x) in frame.iter().enumerate() {

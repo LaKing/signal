@@ -82,6 +82,21 @@ fn what_runs_only_at_divisor_one_is_refused() {
         at2,
         at2_param,
     );
+    // ADR 0038 §7: a source at 2 (its rows are per frame).
+    {
+        let t = *registry.get("test.osc").unwrap();
+        let mut descriptor = t.descriptor;
+        descriptor.type_name = "x.source";
+        descriptor.ports = Box::leak(descriptor.ports.iter().map(at2).collect());
+        descriptor.parameters = Box::leak(descriptor.parameters.iter().map(at2_param).collect());
+        descriptor.source = Some(signal_core::SourceKind::Audio);
+        registry
+            .register(ModuleType {
+                descriptor,
+                create: t.create,
+            })
+            .unwrap();
+    }
     variant(
         &mut registry,
         "test.gain",
@@ -106,6 +121,7 @@ fn what_runs_only_at_divisor_one_is_refused() {
     for (module, what) in [
         ("x.events", "event ports"),
         ("x.sink", "a sink"),
+        ("x.source", "a source"),
         ("x.latent", "a declared latency"),
     ] {
         let error = refusal(&registry, module);

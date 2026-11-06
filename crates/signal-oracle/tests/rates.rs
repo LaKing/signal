@@ -513,6 +513,9 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         .map(|t| t.descriptor)
         .filter(|d| {
             d.sink.is_none()
+                // ADR 0038 §7: a source reads per frame (its own test,
+                // `tests/sources.rs`), never at a divided rate.
+                && d.source.is_none()
                 && d.latency.is_none()
                 && (d.type_name.starts_with("std.") || d.type_name.starts_with('d'))
                 // M2.8-7: the standard types at divisor 1 without vector

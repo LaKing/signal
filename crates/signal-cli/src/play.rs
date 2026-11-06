@@ -1004,7 +1004,10 @@ fn capture_line(c: &CaptureStatus) -> String {
         if c.clock == "adapted" {
             line.push_str(&format!(", {:+.1} ppm", c.drift_ppm));
         }
-        line.push_str(&format!(", peak {:.3}, {} missing", c.peak, c.missing));
+        line.push_str(&format!(
+            ", peak {:.3}, {} missing, {} dropped",
+            c.peak, c.missing, c.dropped
+        ));
     }
     if let Some(reason) = &c.reason {
         line.push_str(&format!(" ({reason})"));

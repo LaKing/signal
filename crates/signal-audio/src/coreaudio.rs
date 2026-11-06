@@ -384,6 +384,9 @@ pub struct CaptureStatus {
     pub drift_ppm: f64,
     /// Frames its sources read as 0 (the ring ran short, or it is gone).
     pub missing: u64,
+    /// Frames its input callback could not hand on (a full ring or
+    /// adapter): lost before the engine.
+    pub dropped: u64,
     /// The largest |sample| its sources read since the start (a level).
     pub peak: f32,
     /// Why it is not captured, when it is not.
@@ -397,6 +400,8 @@ struct Capture {
     adapted: bool,
     stats: Arc<SecondaryStats>,
     counts: Vec<Arc<InputCounts>>,
+    /// Frames the input callback could not hand on (a full ring).
+    dropped: Arc<std::sync::atomic::AtomicU64>,
     reason: Option<String>,
 }
 
@@ -481,6 +486,7 @@ impl Capture {
                 .map(|c| c.missing.load(std::sync::atomic::Ordering::Relaxed))
                 .sum(),
             peak: self.counts.iter().map(|c| c.peak()).fold(0.0, f32::max),
+            dropped: self.dropped.load(std::sync::atomic::Ordering::Relaxed),
             reason: self
                 .reason
                 .clone()
@@ -973,6 +979,7 @@ impl CoreAudioDriver {
             id_of(&device).is_none() || id_of(&device) != id_of(&self.device) || rate != clock_rate;
         let max_frames = (choice.max_frames as usize).max(period as usize);
         let stats = Arc::new(SecondaryStats::default());
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut feeds = Vec::new();
         let mut inputs = Vec::new();
         let mut records = Vec::new();
@@ -1000,7 +1007,12 @@ impl CoreAudioDriver {
                 let (tx, rx) = capture_ring(side.width, period as usize, clock_period);
                 (SideSink::Ring(tx), Box::new(rx))
             };
-            feeds.push(SideFeed::new(channels_of, sink, max_frames));
+            feeds.push(SideFeed::new(
+                channels_of,
+                sink,
+                max_frames,
+                Arc::clone(&dropped),
+            ));
             let (input, record) = RunInput::new(
                 side.address.clone(),
                 side.width,
@@ -1052,6 +1064,7 @@ impl CoreAudioDriver {
                 adapted,
                 stats,
                 counts,
+                dropped,
                 reason: None,
             },
         })
@@ -1302,6 +1315,7 @@ impl Driver for CoreAudioDriver {
                     adapted: false,
                     stats: Arc::new(SecondaryStats::default()),
                     counts: Vec::new(),
+                    dropped: Arc::default(),
                     reason: Some(reason),
                 }),
             }

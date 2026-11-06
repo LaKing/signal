@@ -245,7 +245,8 @@ function captureDrop(drag, drop, { bindings, instances, main, devices, scope }) 
   const taken = [...bindings.map((b) => b.role), ...instances];
   const role = newInputRoleName(taken);
   const ops = [{ op: 'device.add', name: role, capture: 'mono', role }];
-  const routes = [{ type: 'device.route', side: 'capture', role, channels: drag.port.channels.slice(0, 1), device: deviceEntry(devices, drag.box, 'input'), scope }];
+  // A capture role is bound in the Setup (devices.local.toml binds play roles only for now).
+  const routes = [{ type: 'device.route', side: 'capture', role, channels: drag.port.channels.slice(0, 1), device: deviceEntry(devices, drag.box, 'input'), scope: 'machine' }];
   const occupant = bindings.find((b) => b.device === drop.box && b.channels.includes(drop.channel));
   const into = (ports) => ports.forEach((port) => ops.push({ op: 'connection.add', from: `${role}.m`, to: strip(port) }));
   if (occupant) {

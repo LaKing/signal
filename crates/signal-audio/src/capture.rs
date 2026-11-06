@@ -15,6 +15,7 @@
 //! the control thread when the stream opens (`docs/realtime-rules.md`).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -40,20 +41,25 @@ pub struct SideFeed {
     sink: SideSink,
     /// One piece of gathered frames.
     gathered: Vec<f32>,
-    /// Frames the ring had no room for.
-    dropped: u64,
+    /// Frames the ring or adapter had no room for, for the status.
+    dropped: Arc<AtomicU64>,
 }
 
 impl SideFeed {
     /// A side reading device channels `channels` (from 0, per port) into
     /// `sink`, for callbacks of up to `max_frames`. Control thread.
-    pub fn new(channels: Vec<Option<usize>>, sink: SideSink, max_frames: usize) -> SideFeed {
+    pub fn new(
+        channels: Vec<Option<usize>>,
+        sink: SideSink,
+        max_frames: usize,
+        dropped: Arc<AtomicU64>,
+    ) -> SideFeed {
         let width = channels.len().max(1);
         SideFeed {
             channels,
             sink,
             gathered: vec![0.0; max_frames.max(1) * width],
-            dropped: 0,
+            dropped,
         }
     }
 }
@@ -106,10 +112,14 @@ impl CaptureFeed {
                             second.copy_from_slice(y);
                             chunk.commit_all();
                         }
-                        Err(_) => side.dropped += frames as u64,
+                        Err(_) => {
+                            side.dropped.fetch_add(frames as u64, Ordering::Relaxed);
+                        }
                     },
                     SideSink::Adapter(input) => {
-                        input.push(out, time);
+                        let taken = input.push(out, time);
+                        side.dropped
+                            .fetch_add((frames - taken) as u64, Ordering::Relaxed);
                     }
                 }
             }
@@ -123,6 +133,11 @@ impl CaptureFeed {
 pub struct RingSource {
     ring: Consumer<f32>,
     width: usize,
+    /// The prefill, in frames: what the ring holds at the first read, the
+    /// rest (frames captured before the output started) discarded, so the
+    /// latency is one input period however long the start took.
+    prefill: usize,
+    started: bool,
 }
 
 /// A ring for a side of `width` channels from an input of `period` frames
@@ -140,11 +155,26 @@ pub fn capture_ring(
     for _ in 0..period * width {
         let _ = tx.push(0.0);
     }
-    (tx, RingSource { ring: rx, width })
+    (
+        tx,
+        RingSource {
+            ring: rx,
+            width,
+            prefill: period,
+            started: false,
+        },
+    )
 }
 
 impl InputSource for RingSource {
     fn read(&mut self, out: &mut [f32], _offset: usize) -> usize {
+        if !self.started {
+            self.started = true;
+            let excess = (self.ring.slots() / self.width).saturating_sub(self.prefill);
+            if let Ok(chunk) = self.ring.read_chunk(excess * self.width) {
+                chunk.commit_all();
+            }
+        }
         let frames = (out.len() / self.width).min(self.ring.slots() / self.width);
         let n = frames * self.width;
         if let Ok(chunk) = self.ring.read_chunk(n) {

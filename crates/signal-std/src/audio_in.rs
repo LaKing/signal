@@ -10,7 +10,7 @@ use crate::{at, signal_port};
 
 const STEREO: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.audio_in",
-    doc: "Audio input (ADR 0038): the stereo capture side of a device slot; l and r are what the driver captured (a device's channels live, the recorded input in a replay, the slot's render file offline), 0 where it gave nothing.",
+    doc: "Audio input (ADR 0038): the stereo capture side of a device slot; l and r are what the driver captured (a device's input channels, live), 0 where it gave nothing (offline, the null driver).",
     ports: &[
         signal_port("l", Direction::Out, PortKind::Audio, None, None),
         signal_port("r", Direction::Out, PortKind::Audio, None, None),
@@ -44,9 +44,8 @@ const MONO: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Ports**
 /// - `l`, `r` (signal out, audio): live, the device channels the machine
-///   binds the slot's role to (`[capture.<role>]`); in a replay, the
-///   recorded input (`inputs/<slot>.f32`); offline, the slot's `render`
-///   file, else 0.
+///   binds the slot's role to (`[capture.<role>]`); 0 offline and with the
+///   null driver (recorded inputs and `render` files are not built yet).
 ///
 /// **Parameters:** none.
 ///
