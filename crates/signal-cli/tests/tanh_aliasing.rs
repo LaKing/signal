@@ -200,15 +200,35 @@ fn the_candidates_render_the_same_on_any_thread_count() {
          lfo = { module = \"std.lfo\", freq_hz = 3 }\n\
          out = { module = \"std.audio_out\", gain = 0.1 }\n",
     );
+    // One connection per input (ADR 0054): each channel's shapers meet in a
+    // chain of `std.add`s.
     let mut wiring = String::from("[wiring]\nconnections = [\n");
+    let mut last: [Option<String>; 2] = [None, None];
     for (i, shaper) in candidates().enumerate() {
         text.push_str(&format!("s{i} = {{ module = \"{shaper}\", drive = 10 }}\n"));
         wiring.push_str(&format!(
             "{{ from = \"osc.out\", to = \"s{i}.in\" }},\n\
-             {{ from = \"lfo.out\", to = \"s{i}.drive\", scale = 9 }},\n\
-             {{ from = \"s{i}.out\", to = \"out.{}\" }},\n",
-            if i % 2 == 0 { "l" } else { "r" }
+             {{ from = \"lfo.out\", to = \"s{i}.drive\", scale = 9 }},\n"
         ));
+        let side = &mut last[i % 2];
+        *side = Some(match side.take() {
+            None => format!("s{i}.out"),
+            Some(previous) => {
+                text.push_str(&format!("sum{i} = {{ module = \"std.add\" }}\n"));
+                wiring.push_str(&format!(
+                    "{{ from = \"{previous}\", to = \"sum{i}.a\" }},\n\
+                     {{ from = \"s{i}.out\", to = \"sum{i}.b\" }},\n"
+                ));
+                format!("sum{i}.out")
+            }
+        });
+    }
+    for (side, channel) in last.iter().zip(["l", "r"]) {
+        if let Some(from) = side {
+            wiring.push_str(&format!(
+                "{{ from = \"{from}\", to = \"out.{channel}\" }},\n"
+            ));
+        }
     }
     wiring.push_str("]\n");
     let project = Project::from_sources(vec![SourceFile {

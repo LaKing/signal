@@ -203,11 +203,22 @@ pub fn banks(registry: &Registry, banks: usize) -> ExecutionPlan {
         })
         .collect();
     instances.push(instance("out", "std.audio_out", &[]));
+    // One connection per input (ADR 0054): the banks meet in a chain of
+    // `std.add`s, `sum{i}` = the banks up to `i`.
     let mut connections = Vec::new();
-    for i in 0..banks {
-        connections.push(connection(&format!("bank{i}.out"), "out.l", None));
-        connections.push(connection(&format!("bank{i}.out"), "out.r", None));
+    let mut last = "bank0.out".to_owned();
+    for i in 1..banks {
+        instances.push(instance(&format!("sum{i}"), "std.add", &[]));
+        connections.push(connection(&last, &format!("sum{i}.a"), None));
+        connections.push(connection(
+            &format!("bank{i}.out"),
+            &format!("sum{i}.b"),
+            None,
+        ));
+        last = format!("sum{i}.out");
     }
+    connections.push(connection(&last, "out.l", None));
+    connections.push(connection(&last, "out.r", None));
     let root = CompositeDef {
         instances,
         connections,
