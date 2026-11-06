@@ -313,6 +313,19 @@ const SECONDARY_RETRY_MAX: Duration = Duration::from_secs(30);
 /// stop's fade.
 const SECONDARY_DRAIN_MAX: Duration = Duration::from_millis(250);
 
+/// Nanoseconds since `epoch`, read when a callback runs: the time base the
+/// clock adapter's marks and pulls share (ADR 0052 §2). Not the callback's
+/// CoreAudio time stamp: an output stream's is when its buffer will be
+/// played, ahead of now by that device's buffer and safety offset, so two
+/// devices' stamps are offset by the difference, a bias in the linearised
+/// fill and a false stop where it exceeds the stop detection's reach (the
+/// owner's "scraps of sound", 2026-11-06: the clock at 128 frames, the Mac
+/// Studio Speakers at their own larger buffer). `Instant::now` reads the
+/// commpage clock: no allocation, lock or system call.
+fn callback_time(epoch: Instant) -> Option<u64> {
+    u64::try_from(epoch.elapsed().as_nanos()).ok()
+}
+
 /// What a started stream holds.
 struct Running {
     stream: Stream,
@@ -409,6 +422,7 @@ impl Secondary {
         &mut self,
         clock: (u32, u32, u32),
         clock_id: Option<&str>,
+        epoch: Instant,
         feeds: &mut FeedControl,
         slot: usize,
     ) -> Result<Option<String>, String> {
@@ -481,9 +495,8 @@ impl Secondary {
         let stream = device
             .build_output_stream(
                 stream_config,
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    let time = u64::try_from(info.timestamp().callback.as_nanos()).ok();
-                    callback.fill(data, channels, time);
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    callback.fill(data, channels, callback_time(epoch));
                 },
                 move |error: cpal::Error| {
                     errors.stream_error();
@@ -622,6 +635,8 @@ pub struct CoreAudioDriver {
     scheduling: Option<Scheduling>,
     /// The secondary devices (ADR 0052), in their slots' order.
     secondaries: Vec<Secondary>,
+    /// The time base of every callback's time ([`callback_time`]).
+    epoch: Instant,
 }
 
 impl CoreAudioDriver {
@@ -751,6 +766,7 @@ impl CoreAudioDriver {
             running: None,
             scheduling: None,
             secondaries: Vec::new(),
+            epoch: Instant::now(),
         })
     }
 
@@ -805,7 +821,13 @@ impl CoreAudioDriver {
             }
             if secondary.stream.is_none() && secondary.retry_at.is_none_or(|at| now >= at) {
                 let before = secondary.reason.clone();
-                match secondary.start(clock, clock_id.as_deref(), &mut running.feeds, slot) {
+                match secondary.start(
+                    clock,
+                    clock_id.as_deref(),
+                    self.epoch,
+                    &mut running.feeds,
+                    slot,
+                ) {
                     Ok(missing) => {
                         notices.push(format!(
                             "{}: playing {} through a clock adapter",
@@ -1015,12 +1037,12 @@ impl Driver for CoreAudioDriver {
         // id: the system default output's stream (`DefaultOutputMonitor`)
         // has no rate listener, its AudioUnit converts the rate and plays on;
         // its loss without another default is `DeviceNotAvailable`.
+        let epoch = self.epoch;
         let built = {
             self.device.build_output_stream(
                 config,
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    let time = u64::try_from(info.timestamp().callback.as_nanos()).ok();
-                    callback.fill_at(data, time);
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    callback.fill_at(data, callback_time(epoch));
                 },
                 move |error: cpal::Error| {
                     stats.stream_error();
