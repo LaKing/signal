@@ -86,6 +86,9 @@ pub enum SecondaryState {
     Locking,
     /// The loop in track.
     Locked,
+    /// Its clock is beyond the loop's reach: faded out until it locks
+    /// again (ADR 0052 §6).
+    Suspect,
     /// The device went away or its stream failed.
     Absent,
 }
@@ -97,6 +100,7 @@ impl SecondaryState {
             SecondaryState::Locking => 1,
             SecondaryState::Locked => 2,
             SecondaryState::Absent => 3,
+            SecondaryState::Suspect => 4,
         }
     }
 
@@ -105,6 +109,7 @@ impl SecondaryState {
             1 => SecondaryState::Locking,
             2 => SecondaryState::Locked,
             3 => SecondaryState::Absent,
+            4 => SecondaryState::Suspect,
             _ => SecondaryState::Starting,
         }
     }
@@ -116,6 +121,7 @@ impl SecondaryState {
             SecondaryState::Locking => "locking",
             SecondaryState::Locked => "locked",
             SecondaryState::Absent => "absent",
+            SecondaryState::Suspect => "suspect",
         }
     }
 }
@@ -130,6 +136,7 @@ pub struct SecondaryStats {
     /// The adapter's latency, source frames, as f64 bits.
     latency_frames: AtomicU64,
     slips: AtomicU64,
+    resyncs: AtomicU64,
     starts: AtomicU64,
     stops: AtomicU64,
     callbacks: AtomicU64,
@@ -150,6 +157,8 @@ pub struct SecondarySnapshot {
     pub latency_frames: f64,
     /// Repeats and skips (ADR 0052 §3).
     pub slips: u64,
+    /// Resyncs (ADR 0052 §6).
+    pub resyncs: u64,
     /// Starts after a fill (the first included).
     pub starts: u64,
     /// Fades to silence after the engine side stopped.
@@ -186,6 +195,7 @@ impl SecondaryStats {
             drift_ppm: f64::from_bits(self.correction_ppm.load(Ordering::Relaxed)),
             latency_frames: f64::from_bits(self.latency_frames.load(Ordering::Relaxed)),
             slips: self.slips.load(Ordering::Relaxed),
+            resyncs: self.resyncs.load(Ordering::Relaxed),
             starts: self.starts.load(Ordering::Relaxed),
             stops: self.stops.load(Ordering::Relaxed),
             callbacks: self.callbacks.load(Ordering::Relaxed),
@@ -198,6 +208,7 @@ impl SecondaryStats {
         if !self.is_gone() {
             let state = match status.state {
                 AdapterState::Locked => SecondaryState::Locked,
+                AdapterState::Suspect => SecondaryState::Suspect,
                 AdapterState::Filling | AdapterState::Locking => SecondaryState::Locking,
             };
             self.state.store(state.code(), Ordering::Relaxed);
@@ -207,6 +218,7 @@ impl SecondaryStats {
         self.latency_frames
             .store(output.latency_frames().to_bits(), Ordering::Relaxed);
         self.slips.store(status.slips, Ordering::Relaxed);
+        self.resyncs.store(status.resyncs, Ordering::Relaxed);
         self.starts.store(status.starts, Ordering::Relaxed);
         self.stops.store(status.stops, Ordering::Relaxed);
         self.callbacks.fetch_add(1, Ordering::Relaxed);

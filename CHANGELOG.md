@@ -21,7 +21,7 @@ Since 0.2.0 (there is no 0.3 release; the next is 0.4): projects inside projects
 - Signal.app: **File ▸ Revert to Saved…** for `.signal` projects, **Project ▸ Restart from Files**, and a note naming the instances the fault guard muted.
 - `signal mcp`: slot and snapshot tools; `transport tempo` reaches `lib.transport` and moves every transport on one frame.
 
-- **Every device at once** (M4.1b, ADR 0052 phase 2). A role the Setup binds to another output device than the clock device (`[play.<role>] device`) plays there, through a clock adapter that follows the two crystals' drift: its own stream at the rate the device runs at (never switched, 44.1 ↔ 48 kHz converted), its own buffer. An unplugged device is stopped and rebuilt when it returns; the clock device's run goes on. `signal play --route cue@DEVICE=1,2` does the same for one run, and its status lines say `adapted, locked, +37.2 ppm, 7.3 ms, 0 slips`. The engine's output, the goldens and replay are unchanged.
+- **Every device at once** (M4.1b, ADR 0052 phase 2). A role the Setup binds to another output device than the clock device (`[play.<role>] device`) plays there, through a clock adapter that follows the two crystals' drift: its own stream at the rate the device runs at (never switched, 44.1 ↔ 48 kHz converted), its own buffer. An unplugged device is stopped and rebuilt when it returns; the clock device's run goes on. `signal play --route cue@DEVICE=1,2` does the same for one run, and its status lines say `adapted, locked, +69.1 ppm, 20.1 ms, 0 slips`. A device whose clock jumps resyncs; one whose clock runs beyond the adapter's reach is faded out as `suspect` until it locks again. The engine's output, the goldens and replay are unchanged.
 
 ### Changed
 

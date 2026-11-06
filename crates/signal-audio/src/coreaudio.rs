@@ -361,7 +361,7 @@ pub struct SecondaryStatus {
     pub roles: Vec<String>,
     /// Always `adapted`: its clock is not the engine's.
     pub clock: &'static str,
-    /// `starting`, `locking`, `locked` or `absent`.
+    /// `starting`, `locking`, `locked`, `suspect` or `absent`.
     pub state: SecondaryState,
     /// Its nominal rate while its stream runs.
     pub rate: Option<u32>,
@@ -375,8 +375,11 @@ pub struct SecondaryStatus {
     pub latency_ms: Option<f64>,
     /// Repeats and skips (ADR 0052 §3).
     pub slips: u64,
-    /// Times its routes were rebuilt after the device came back.
+    /// Splices to F* after its clock jumped or ran beyond the loop (ADR
+    /// 0052 §6), in its current stream.
     pub resyncs: u64,
+    /// Times its routes were rebuilt after the device came back.
+    pub rebuilds: u64,
     /// Why it is not playing, when it is not.
     pub reason: Option<String>,
 }
@@ -392,6 +395,9 @@ struct Secondary {
     retry_at: Option<Instant>,
     /// The wait before the next open after this one fails.
     backoff: Duration,
+    /// The system's device list when it last failed: a change opens it
+    /// again before its wait is over.
+    listed: Option<Vec<u32>>,
     /// The open stream's period, frames.
     period: u32,
     /// Streams opened (the first included).
@@ -408,6 +414,7 @@ impl Secondary {
             reason: None,
             retry_at: None,
             backoff: SECONDARY_RETRY,
+            listed: None,
             period: 0,
             opened: 0,
         }
@@ -537,6 +544,7 @@ impl Secondary {
         self.reason = None;
         self.retry_at = None;
         self.backoff = SECONDARY_RETRY;
+        self.listed = None;
         self.period = period;
         self.opened += 1;
         Ok((!missing.is_empty()).then(|| {
@@ -598,7 +606,8 @@ impl Secondary {
             drift_ppm: if playing { now.drift_ppm } else { 0.0 },
             latency_ms,
             slips: now.slips,
-            resyncs: self.opened.saturating_sub(1),
+            resyncs: now.resyncs,
+            rebuilds: self.opened.saturating_sub(1),
             reason: self.reason.clone(),
         }
     }
@@ -811,6 +820,7 @@ impl CoreAudioDriver {
                 secondary.stop();
                 running.feeds.set(slot, None);
                 secondary.reason = Some("the device went away or its stream failed".to_owned());
+                secondary.listed = rt_thread::device_ids().ok();
                 secondary.retry_at = Some(now + SECONDARY_RETRY);
                 notices.push(format!(
                     "{}: gone; {} not heard until it is back",
@@ -819,7 +829,17 @@ impl CoreAudioDriver {
                 ));
                 continue;
             }
-            if secondary.stream.is_none() && secondary.retry_at.is_none_or(|at| now >= at) {
+            // A device that failed is opened again when its wait is over,
+            // or at once when the system's device list changed (plugged
+            // in): one property read per poll in between, never a whole
+            // open (tens of milliseconds) of a device that is not there.
+            let listed_anew = || {
+                let now = rt_thread::device_ids().ok();
+                secondary.listed.is_some() && now != secondary.listed
+            };
+            if secondary.stream.is_none()
+                && (secondary.retry_at.is_none_or(|at| now >= at) || listed_anew())
+            {
                 let before = secondary.reason.clone();
                 match secondary.start(
                     clock,
@@ -841,6 +861,7 @@ impl CoreAudioDriver {
                             notices.push(format!("{reason}; not heard"));
                         }
                         secondary.reason = Some(reason);
+                        secondary.listed = rt_thread::device_ids().ok();
                         secondary.retry_at = Some(now + secondary.backoff);
                         secondary.backoff = (secondary.backoff * 2).min(SECONDARY_RETRY_MAX);
                     }

@@ -105,6 +105,31 @@ pub const STOP_PERIODS: f64 = 2.0;
 /// The most channels an adapter carries.
 pub const MAX_CHANNELS: usize = 64;
 
+/// A pull whose host time is more than this many destination periods past
+/// the frames the previous pulls delivered is a clock that jumped (ADR
+/// 0052 §6): a resync.
+pub const JUMP_PERIODS: f64 = 2.0;
+
+/// A tracking loop whose filtered error stays beyond half the target this
+/// long resyncs (ADR 0052 §6).
+pub const FAR_SECONDS: f64 = 0.5;
+
+/// A correction held at its clamp this long resyncs (ADR 0052 §6: the
+/// clamp means the clock is beyond the loop's reach), and again each time
+/// it has been held this long since.
+pub const CLAMP_RESYNC_SECONDS: f64 = 1.0;
+
+/// At the clamp this long in all since the loop last locked, the device is
+/// **clock suspect** (ADR 0052 §6): faded out until it locks again.
+pub const SUSPECT_SECONDS: f64 = 10.0;
+
+/// This many slips within [`SUSPECT_SECONDS`] also make the device clock
+/// suspect (phase 2's addition to ADR 0052 §6): each splice moves the
+/// loop's error back to F*, so a clock beyond the loop's reach touches the
+/// clamp only now and then, slipping every few seconds instead. A device
+/// within reach never slips once locked, nor while it locks.
+pub const SUSPECT_SLIPS: usize = 3;
+
 /// What a clock adapter carries and between which clocks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdapterConfig {
@@ -269,6 +294,10 @@ pub enum AdapterState {
     Locking,
     /// Converting, the loop in track.
     Locked,
+    /// Converting but faded out: the correction sat at its clamp for
+    /// [`SUSPECT_SECONDS`] since the loop last locked (ADR 0052 §6). It
+    /// fades in again when the loop locks.
+    Suspect,
 }
 
 /// The pulling end's counters and loop state.
@@ -300,6 +329,12 @@ pub struct AdapterStatus {
     pub linearised: u64,
     /// Pulls that used the raw fill (while converting).
     pub raw: u64,
+    /// Resyncs (ADR 0052 §6): a splice to F* and the loop back in acquire
+    /// after a clock jump, a tracking error beyond F*/2 or a correction at
+    /// its clamp. Not counted in `slips`.
+    pub resyncs: u64,
+    /// Times the adapter became clock suspect.
+    pub suspects: u64,
 }
 
 /// A crossfade in progress: the old head fading out.
@@ -363,6 +398,22 @@ pub struct AdapterOutput {
     starts: u64,
     linearised: u64,
     raw: u64,
+    /// The previous pull's host time and frames (the clock-jump check).
+    last_pull: Option<(u64, usize)>,
+    /// Seconds the tracking error has been beyond F*/2.
+    far_for: f64,
+    /// Seconds the correction has been at its clamp without a break.
+    clamped_for: f64,
+    /// Seconds at the clamp in all since the loop last locked.
+    clamped_total: f64,
+    /// Faded out as clock suspect.
+    suspect: bool,
+    /// Seconds of pulls so far (the slips' clock).
+    clock: f64,
+    /// The latest slips' times on that clock, newest last.
+    slip_times: [f64; SUSPECT_SLIPS],
+    resyncs: u64,
+    suspects: u64,
 }
 
 /// Makes a clock adapter's two ends (control thread: allocates the ring,
@@ -462,6 +513,15 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         starts: 0,
         linearised: 0,
         raw: 0,
+        last_pull: None,
+        far_for: 0.0,
+        clamped_for: 0.0,
+        clamped_total: 0.0,
+        suspect: false,
+        clock: 0.0,
+        slip_times: [f64::NEG_INFINITY; SUSPECT_SLIPS],
+        resyncs: 0,
+        suspects: 0,
     };
     Ok((input, output))
 }
@@ -539,6 +599,8 @@ impl AdapterOutput {
             starts: self.starts,
             linearised: self.linearised,
             raw: self.raw,
+            resyncs: self.resyncs,
+            suspects: self.suspects,
         }
     }
 
@@ -655,7 +717,7 @@ impl AdapterOutput {
         // first frame (the filter's ringing ahead of it stays faded out).
         let before = frames_between(first, frame_of(self.position)) as f64;
         self.fade_wait = (before / self.nominal_step).floor().max(0.0) as usize;
-        if self.fade_wait > 0 {
+        if self.fade_wait > 0 || self.suspect {
             self.fade.start_out(0);
         } else {
             self.fade.start_in(fade_frames(self.config.dest_rate));
@@ -806,8 +868,11 @@ impl AdapterOutput {
             }
         };
         self.fill = fill;
+        self.clock += dt;
         let correction = self.drift.update(fill - self.target, dt);
         self.step = to_fixed(self.nominal_step * (1.0 + correction));
+        let resync = self.resync_due(time_ns, dt, correction);
+        self.last_pull = time_ns.map(|t| (t, frames));
 
         let step = self.step;
         let step_frames = step as f64 / ONE as f64;
@@ -824,6 +889,14 @@ impl AdapterOutput {
         let busy = self.crossfade.is_some() && serves >= frames as u64;
         if self.stopping || busy {
             // Fading out, or a crossfade under way: no splice.
+        } else if resync && lacking == 0 {
+            // A resync: to F*, the loop back in acquire, its integral (the
+            // drift) kept.
+            self.splice_to_target(frames, serves, step_frames);
+            self.drift.restart(self.fill - self.target, true);
+            self.far_for = 0.0;
+            self.clamped_for = 0.0;
+            self.resyncs += 1;
         } else if lacking > 0 && (self.ring_frames() == 0 || self.producer_overdue(time_ns)) {
             // The producer stopped: back into the history far enough for
             // the 5 ms fade-out, then silence and the startup fill.
@@ -844,6 +917,7 @@ impl AdapterOutput {
             let back = self.jump_back(back, serves);
             self.drift.shift(back);
             self.slips += 1;
+            self.slipped_in_track();
             self.repeats += 1;
         } else if self.raw_fill() > OVERRUN_TARGETS * self.target {
             // A skip: forward to F*, as far as the fill leaves this pull
@@ -858,6 +932,7 @@ impl AdapterOutput {
             self.crossfade = Some(self.crossfade_from(old, score >= MATCHED));
             self.drift.shift(-ahead);
             self.slips += 1;
+            self.slipped_in_track();
             self.skips += 1;
         }
 
@@ -944,10 +1019,97 @@ impl AdapterOutput {
             self.fade = Fade::default();
             self.state = AdapterState::Filling;
         } else if self.state != AdapterState::Filling {
-            self.state = match self.drift.mode() {
-                LoopMode::Acquire => AdapterState::Locking,
-                LoopMode::Track => AdapterState::Locked,
+            let locked = self.drift.mode() == LoopMode::Track;
+            if locked {
+                self.clamped_total = 0.0;
+            }
+            if self.suspect && locked && !self.stopping {
+                // Locked again: back in.
+                self.suspect = false;
+                self.fade.start_in(fade_frames(self.config.dest_rate));
+            } else if !self.suspect
+                && (self.clamped_total >= SUSPECT_SECONDS
+                    || self.clock - self.slip_times[0] <= SUSPECT_SECONDS)
+            {
+                self.suspect = true;
+                self.suspects += 1;
+                if !self.stopping {
+                    self.fade.start_out(self.splice_frames as u32);
+                }
+            }
+            self.state = if self.suspect {
+                AdapterState::Suspect
+            } else if locked {
+                AdapterState::Locked
+            } else {
+                AdapterState::Locking
             };
+        }
+    }
+
+    /// A slip while tracking: the loop is not keeping up with the clock
+    /// (none occurs in the steady state, ADR 0052 §3), so back to acquire,
+    /// whose faster slew reaches a clock beyond the track loop's: a resync.
+    fn slipped_in_track(&mut self) {
+        self.slip_times.rotate_left(1);
+        if let Some(last) = self.slip_times.last_mut() {
+            *last = self.clock;
+        }
+        if self.drift.mode() == LoopMode::Track {
+            self.drift.restart(self.drift.filtered_error(), true);
+            self.resyncs += 1;
+        }
+    }
+
+    /// Whether this pull resyncs (ADR 0052 §6): the clock jumped, the
+    /// tracking error stayed beyond F*/2, or the correction sat at its
+    /// clamp. Updates the timers.
+    fn resync_due(&mut self, time_ns: Option<u64>, dt: f64, correction: f64) -> bool {
+        let clamp = self.drift.params().clamp;
+        if clamp > 0.0 && correction.abs() >= clamp * (1.0 - 1e-9) {
+            self.clamped_for += dt;
+            self.clamped_total += dt;
+        } else {
+            self.clamped_for = 0.0;
+        }
+        let tracking = self.drift.mode() == LoopMode::Track;
+        if tracking && self.drift.filtered_error().abs() > self.target / 2.0 {
+            self.far_for += dt;
+        } else {
+            self.far_for = 0.0;
+        }
+        let period = self.config.dest_period as f64 * self.frame_seconds;
+        let jumped = match (self.last_pull, time_ns) {
+            (Some((then, delivered)), Some(now)) => {
+                let expected = then as f64 * 1e-9 + delivered as f64 * self.frame_seconds;
+                now as f64 * 1e-9 - expected > JUMP_PERIODS * period
+            }
+            _ => false,
+        };
+        jumped || self.far_for >= FAR_SECONDS || self.clamped_for >= CLAMP_RESYNC_SECONDS
+    }
+
+    /// A resync's splice: forward or back to F*, aligned and crossfaded as
+    /// a skip or a repeat, as far as this pull of `frames` keeps its
+    /// frames and the history reaches.
+    fn splice_to_target(&mut self, frames: usize, serves: u64, step_frames: f64) {
+        let raw = self.raw_fill();
+        let delta = self.fill - self.target;
+        if delta >= 1.0 {
+            let half = self.converter.spec().half() as f64;
+            let most = raw - frames as f64 * step_frames - half - 2.0;
+            let ahead = delta.min(most).floor().max(0.0);
+            if ahead >= 1.0 {
+                let old = self.position;
+                let (ahead, score) = self.align_ahead(old, ahead, serves);
+                self.position = self.position.wrapping_add((ahead as u64) << 32);
+                self.crossfade = Some(self.crossfade_from(old, score >= MATCHED));
+                self.fill -= ahead;
+            }
+        } else if delta <= -1.0 {
+            let back = (-delta).min(self.most_back).ceil();
+            let back = self.jump_back(back, serves);
+            self.fill += back;
         }
     }
 }

@@ -900,7 +900,14 @@ fn secondary_line(s: &SecondaryStatus) -> String {
         ));
     }
     if s.resyncs > 0 {
-        line.push_str(&format!(", rebuilt {}×", s.resyncs));
+        line.push_str(&format!(
+            ", {} resync{}",
+            s.resyncs,
+            if s.resyncs == 1 { "" } else { "s" }
+        ));
+    }
+    if s.rebuilds > 0 {
+        line.push_str(&format!(", rebuilt {}×", s.rebuilds));
     }
     if let Some(reason) = &s.reason {
         line.push_str(&format!(" ({reason})"));
