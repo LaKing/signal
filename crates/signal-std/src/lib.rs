@@ -203,6 +203,7 @@ mod mix;
 mod modal;
 mod mul;
 mod noise;
+mod note_poly;
 mod note_seq;
 mod onepole;
 mod osc;

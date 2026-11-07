@@ -12630,6 +12630,26 @@
             "rate": 1,
             "shape": "events",
             "unit": null
+          },
+          {
+            "address": "/melody.notes",
+            "direction": "out",
+            "kind": "trigger",
+            "name": "notes",
+            "range": null,
+            "rate": 1,
+            "shape": "events",
+            "unit": null
+          },
+          {
+            "address": "/melody.dropped",
+            "direction": "out",
+            "kind": "generic",
+            "name": "dropped",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
           }
         ]
       },

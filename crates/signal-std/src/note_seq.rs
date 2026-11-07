@@ -31,6 +31,10 @@ const POSITION: usize = 4;
 
 const ON: usize = 0;
 const OFF: usize = 1;
+/// ADR 0044 §3: the poly output, every sounding key as note events.
+const NOTES: usize = 2;
+/// Its count of notes a reduction left out.
+const DROPPED: usize = 5;
 
 const PPQ_PARAMETER: usize = 0;
 
@@ -73,6 +77,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         ),
         event_port("on", Direction::Out),
         event_port("off", Direction::Out),
+        event_port("notes", Direction::Out),
+        signal_port("dropped", Direction::Out, PortKind::Generic, None, None),
     ],
     parameters: &[PPQ],
     feedthrough: Feedthrough::Direct,
@@ -115,6 +121,19 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   reset.
 /// - `on` (event out, trigger): on a frame where a note starts.
 /// - `off` (event out, trigger): on a frame where the sounding note ends.
+/// - `notes` (event out; ADR 0044 §3): **every** sounding key, chords
+///   included, as note events (`Set(128·key + v)`, `v` the velocity in
+///   127ths for an on, 0 for an off): each pattern note's on at its start
+///   and off at its end, by the same tick or follow rules, without
+///   priority; audition notes added as notes of their own (a key sounding
+///   from both gets one on, its off once both ended). Within a frame the
+///   offs come first, then the ons, each in key order; a note starting and
+///   ending within one frame is not sent; a seek or a stop sends an off for
+///   each pattern key sounding. A frame of more than 16 is reduced to its
+///   end state: a `Trigger`, then an on for each key still sounding (at
+///   most 15, latest start first, then highest key).
+/// - `dropped` (signal out): the notes such a reduction left out, since
+///   `prepare`, saturating at 2¹⁹ − 1.
 ///
 /// **Parameters**
 /// - `ppq` (generic, ticks per beat, integer, range `[1, 960]`, default 96):
@@ -229,6 +248,8 @@ pub struct NoteSeq {
     end: Option<f64>,
     /// The held audition note: its key, hz and velocity (ADR 0039).
     held: Option<(f64, f64, f64)>,
+    /// ADR 0044 §3: every sounding key, for `notes`.
+    poly: crate::note_poly::Poly,
 }
 
 /// The `audition` value of a live note (ADR 0039): `128·key + v`, with `v`
@@ -344,17 +365,23 @@ impl NoteSeq {
                 frame.ended = true;
             }
         }
+        self.poly.tick();
         let Some(table) = table else {
             return;
         };
-        // The notes starting on tick `at`, the last of them kept.
+        // The notes starting on tick `at`, the last of them kept (and every
+        // one of them for `notes`).
         let mut last = None;
+        let poly = &mut self.poly;
         let mut starting = |at: u64| {
             let mut row = first_at(table, at, ppq);
             while let [start, len, key, velocity, hz] = *table.row(row) {
                 if round_half_up(start * ppq) != at as f64 {
                     break;
                 }
+                let ticks =
+                    (round_half_up((start + len) * ppq) - round_half_up(start * ppq)) as u64;
+                poly.start(key, velocity, Some(ticks.max(1)), None);
                 last = Some((start, len, key, velocity, hz));
                 row += 1;
             }
@@ -404,6 +431,8 @@ impl NoteSeq {
                     if at >= to {
                         break;
                     }
+                    self.poly.end_until(at, true);
+                    self.poly.start(key, velocity, None, Some(at + len));
                     if self.end.is_some_and(|end| end <= at) {
                         // An `off` only for a note that sounded when the
                         // frame began: one that started and ended within
@@ -418,6 +447,7 @@ impl NoteSeq {
                 }
             }
         }
+        self.poly.end_until(to, false);
         if self.end.is_some_and(|end| end < to) {
             frame.ended = true;
             self.end = None;
@@ -433,6 +463,7 @@ impl NoteSeq {
         for n in 0..inputs.frames() {
             let now = positions.get(n).copied().unwrap_or(0.0);
             let mut frame = Frame::default();
+            self.poly.begin_frame();
             // ADR 0037 §6: a swap that gave `follow` other sources (another
             // transport) is a seek on its first frame, as a reset is.
             let rewired = n == 0 && inputs.sources_changed(FOLLOW_PORT);
@@ -442,7 +473,10 @@ impl NoteSeq {
                 follow::motion(self.last, now, period)
             };
             match motion {
-                Motion::Seek | Motion::Still => self.silence(&mut frame),
+                Motion::Seek | Motion::Still => {
+                    self.silence(&mut frame);
+                    self.poly.silence();
+                }
                 Motion::Forward { from, to } => self.cross(table, period, (from, to), &mut frame),
             }
             self.last = now.is_finite().then_some(now);
@@ -475,6 +509,7 @@ impl NoteSeq {
             }
             match read_audition(event.payload) {
                 Some(Audition::On(key, velocity)) => {
+                    self.poly.audition_on(key, velocity);
                     // A note that sounded when the frame began ends here; one
                     // that started within it is merged into this `on`.
                     if (self.sounding() || self.held.is_some()) && !frame.started {
@@ -487,6 +522,7 @@ impl NoteSeq {
                     owned = true;
                 }
                 Some(Audition::Off(key)) => {
+                    self.poly.audition_off(key);
                     if let Some((held, ..)) = self.held
                         && key.is_none_or(|k| k == held)
                     {
@@ -509,7 +545,11 @@ impl NoteSeq {
     }
 
     /// Frame `n`'s events and signals.
-    fn write(&self, outputs: &mut Outputs<'_>, n: usize, frame: &Frame, position: f64) {
+    fn write(&mut self, outputs: &mut Outputs<'_>, n: usize, frame: &Frame, position: f64) {
+        self.poly.end_frame(outputs, NOTES, n);
+        if let Some(out) = outputs.signal(DROPPED).get_mut(n) {
+            *out = self.poly.dropped as f64;
+        }
         let sounding = self.sounding() || self.held.is_some();
         match (frame.ended, frame.started) {
             (true, true) if sounding => {
@@ -578,11 +618,16 @@ impl DirectPrimitive for NoteSeq {
                 ended: followed && n == 0,
                 ..Frame::default()
             };
+            self.poly.begin_frame();
+            if followed && n == 0 {
+                self.poly.silence();
+            }
             if triggered(inputs.events(RESET), &mut next_reset, n) {
                 frame.ended |= self.remaining > 0;
                 self.remaining = 0;
                 self.position = None;
                 self.looped = false;
+                self.poly.silence();
             }
             while let Some(event) = ticks.get(next_tick) {
                 if event.offset as usize > n {
@@ -648,6 +693,111 @@ mod tests {
             .collect();
         let at = |sink: &EventSink| sink.events().iter().map(|e| u64::from(e.offset)).collect();
         (state, at(&sinks[0]), at(&sinks[1]))
+    }
+
+    /// A `notes` event: (key, velocity in 127ths, 0 an off), `None` a Trigger.
+    type NoteEvent = Option<(u32, u32)>;
+
+    /// Runs `frames` frames as [`run`] does, `audition` events on their
+    /// port: every frame's `notes` events, as (key, velocity in 127ths, 0
+    /// an off; `None` for a Trigger), and the final `dropped`.
+    fn poly_run(
+        table: Option<&Table>,
+        ppq: f64,
+        ticks: &[(u32, EventPayload)],
+        audition: &[(u32, EventPayload)],
+        frames: usize,
+    ) -> (Vec<Vec<NoteEvent>>, f64) {
+        let mut seq = NoteSeq::default();
+        seq.prepare(&context(48_000.0, frames, 1));
+        let mut events: Vec<Event> = ticks
+            .iter()
+            .map(|&(offset, payload)| Event { offset, payload })
+            .collect();
+        let ends_ticks = events.len();
+        events.extend(
+            audition
+                .iter()
+                .map(|&(offset, payload)| Event { offset, payload }),
+        );
+        let ends = [ends_ticks, ends_ticks, events.len()];
+        let parameters = vec![ppq; frames];
+        let mut signals = vec![0.0; 6 * frames];
+        let mut sinks = vec![EventSink::per_frame(16, frames); 3];
+        for sink in &mut sinks {
+            sink.start_call(frames);
+        }
+        seq.process(
+            &Inputs::new(frames, &[], &parameters, &events, &ends).with_table(table),
+            &mut Outputs::new(frames, &mut signals, &mut sinks),
+        );
+        let mut per = vec![Vec::new(); frames];
+        for e in sinks[2].events() {
+            per[e.offset as usize].push(match e.payload {
+                EventPayload::Set(x) => Some(((x / 128.0) as u32, (x % 128.0) as u32)),
+                _ => None,
+            });
+        }
+        (per, signals[6 * frames - 1])
+    }
+
+    /// ADR 0044 §3: a chord's every note on `notes`, its offs at their ends;
+    /// a key ending and starting again on one frame is an off then an on.
+    #[test]
+    fn notes_carries_every_note_of_a_chord() {
+        let table = notes(
+            4.0,
+            &[
+                [60.0, 0.0, 2.0, 1.0],
+                [64.0, 0.0, 1.0, 1.0],
+                [67.0, 0.0, 1.0, 0.8],
+                [64.0, 1.0, 1.0, 1.0],
+            ],
+        );
+        // 1 tick per beat, a tick each frame.
+        let (per, dropped) = poly_run(Some(&table), 1.0, &every_frame(4), &[], 4);
+        assert_eq!(per[0], [Some((60, 127)), Some((64, 127)), Some((67, 102))]);
+        // Frame 1: 64 ends and starts again (off, on), 67 ends.
+        assert_eq!(per[1], [Some((64, 0)), Some((67, 0)), Some((64, 127))]);
+        assert_eq!(per[2], [Some((60, 0)), Some((64, 0))]);
+        assert_eq!(dropped, 0.0);
+    }
+
+    /// An audition key adds to the pattern's; a key from both gets one on,
+    /// and its off once both ended. A reset ends the pattern's keys only.
+    #[test]
+    fn notes_merges_audition_and_a_reset_keeps_it() {
+        let table = notes(4.0, &[[60.0, 0.0, 3.0, 1.0]]);
+        let audition = [
+            (0, EventPayload::Set(audition_value(64, 1.0, true))),
+            (1, EventPayload::Set(audition_value(60, 0.5, true))),
+            (2, EventPayload::Set(audition_value(60, 0.0, false))),
+        ];
+        let (per, _) = poly_run(Some(&table), 1.0, &every_frame(5), &audition, 5);
+        assert_eq!(per[0], [Some((60, 127)), Some((64, 127))]);
+        // 60 already sounds from the pattern: no second on.
+        assert!(per[1].is_empty(), "{:?}", per[1]);
+        // Audition 60 released; the pattern still holds 60: no off yet.
+        assert!(per[2].is_empty(), "{:?}", per[2]);
+        // The pattern note ends after 3 ticks: off on frame 3.
+        assert_eq!(per[3], [Some((60, 0))]);
+    }
+
+    /// More than 16 changes on a frame: a Trigger, then the keys sounding
+    /// at its end (at most 15), the rest counted in `dropped`.
+    #[test]
+    fn notes_reduces_a_crowded_frame() {
+        let chord: Vec<[f64; 4]> = (0..20)
+            .map(|k| [40.0 + f64::from(k), 0.0, 1.0, 1.0])
+            .collect();
+        let table = notes(4.0, &chord);
+        let (per, dropped) = poly_run(Some(&table), 1.0, &every_frame(2), &[], 2);
+        assert_eq!(per[0][0], None, "a Trigger first");
+        assert_eq!(per[0].len(), 16);
+        // Latest start first, then highest key: every start shares an order
+        // count rising by key, so the highest keys are kept.
+        assert_eq!(per[0][1], Some((59, 127)));
+        assert_eq!(dropped, 5.0);
     }
 
     fn every_frame(frames: u32) -> Vec<(u32, EventPayload)> {

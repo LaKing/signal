@@ -422,6 +422,9 @@ The owner asked (2026-10-27): "lehet a polifóniát dinamikusan kezelni?" ("can 
 | 5. Sleeping voices | §11: sleep groups (graph, engine, oracle), the allocator's `active` output, `sleep` in `voices` (default true), the amendments to `semantics.md`, `realtime-rules.md` and `module-contract.md`, the slot card's asleep dots | Tests 13–15; the owner's listening check of `sleep = true` |
 | Later | The deferred items of §10, each when a project needs it | Its own tests, named here |
 
+## Notes
+**2026-11-07, phase 1 begun** (operator; delegated). Built: `std.voice_alloc` (§4; `crates/signal-std/src/voice_alloc.rs`, unit-tested rule by rule, in the contract suite with every std type) and `std.note_seq`'s `notes` and `dropped` (§3; `note_poly.rs`, tests in `note_seq.rs`; every golden unchanged; the UI's structure fixtures and the board snapshot written again for the two new ports). Still to come in phase 1: `voices` and the `voice` field, the generated composite and its diagnostics, `lib.poly_voice`, `describe`, `projects/studio-poly` and a CPU measurement.
+
 ## Decisions on the questions (2026-10-27)
 The owner's answers are quoted in Hungarian, with translations. The rest are the operator's decisions, delegated, on the recommendations offered.
 1. **What a steal sounds like:** the owner did not choose. **Operator decision:** the immediate retrigger (§4) is the default. Test 9's renders, with equal and differing velocities, are kept so the owner can listen later. A fade-before-steal can then be added as another `steal` value.
