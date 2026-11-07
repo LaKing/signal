@@ -84,7 +84,7 @@ import { pinKey, sceneTones } from '../lib/board-tone.js';
 import { portNet, wireNet } from '../lib/board-net.js';
 import { orthGeometry } from '../lib/board-route.js';
 import { cornerAt } from '../lib/board-view.js';
-import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
+import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason, voicesBadge } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { MAX_DEPTH, boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, risen, scene } from '../lib/schematic-scene.js';
@@ -1403,7 +1403,7 @@ export class SignalSchematic extends HTMLElement {
       if (connector.label && text(7)) label({ x: connector.x1 + 3, y: node.y - 3 }, 6, { class: 'connector-label', 'text-anchor': 'start' }, connector.label);
     }
     if (text(12) && node.kind === 'instance') {
-      label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
+      label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, `${node.name}${voicesBadge(slotted)}`);
       label({ x: node.x + 8, y: node.y + 26 }, 9.5, { class: slotted ? 'module slot-content' : 'module' }, node.subtitle ?? node.module);
     }
     // ADR 0037 §7: a slot's "+" pins add an input or an output to its interface (shown in Edit patch only, by the CSS).

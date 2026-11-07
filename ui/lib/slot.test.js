@@ -34,6 +34,8 @@ import {
   templateText,
   topSlots,
   unmatchedReason,
+  voicesBadge,
+  voicesOp,
 } from './slot.js';
 
 /** A slot as `graph` gives it: `fx`, its own interface, std.gain loaded through a map. */
@@ -346,4 +348,39 @@ test('pins and the summary (ADR 0045 phase 3): new ports auto, unpin a typed fie
   assert.equal(typeSummary(fresh), 'auto: nothing connected (signal · rate 1)');
   // The Load dialog's unmatched ports: added auto.
   assert.deepEqual(addedPorts([{ name: 'gain', role: 'input', shape: 'signal', kind: 'audio' }]), [{ name: 'gain', role: 'input', auto: true }]);
+});
+
+test('a polyphonic slot is badged ×N in its card title (ADR 0044 §7)', () => {
+  assert.equal(voicesBadge({ voices: { count: 8, legato: false } }), ' ×8');
+  assert.equal(voicesBadge({ voices: { count: 1, legato: true } }), ' ×1 legato');
+  assert.equal(voicesBadge({ voices: null }), '');
+  assert.equal(voicesBadge(null), '');
+  const card = { name: 'pad', interface: 'lib.poly_voice', content: 'moog_voice', empty: false, project: false, voices: { count: 8, legato: false } };
+  assert.equal(cardTitle(card), 'PAD ×8: lib.poly_voice ◂ moog_voice');
+});
+
+test("the card's voices controls write slot.voices, the count clamped to 1–64 (ADR 0044 §7)", () => {
+  assert.deepEqual(voicesOp('pad', '8', false), { op: 'slot.voices', slot: 'pad', voices: 8 });
+  assert.deepEqual(voicesOp('pad', 1, true), { op: 'slot.voices', slot: 'pad', voices: { count: 1, legato: true } });
+  assert.deepEqual(voicesOp('pad', 99, false).voices, 64);
+  assert.deepEqual(voicesOp('pad', 0, false).voices, 1);
+  assert.deepEqual(voicesOp('pad', '', false).voices, 1);
+});
+
+test("a polyphonic slot's alloc port reads matched on its card (ADR 0044 §2)", () => {
+  const description = {
+    controls: [],
+    content: {
+      slots: [{
+        slot: '/pad',
+        load: 'moog_voice',
+        voices: { count: 8, legato: false },
+        interface: { from: 'lib.poly_voice', ports: [{ name: 'notes', role: 'input', shape: 'events', voice: 'alloc' }, { name: 'out', role: 'output', kind: 'audio' }] },
+        matches: [{ port: 'notes', role: 'input', reason: "it feeds the slot's allocator" }, { port: 'out', role: 'output', content: 'out' }],
+      }],
+    },
+  };
+  const card = slotCard(description, 'pad');
+  assert.equal(card.ports.find((p) => p.name === 'notes').matched, true);
+  assert.deepEqual(card.voices, { count: 8, legato: false });
 });

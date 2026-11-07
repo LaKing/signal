@@ -760,6 +760,9 @@ impl Walk<'_> {
                 "unheard": resolution.map(|r| r.unheard.clone()).unwrap_or_default(),
                 "dropped": resolution.map(|r| r.dropped.clone()).unwrap_or_default(),
                 "inside": self.inside_of(&def.name, name, load.as_deref()).json(),
+                // ADR 0044 §7 (additive): a polyphonic slot's voices; null
+                // for a slot without `voices`.
+                "voices": resolution.and_then(|r| r.voices.as_ref()),
             },
         })
     }

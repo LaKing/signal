@@ -57,6 +57,26 @@ export function slotLabel(slot) {
  * own inside ("fx_inside, its own inside"), a project ("../studio ↗, a
  * project"), else the content it loads.
  */
+/**
+ * ADR 0044 §7: a polyphonic slot's badge, " ×8" (" ×1 legato" with the
+ * allocator's legato), from the slot's `voices` (`graph`'s `slot.voices`,
+ * `describe`'s `content.slots[].voices`); "" for a slot without voices.
+ */
+export function voicesBadge(slot) {
+  const voices = slot?.voices;
+  if (!voices || !Number.isInteger(voices.count)) return '';
+  return ` ×${voices.count}${voices.legato ? ' legato' : ''}`;
+}
+
+/**
+ * ADR 0044 §7: the slot card's voices controls' op: `slot.voices` with a
+ * count (1 to 64, rounded and clamped) and the allocator's legato.
+ */
+export function voicesOp(slotName, count, legato) {
+  const n = Math.min(64, Math.max(1, Math.round(Number(count) || 1)));
+  return { op: 'slot.voices', slot: slotName, voices: legato ? { count: n, legato: true } : n };
+}
+
 export function slotContent(slot) {
   const label = slotLabel(slot);
   if (label.empty) return label.subtitle;
@@ -559,8 +579,12 @@ export function slotCard(description, name) {
   const template = slot.interface?.from ?? null;
   const load = slot.load ?? null;
   const rows = slot.matches ?? [];
+  // ADR 0044 §2: a polyphonic slot's `alloc` port feeds its allocator,
+  // matched to no content port and still carried.
+  const allocated = (port) => Boolean(slot.voices) && (slot.interface?.ports ?? []).some((p) => p.name === port && p.voice === 'alloc');
   const reasonOf = (port) => {
     if (!load) return 'the slot is empty';
+    if (allocated(port)) return null;
     const row = rows.find((m) => m.port === port);
     return row && !row.content ? (row.reason ?? 'unmatched') : null;
   };
@@ -588,6 +612,7 @@ export function slotCard(description, name) {
       .filter((p) => p.role === 'parameter')
       .map((p) => ({ ...p, control: controls.find((c) => c.address === p.address) ?? null })),
     unheard: slot.unheard ?? [],
+    voices: slot.voices ?? null,
   };
 }
 
@@ -595,7 +620,7 @@ export function slotCard(description, name) {
 export function cardTitle(card) {
   if (!card) return '';
   const content = card.empty ? 'empty' : `${card.content}${card.project ? ' ↗' : ''}`;
-  return `${card.name.toUpperCase()}: ${card.interface} ◂ ${content}`;
+  return `${card.name.toUpperCase()}${voicesBadge(card)}: ${card.interface} ◂ ${content}`;
 }
 
 /**

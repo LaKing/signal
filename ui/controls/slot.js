@@ -31,7 +31,7 @@ import { browserEntries } from '../lib/module-browser.js';
 import { generationOf, named } from '../lib/opening.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
 import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
-import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
+import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp, voicesOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { layOutCards } from './plate.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
@@ -54,6 +54,9 @@ export class SignalSlot extends SignalElement {
 :host([data-card]) .card { box-sizing: border-box; min-width: 0; padding: .75rem 1rem; border-radius: 10px; background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-accent, #4fc3f7); }
 .card { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
+.slot-voices { display: inline-flex; gap: 6px; align-items: center; font-size: 11px; color: var(--signal-muted, #8a93a3); }
+.slot-voices input[type=number] { width: 3.2em; }
+.slot-voices label { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
 .title { flex: 1 1 12rem; min-width: 0; margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .buttons { display: flex; gap: 4px; }
 button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 1px 6px; cursor: pointer; }
@@ -104,7 +107,7 @@ ${BROWSER_CSS}`;
 
   template() {
     return `<div class="card" part="card">
-  <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
+  <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
   <div class="state" role="status"></div>
   <ul class="ports"></ul>
   <div class="params"></div>
@@ -182,6 +185,10 @@ ${BROWSER_CSS}`;
     this.$('.load').addEventListener('click', () => this.openLoad());
     this.$('.unload').addEventListener('click', () => this.write([unloadOp(this.slotName)], 'Unloading…'));
     this.$('.levels').addEventListener('click', () => this.setLevels(!this.levels));
+    // ADR 0044 §7: the voices stepper and the legato switch write `voices`.
+    const writeVoices = () => this.write([voicesOp(this.slotName, this.$('.voice-count').value, this.$('.voice-legato').checked)], 'Setting the voices…');
+    this.$('.voice-count').addEventListener('change', writeVoices);
+    this.$('.voice-legato').addEventListener('change', writeVoices);
     this.$('.fold').addEventListener('click', () => this.setFolded(!this.folded));
     // A module name or a project path dropped on the card (its header, not its part) loads it.
     const onCard = (event) => event.composedPath?.().includes(this.$('.card')) ?? true;
@@ -435,6 +442,15 @@ ${BROWSER_CSS}`;
     }
     title.textContent = cardTitle(card);
     title.title = cardTitle(card);
+    const voices = this.$('.slot-voices');
+    voices.hidden = !card.voices;
+    if (card.voices) {
+      const count = this.$('.voice-count');
+      if (this.shadowRoot.activeElement !== count) count.value = String(card.voices.count);
+      this.$('.voice-legato').checked = Boolean(card.voices.legato);
+      count.disabled = Boolean(this.busy);
+      this.$('.voice-legato').disabled = Boolean(this.busy);
+    }
     load.textContent = card.empty ? 'Load…' : 'Replace…';
     load.disabled = Boolean(this.busy);
     unload.disabled = card.empty || Boolean(this.busy);
