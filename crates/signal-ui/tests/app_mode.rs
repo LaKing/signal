@@ -1302,6 +1302,34 @@ fn a_folder_save_as_packs_off_the_control_thread(transport: Transport) {
     assert_eq!(app["project"]["file"], file.display().to_string());
 }
 
+/// Review of c24cf1e: a folder's Save As still packing when another
+/// project opens is written and answered, and the project asked for opens
+/// (the saved file is not opened first, nor played).
+fn a_pending_folder_save_as_is_written_not_opened_by_an_open(transport: Transport) {
+    let mut rig = app_rig("signal-saveas-then-open", transport, None);
+    let other = packed(&rig, "other");
+    let (mut ws, _) = rig.client();
+    let file = rig.setup.with_file_name("pending.signal");
+    let (answer, answered) = std::sync::mpsc::channel();
+    rig.host().save_as_then(
+        &file,
+        Box::new(move |result| {
+            let _ = answer.send(result);
+        }),
+    );
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": other.display().to_string(), "edits": "discard"}),
+        "project",
+    );
+    assert_eq!(opened["file"], other.display().to_string());
+    assert_eq!(answered.try_recv(), Ok(Ok(())), "the Save As was answered");
+    assert!(file.is_file(), "and written");
+    let app = rig.request(&mut ws, 2, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["file"], other.display().to_string());
+}
+
 /// Review of 5b54fc5, 2: Save As of a folder project leaves the folder's
 /// files as they are (they are the user's own); the new `.signal` file
 /// opens with the corrections pending, for its own next Save.
@@ -3558,6 +3586,7 @@ both!(
     save_keeps_a_value_another_writer_changed,
     save_as_of_a_folder_leaves_its_files,
     a_folder_save_as_packs_off_the_control_thread,
+    a_pending_folder_save_as_is_written_not_opened_by_an_open,
     a_signal_project_keeps_its_routing_outside_the_file,
     a_failed_correction_does_not_block_the_save,
     a_panel_write_marks_a_signal_project_edited,

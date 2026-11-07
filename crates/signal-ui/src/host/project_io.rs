@@ -9,7 +9,7 @@ use signal_project::archive;
 use signal_project::transaction;
 
 use crate::app;
-use crate::document::{Document, Look, Ticket, look};
+use crate::document::{Document, Look, Ticket};
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
@@ -54,14 +54,44 @@ pub(super) struct FolderSave {
 /// while it packed.
 const FOLDER_SAVE_TRIES: usize = 4;
 
+/// How a pending folder Save As is collected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FolderCollect {
+    /// If it finished: the new file opened, `done` answered (a step).
+    Poll,
+    /// Waited for, then as `Poll` (the blocking Save As).
+    Wait,
+    /// Waited for until the file is written, `done` answered, and nothing
+    /// opened or played: the project is closing or another one opening
+    /// (review of c24cf1e: opening it then played audio during shutdown,
+    /// or opened two projects).
+    WaitWithoutOpening,
+}
+
+/// A cheap look at the files a pack takes from `dir` (paths, sizes, change
+/// times): what a hidden file, `.git` or an editor's swap file does not
+/// change (review of c24cf1e: they forced a pack again).
+fn folder_look(dir: &Path) -> Look {
+    archive::project_file_paths(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
+            let meta = fs::metadata(&path).ok();
+            let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+            let changed = meta.and_then(|m| m.modified().ok());
+            (path, size, changed)
+        })
+        .collect()
+}
+
 /// Packs `dir` with project id `id` into `file`, again while its files
 /// change under the packing (at most [`FOLDER_SAVE_TRIES`] times); the
 /// outcome and the look the bytes were packed at. Its own thread.
 fn pack_folder(dir: &Path, file: &Path, id: &str) -> (Result<(), String>, Look) {
-    let mut last = look(dir);
+    let mut last = folder_look(dir);
     for _ in 0..FOLDER_SAVE_TRIES {
         let packed = archive::pack_identified(dir, Some(id));
-        let now = look(dir);
+        let now = folder_look(dir);
         if now == last {
             let saved = packed
                 .and_then(|bytes| archive::write_atomic(file, &bytes))
@@ -238,7 +268,8 @@ impl Host {
             }),
         });
         // Refused or written before `submit` returns, or started then and
-        // finished here.
+        // finished here (a folder's: the new file opened).
+        self.collect_folder_save(FolderCollect::Wait);
         self.finish_saves();
         answered
             .try_recv()
@@ -290,13 +321,14 @@ impl Host {
         }
     }
 
-    /// Waits for the document's saves (and a folder's Save As) to finish,
-    /// and answers them.
+    /// Waits for the document's saves (and a folder's Save As, its file
+    /// written but not opened: what calls this closes or opens a project)
+    /// to finish, and answers them.
     pub(super) fn finish_saves(&mut self) {
         if let Some(document) = self.opening.document.as_mut() {
             document.finish_saves();
         }
-        self.collect_folder_save(true);
+        self.collect_folder_save(FolderCollect::WaitWithoutOpening);
         self.answer_saves();
     }
 
@@ -323,47 +355,66 @@ impl Host {
         });
     }
 
-    /// A folder Save As finished (`wait`: waiting for it): its state copied
-    /// and the new file opened, unless the folder changed since it was
-    /// packed, which packs it again.
-    pub(super) fn collect_folder_save(&mut self, wait: bool) {
-        let Some(save) = self.folder_save.as_ref() else {
-            return;
-        };
-        let outcome = if wait {
-            save.result.recv().ok()
-        } else {
-            match save.result.try_recv() {
-                Ok(outcome) => Some(outcome),
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+    /// A folder Save As finished (`how`: polled or waited for): its state
+    /// copied and the new file opened (not with
+    /// [`FolderCollect::WaitWithoutOpening`]), unless the folder changed
+    /// since it was packed, which packs it again, at most
+    /// [`FOLDER_SAVE_TRIES`] times.
+    pub(super) fn collect_folder_save(&mut self, how: FolderCollect) {
+        for _ in 0..=FOLDER_SAVE_TRIES {
+            let Some(save) = self.folder_save.as_ref() else {
+                return;
+            };
+            let outcome = if how == FolderCollect::Poll {
+                match save.result.try_recv() {
+                    Ok(outcome) => Some(outcome),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                }
+            } else {
+                save.result.recv().ok()
+            };
+            let Some(save) = self.folder_save.take() else {
+                return;
+            };
+            let (saved, packed_at) = outcome.unwrap_or_else(|| {
+                (
+                    Err(format!(
+                        "{} was not saved: the save ended without a result",
+                        save.file.display()
+                    )),
+                    Vec::new(),
+                )
+            });
+            if saved.is_ok() && folder_look(&self.opening.dir) != packed_at {
+                // Edited after it was packed: the file must hold the edit.
+                self.start_folder_save(save.file, save.id, save.done);
+                if how == FolderCollect::Poll {
+                    return;
+                }
+                continue;
             }
-        };
-        let Some(save) = self.folder_save.take() else {
-            return;
-        };
-        let (saved, packed_at) = outcome.unwrap_or_else(|| {
-            (
-                Err(format!(
-                    "{} was not saved: the save ended without a result",
-                    save.file.display()
-                )),
-                Vec::new(),
-            )
-        });
-        if saved.is_ok() && look(&self.opening.dir) != packed_at {
-            // Edited after it was packed: the file must hold the edit.
-            self.start_folder_save(save.file, save.id, save.done);
-            if wait {
-                self.collect_folder_save(true);
+            if saved.is_ok() {
+                self.copy_folder_state(&save.file, &save.id);
             }
-            return;
+            let file = save.file;
+            let result = if how == FolderCollect::WaitWithoutOpening {
+                if saved.is_ok() {
+                    app::opened(&mut self.setup, file.clone());
+                }
+                saved
+            } else {
+                saved.and_then(|()| self.open_project(&file, Edits::Discard))
+            };
+            return (save.done)(result);
         }
-        if saved.is_ok() {
-            self.copy_folder_state(&save.file, &save.id);
+        // Still changing after every pack: answered, not packed again.
+        if let Some(save) = self.folder_save.take() {
+            (save.done)(Err(format!(
+                "{} was not saved: the project's files kept changing while it was packed",
+                save.file.display()
+            )));
         }
-        let file = save.file;
-        (save.done)(saved.and_then(|()| self.open_project(&file, Edits::Discard)));
     }
 
     /// Answers the document's saves that finished: a Save As written is the
@@ -371,7 +422,7 @@ impl Host {
     /// answered `saved` (or `not-saved`) and is the window's message, as an
     /// app message's outcome is.
     pub(super) fn answer_saves(&mut self) {
-        self.collect_folder_save(false);
+        self.collect_folder_save(FolderCollect::Poll);
         let Some(document) = self.opening.document.as_mut() else {
             return;
         };

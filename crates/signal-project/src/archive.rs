@@ -252,6 +252,13 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
     Ok(files)
 }
 
+/// The files [`pack`] would take from `dir`, by their paths: what a
+/// project reads, never hidden files, `.git` or anything else in the
+/// folder.
+pub fn project_file_paths(dir: &Path) -> Result<Vec<PathBuf>, ArchiveError> {
+    Ok(project_files(dir)?.into_values().collect())
+}
+
 /// The project folder `dir` as a `.signal` archive.
 pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
     pack_identified(dir, None)

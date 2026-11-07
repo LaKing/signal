@@ -524,7 +524,13 @@ impl Host {
     /// it waits for: the window asks before a decision, the "Save changes?"
     /// and "Revert to Saved?" prompts); `None` without one.
     pub fn project_status(&mut self) -> Option<ProjectStatus> {
-        self.finish_saves();
+        // A document's saves are waited for; a folder's Save As is only
+        // answered once it finished (a status never waits on a pack, nor
+        // opens another project).
+        if let Some(document) = self.opening.document.as_mut() {
+            document.finish_saves();
+        }
+        self.answer_saves();
         if let Some(document) = self.opening.document.as_mut() {
             document.check();
         }

@@ -481,7 +481,7 @@ impl Host {
             (_, false) => live_rate(
                 &self.backend,
                 &self.devices,
-                &self.setup,
+                &setup,
                 project.sample_rate,
                 &project.name,
             ),
@@ -538,10 +538,11 @@ impl Host {
             };
             (output, self.first.buffer, self.first.threads)
         } else {
+            // The Setup with this project's devices.local.toml over it.
             let output = open_output(
                 &self.backend,
                 &self.devices,
-                &self.setup,
+                &setup,
                 rate,
                 width,
                 seed,

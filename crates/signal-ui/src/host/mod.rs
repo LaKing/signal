@@ -556,6 +556,9 @@ impl Host {
     /// ([`Host::drain_for_exit`]). Returns what to tell the operator.
     pub fn close(&mut self, window: Option<Window>, discard: bool) -> Vec<String> {
         self.drain_for_exit();
+        // A folder's Save As is written before anything stops, and not
+        // opened: the app is closing.
+        self.finish_saves();
         self.stop_app();
         self.finish_saves();
         if let Some(document) = self.opening.document.take() {
