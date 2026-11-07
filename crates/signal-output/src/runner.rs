@@ -172,6 +172,16 @@ impl Runner {
     /// Allocates, frees, locks and blocks nowhere; a full meter or scope
     /// queue is counted.
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
+        self.process_at(out, channels, 0);
+    }
+
+    /// [`process`](Runner::process) of a piece of a device callback that
+    /// starts `offset` frames into it: a driver that splits one callback
+    /// into several pieces passes each piece's offset, so the inputs time
+    /// their frames from the callback's start
+    /// ([`InputSource::read`](crate::inputs::InputSource::read)), never as
+    /// a new callback. Real-time safe.
+    pub fn process_at(&mut self, out: &mut [f32], channels: usize, offset: usize) {
         let frames = out.len().checked_div(channels).unwrap_or(0);
         let first_frame = self.runner.next_frame();
         self.levels.fill((0.0, 0.0));
@@ -184,6 +194,7 @@ impl Runner {
                 out: &mut *out,
                 channels,
                 at: 0,
+                offset,
                 first: first_frame.0,
                 levels: &mut self.levels,
                 clipped: &mut self.clipped,
@@ -337,6 +348,8 @@ struct Device<'a> {
     channels: usize,
     /// The next frame of `out`.
     at: usize,
+    /// Where `out` starts in the device callback, in frames.
+    offset: usize,
     /// The callback's first frame.
     first: u64,
     levels: &'a mut [(f32, f64)],
@@ -367,7 +380,7 @@ impl SinkOutput for Device<'_> {
 
     fn sources(&mut self, engine: &mut Engine, frames: usize) {
         for input in self.inputs.iter_mut() {
-            input.fill(engine, frames, self.at);
+            input.fill(engine, frames, self.offset + self.at);
         }
     }
 

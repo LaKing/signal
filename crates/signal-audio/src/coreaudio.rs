@@ -1034,7 +1034,7 @@ impl CoreAudioDriver {
             inputs.push(input);
             records.extend(record);
         }
-        let mut feed = CaptureFeed::new(feeds, self.epoch);
+        let mut feed = CaptureFeed::new(feeds, self.epoch, rate);
         let errors = Arc::clone(&stats);
         let config = StreamConfig {
             channels: choice.channels,

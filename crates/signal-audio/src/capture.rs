@@ -68,13 +68,17 @@ impl SideFeed {
 pub struct CaptureFeed {
     sides: Vec<SideFeed>,
     epoch: Instant,
+    /// The input device's rate: a piece's time is the callback's plus its
+    /// frames before it.
+    rate: u32,
 }
 
 impl CaptureFeed {
-    /// The feed of `sides`, its times against `epoch` (the driver's, which
-    /// the clock callback shares). Control thread.
-    pub fn new(sides: Vec<SideFeed>, epoch: Instant) -> CaptureFeed {
-        CaptureFeed { sides, epoch }
+    /// The feed of `sides` from an input device at `rate`, its times
+    /// against `epoch` (the driver's, which the clock callback shares).
+    /// Control thread.
+    pub fn new(sides: Vec<SideFeed>, epoch: Instant, rate: u32) -> CaptureFeed {
+        CaptureFeed { sides, epoch, rate }
     }
 
     /// One input callback: `data` holds frames of `device_channels`,
@@ -83,15 +87,19 @@ impl CaptureFeed {
         if device_channels == 0 {
             return;
         }
-        let time = u64::try_from(self.epoch.elapsed().as_nanos()).ok();
+        let start = u64::try_from(self.epoch.elapsed().as_nanos()).ok();
+        let frame_ns = 1e9 / f64::from(self.rate.max(1));
         for side in &mut self.sides {
             let width = side.channels.len();
             if width == 0 {
                 continue;
             }
             let piece = (side.gathered.len() / width).max(1);
-            for part in data.chunks(piece * device_channels) {
+            for (n, part) in data.chunks(piece * device_channels).enumerate() {
                 let frames = part.len() / device_channels;
+                // Each piece at its own time: the callback's plus the frames
+                // before it, never all at the callback's.
+                let time = start.map(|t| t.saturating_add(((n * piece) as f64 * frame_ns) as u64));
                 let Some(out) = side.gathered.get_mut(..frames * width) else {
                     break;
                 };

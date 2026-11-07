@@ -27,6 +27,7 @@ fn the_ring_starts_one_period_behind_however_long_the_start_took() {
             Arc::clone(&dropped),
         )],
         Instant::now(),
+        48_000,
     );
     // Ten input callbacks before the output starts: the ring (4 · 64 + 64)
     // fills, then drops.
@@ -58,6 +59,7 @@ fn a_channel_the_device_lacks_reads_0() {
             Arc::default(),
         )],
         Instant::now(),
+        48_000,
     );
     let data: Vec<f32> = (0..16).flat_map(|f| [f as f32 + 1.0, 7.0]).collect();
     feed.capture(&data, 2);
@@ -69,4 +71,63 @@ fn a_channel_the_device_lacks_reads_0() {
         assert_eq!(out[f * 2], f as f32 + 1.0);
         assert_eq!(out[f * 2 + 1], 0.0);
     }
+}
+
+/// An input that records the offset of every read.
+struct Probe(Arc<std::sync::Mutex<Vec<usize>>>);
+
+impl signal_output::inputs::InputSource for Probe {
+    fn read(&mut self, _out: &mut [f32], offset: usize) -> usize {
+        if let Ok(mut offsets) = self.0.lock() {
+            offsets.push(offset);
+        }
+        0
+    }
+}
+
+/// A device callback longer than the clock callback's scratch is run in
+/// pieces; each piece's reads carry their offset in the whole callback
+/// (0, 128, 256, 384 for 512 frames in pieces of 128), never 0 again as if
+/// each piece were a new callback.
+#[test]
+fn a_callback_run_in_pieces_keeps_its_inputs_offsets() {
+    use signal_audio::{CallbackStats, ChannelMap, OutputCallback};
+    use signal_output::inputs::RunInput;
+    let mut registry = signal_core::Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let project = signal_project::Project::from_sources(vec![signal_project::SourceFile {
+        path: "project.toml".to_owned(),
+        text: "schema_version = 1\n[project]\nname = \"pieces\"\nsample_rate = 48000\n\
+               [instances]\nmic = { device = { capture = \"mono\", role = \"main\" } }\n\
+               out = { module = \"std.audio_out\" }\n\
+               [wiring]\nconnections = [{ from = \"mic.m\", to = \"out.l\" }]\n"
+            .to_owned(),
+    }])
+    .unwrap();
+    let plan = project.plan(&registry).unwrap().plan;
+    let (mut runner, _controller) = signal_output::realtime(
+        &plan,
+        &registry,
+        signal_engine::RealtimeConfig::new(48_000, 1),
+    )
+    .unwrap();
+    let offsets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (input, _) = RunInput::new(
+        "/mic".parse().unwrap(),
+        1,
+        Box::new(Probe(Arc::clone(&offsets))),
+        128,
+        None,
+    );
+    runner.set_inputs(vec![input]);
+    let stats = Arc::new(CallbackStats::default());
+    let (mut callback, _control) =
+        OutputCallback::new(runner, ChannelMap::new(2, 2), 128, 48_000, stats);
+    let mut out = vec![0.0f32; 512 * 2];
+    callback.fill(&mut out);
+    let offsets = offsets.lock().unwrap().clone();
+    for piece in [0, 128, 256, 384] {
+        assert!(offsets.contains(&piece), "{offsets:?}");
+    }
+    assert!(offsets.windows(2).all(|w| w[1] > w[0]), "{offsets:?}");
 }

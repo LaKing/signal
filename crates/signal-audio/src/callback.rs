@@ -162,7 +162,9 @@ impl OutputCallback {
                 for out in data.chunks_mut(piece * device) {
                     let n = out.len() / device;
                     if let Some(src) = self.scratch.get_mut(..n * sink) {
-                        runner.process(src, sink);
+                        // The piece's place in the callback: the inputs
+                        // time their frames from its start.
+                        runner.process_at(src, sink, offset as usize);
                         self.map.scatter(src, out);
                         let time =
                             time_ns.map(|t| t.saturating_add((offset as f64 * frame_ns) as u64));
