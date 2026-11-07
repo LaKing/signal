@@ -1222,3 +1222,12 @@ ADR 0051's test 9 asks for at most 5 000 drawn elements and 50 fps on the studio
 | studio-multi | playing | idle, Stack | 60.1 → 60.1 | 9.9 % → 3.6 % | 1 868 → 69 | | 2 465 / 3 635 |
 
 "Before" is main e7f0d9c with only the counter added; "after" adds the two changes. After them, while playing, the parameter frames still sent are those whose values moved (modulated parameters; which ones was not broken down) and once-a-second keep-alives; the meters and scopes are unchanged. **Open:** the measurement in Signal.app's WKWebView on the owner's display (the 50 fps criterion is the owner's verdict); the Engine board's first layout (100–133 ms, once).
+
+## The control thread at rest (review 2026-11-01, `control-and-realtime-cost`)
+
+**Measurement, 2026-11-07, the M5 Max**, thread CPU time from `ps -M` and `sample` (5 s, 1 ms interval), release builds:
+
+- **Signal.app** playing the owner's project (`~/devtest-alpha-0.signal`, one window, the plane at the Setup level, an AT2020 capture and a secondary output routed): the control thread (`signal-control`, `signal_app::server::run`) slept in 1 988 of 1 995 samples (99.6 %); `Host::step` took 7 samples, `Host::unsaved` and `unsaved_json` 4 and 3 of them: about **0.35 % of a core**. The whole process took 40.7 % of a core, the audio callback and the engine's workers almost all of it.
+- **`signal ui --driver null projects/studio`** (a scratch copy): the main (control) thread took 2.4 % of a core over 30 s with no client, 0.7 % with the app page open in headless Chrome.
+
+So `unsaved()` and the `app` message, recomputed every step, cost nothing worth caching; they are left as they are. The review's other control-thread stall, a folder project's Save As packing on the control thread, is moved to a thread of its own (`signal-save-as`; packed again while the folder changes under it, and again if it changed before the new file opens; `crates/signal-ui/tests/app_mode.rs` `a_folder_save_as_packs_off_the_control_thread`). The engine's event delivery is in `docs/realtime-rules.md` "The engine's event delivery".

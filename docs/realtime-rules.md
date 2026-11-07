@@ -26,10 +26,20 @@ Why: an audio callback has a hard deadline (128 frames at 96 kHz is 1.33 ms). Mi
 
 ### The engine's event delivery: its worst case (review 2026-11-01)
 The executor's own per-call work on events is bounded, and its worst case is stated here as the rule above asks. For a call of *K* frames (at most the block, 256 by default), an event output keeps at most 16 events per frame, so at most *E* = 16·*K* events per call:
-- **Delivery** (`gather`, `crates/signal-engine/src/engine.rs`): for each event input, and each parameter driven by events, every frame of the call scans each source's events of the call for that frame, so one event connection costs *K*·*E* = 16·*K*² comparisons per call, times its `copies`; staged external events are found by binary search (log of the staged count) per frame and target.
-- **The fault guard** (`check`, run by `commit` frame by frame): each event output's events are scanned once per frame of the call, again 16·*K*² per event output.
+- **Delivery** (`gather`, `crates/signal-engine/src/engine.rs`): a source's events are kept in frame order, each frame's in emission order (`keep_events`: a push when emitted in frame order, as modules do, a shift within the capacity when not), so each frame of the call finds its events of each source by binary search (`at_frame`): *K*·log *E* + *E* per event connection per call, times its `copies`; staged external events are found by binary search (log of the staged count) per frame and target.
+- **The fault guard** (`check`, run by `commit` frame by frame): an event output's first fault is found in one pass over its events per call (`event_fault`), *E* per event output.
 
-At *K* = 256 that is about 1.05 million comparisons per event connection (and per event output) per block in the worst case, 16 events on every frame; with the usual few events per block it is *K*·(events) and small. It allocates nothing and cannot block, so no rule above is broken; it is quadratic in the frames per call, not linear. A delivery linear in frames plus events (a cursor per source over events kept in offset order) would give identical output for every partition, since the canonical order (external events by sequence, then sources in order, each in emission order, frame by frame) is unchanged; it is not built until a dense plan's benchmark shows the cost matters. Not measured yet: the dense-plan benchmark is an open item.
+Until 2026-11-07 both scanned every event of the call at every frame, 16·*K*² comparisons per connection (about 1.05 million per block at *K* = 256). **Measured** (`crates/signal-engine/tests/event_cost.rs`, a timing on the M5 Max, release, one thread, blocks of 256; µs per block over the same plan with no events, a source emitting *n* events on every frame into *r* order-sensitive receivers):
+
+| Events per frame | Receivers | Before (quadratic) | After |
+|---:|---:|---:|---:|
+| 1 | 1 | 71 | 29 |
+| 4 | 1 | 219 | 84 |
+| 16 | 1 | 896 | 374 |
+| 1 | 8 | 436 | 261 |
+| 16 | 8 | 6 787 | 4 474 |
+
+The cost is now linear in the events, about 90 ns per event delivered (its log record and the receiver's own work included). The worst case, 16 events on every frame into 8 receivers, still takes most of a 256-frame block's 5.3 ms at 48 kHz: a plan that dense is the project's budget, not the executor's. The output is identical to before for every partition and thread count (the block matrix of `tests/blocks.rs`, out-of-order emission included, and the oracle).
 
 ## How it is enforced
 

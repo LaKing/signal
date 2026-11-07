@@ -4852,7 +4852,7 @@ fn gather<R: Own, S: Sources, E: Emitted>(
             for source in &input.sources {
                 let from = LogSource::Port(source.port);
                 g.events.read(source.sink, |events| {
-                    for event in events.iter().filter(|e| e.offset as usize == f) {
+                    for event in at_frame(events, f) {
                         for _ in 0..source.copies {
                             let to = (target, a, f, event.payload, from);
                             deliver(fx, &mut slot.events, g.out, &mut discards, mode, to);
@@ -4899,7 +4899,7 @@ fn gather<R: Own, S: Sources, E: Emitted>(
             for source in &param.events {
                 let from = LogSource::Port(source.port);
                 g.events.read(source.sink, |events| {
-                    for event in events.iter().filter(|e| e.offset as usize == f) {
+                    for event in at_frame(events, f) {
                         for _ in 0..source.copies {
                             let to = (target, f, event.payload, from);
                             apply(
@@ -4935,6 +4935,20 @@ fn gather<R: Own, S: Sources, E: Emitted>(
         }
     }
     mode
+}
+
+/// A source's events at block frame `f`, in emission order: its kept
+/// events are in frame order ([`keep_events`]), so they are found by
+/// binary search, not by a scan of every event at every frame (review
+/// 2026-11-01: quadratic in the frames per call).
+#[inline(always)]
+fn at_frame(events: &[Event], f: usize) -> impl Iterator<Item = &Event> {
+    let start = events.partition_point(|e| (e.offset as usize) < f);
+    events
+        .get(start..)
+        .unwrap_or(&[])
+        .iter()
+        .take_while(move |e| e.offset as usize == f)
 }
 
 /// What [`gather`] works on for one instance: its slot, parameters, rows of
@@ -5190,14 +5204,14 @@ fn commit<R: Own>(
     let len = b - a;
     let (out, events) = (r.slot.signal_out.clone(), r.slot.event_out.clone());
     let mut fault = None;
+    let event_faults = event_fault(r.sinks, fx.sink_ports.get(events).unwrap_or(&[]), len);
     for c in 0..len {
         let found = check(
             r.lane.call_outputs.get(..out.len() * len).unwrap_or(&[]),
             len,
             c,
             fx.output_ports.get(out.clone()).unwrap_or(&[]),
-            r.sinks,
-            fx.sink_ports.get(events.clone()).unwrap_or(&[]),
+            event_faults,
         );
         if let Some((port, reason)) = found {
             fault = Some((a + c, port, reason));
@@ -5283,10 +5297,21 @@ fn keep_events<R>(r: &mut Run<'_, R>, a: usize, b: usize, fault: Option<usize>) 
             }
             if store.len() < store.capacity() {
                 let offset = u32::try_from(a + c).unwrap_or(u32::MAX);
-                store.push(Event {
+                let kept = Event {
                     offset,
                     payload: event.payload,
-                });
+                };
+                // Kept in frame order, each frame's in emission order (a
+                // stable insertion: after every event of its frame), so a
+                // receiver finds a frame's events by binary search
+                // ([`at_frame`]). Emitted in frame order, as modules do, it
+                // is a push; out of order, a shift within the capacity.
+                if store.last().is_none_or(|last| last.offset <= offset) {
+                    store.push(kept);
+                } else {
+                    let at = store.partition_point(|e| e.offset <= offset);
+                    store.insert(at, kept);
+                }
             } else {
                 // Unreachable: a sink keeps 16 events per frame.
                 r.out.input_overflows = r.out.input_overflows.saturating_add(1);
@@ -5424,26 +5449,46 @@ fn sum(sources: &[(usize, f64)], outputs: &[f64]) -> f64 {
 /// The fault guard for frame `c` of a call of `len` frames: the first output,
 /// signal outputs then event outputs in descriptor order, that is non-finite,
 /// larger than 10⁶ in magnitude, or an event output that dropped an event at
-/// that frame (more than 16 in it).
+/// that frame (more than 16 in it). `events` is the call's first event
+/// fault ([`event_fault`]), found once per call.
 fn check(
     signals: &[f64],
     len: usize,
     c: usize,
     signal_ports: &[PortId],
-    sinks: &[EventSink],
-    sink_ports: &[PortId],
+    events: Option<(usize, PortId, FaultReason)>,
 ) -> Option<(PortId, FaultReason)> {
     for (p, &port) in signal_ports.iter().enumerate() {
         if let Some(reason) = signals.get(p * len + c).copied().and_then(fault_of) {
             return Some((port, reason));
         }
     }
+    events
+        .filter(|(at, _, _)| *at == c)
+        .map(|(_, port, reason)| (port, reason))
+}
+
+/// The first event fault of a call of `len` frames, as [`check`] meets it
+/// frame by frame: the earliest frame, and at it the first event output in
+/// descriptor order, that dropped an event there (its overflow first) or
+/// holds an event whose value is a fault, the first such in emission
+/// order. One pass over each output's events (review 2026-11-01: a scan of
+/// every event at every frame was quadratic in the frames per call).
+fn event_fault(
+    sinks: &[EventSink],
+    sink_ports: &[PortId],
+    len: usize,
+) -> Option<(usize, PortId, FaultReason)> {
+    let mut first: Option<(usize, PortId, FaultReason)> = None;
     for (sink, &port) in sinks.iter().zip(sink_ports) {
-        if sink.first_overflow() == Some(c) {
-            return Some((port, FaultReason::EventOverflow));
-        }
+        // This output's earliest: its overflow, or its first bad event at an
+        // earlier frame.
+        let mut own = sink
+            .first_overflow()
+            .map(|c| (c, port, FaultReason::EventOverflow));
         for event in sink.events() {
-            if (event.offset as usize).min(len.saturating_sub(1)) != c {
+            let c = (event.offset as usize).min(len.saturating_sub(1));
+            if own.is_some_and(|(at, _, _)| at <= c) {
                 continue;
             }
             let value = match event.payload {
@@ -5451,11 +5496,17 @@ fn check(
                 EventPayload::Trigger => continue,
             };
             if let Some(reason) = fault_of(value) {
-                return Some((port, reason));
+                own = Some((c, port, reason));
             }
         }
+        // An earlier output wins a tie (descriptor order).
+        if let Some(own) = own
+            && first.is_none_or(|(at, _, _)| own.0 < at)
+        {
+            first = Some(own);
+        }
     }
-    None
+    first
 }
 
 /// The most of `frames` (sorted) within any `window` consecutive frames.
