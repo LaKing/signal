@@ -352,3 +352,34 @@ test('a device input wired straight to a device output is one cable from the cap
   const unbound = { setup: { ...setup.setup, capture: {} } };
   assert.deepEqual(throughCables({ instances, connections, setup: unbound, devices, bindings }), []);
 });
+
+test('a cable from an input to an output is lifted: dropped on nothing it is removed, on another output it moves (the owner’s, 2026-11-07)', () => {
+  const left = { source: '/input.m', port: '/cue.l', endpoint: 'cue' };
+  const right = { source: '/input.m', port: '/cue.r', endpoint: 'cue' };
+  const drag = { kind: 'through', cables: [left, right] };
+  const gone = cableDrop(drag, null, {});
+  assert.deepEqual(gone.ops, [
+    { op: 'connection.remove', from: 'input.m', to: 'cue.l' },
+    { op: 'connection.remove', from: 'input.m', to: 'cue.r' },
+  ]);
+  assert.match(gone.note, /removed/);
+  // Onto the outputs `main` plays on: into its ports, the old ones removed.
+  const bindings = [
+    { role: 'main', endpoint: 'out', ports: ['/out.l', '/out.r'], device: 'ssl', channels: [1, 2] },
+    { role: 'cue', endpoint: 'cue', ports: ['/cue.l', '/cue.r'], device: 'spk', channels: [1, 2] },
+  ];
+  const moved = cableDrop(drag, { box: 'ssl', port: { name: 'Out 1–2', channels: [1, 2] }, channel: 1 }, { bindings });
+  assert.deepEqual(moved.ops.slice(2), [
+    { op: 'connection.add', from: 'input.m', to: 'out.l' },
+    { op: 'connection.add', from: 'input.m', to: 'out.r' },
+  ]);
+  // Back where it is: nothing to write.
+  const same = cableDrop(drag, { box: 'spk', port: { name: 'Out 1–2', channels: [1, 2] }, channel: 2 }, { bindings });
+  assert.deepEqual(same.ops, []);
+  // Onto free channels: a new stereo output.
+  const free = cableDrop({ kind: 'through', cables: [left] }, { box: 'ssl', port: { name: 'Out 3–4', channels: [3, 4] }, channel: 3 }, { bindings, instances: ['input', 'cue', 'out'] });
+  assert.equal(free.ops[0].op, 'connection.remove');
+  assert.equal(free.ops[1].op, 'device.add');
+  assert.equal(free.routes[0].type, 'device.route');
+  assert.deepEqual(free.routes[0].channels, [3, 4]);
+});

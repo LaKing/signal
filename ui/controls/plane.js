@@ -1129,6 +1129,8 @@ export class SignalPlane extends HTMLElement {
       const a = captureAt.get(`${c.from.device} ${c.from.channel}`);
       const b = portAt.get(`${c.to.device} ${c.to.channel}`);
       if (!a || !b) return;
+      // Its output end dragged moves or removes the connection (the capture slot stays).
+      this.hits.ends.push({ through: c, x: b.x, y: b.y, from: a });
       const path = svg('path', { class: `cable${c.dashed ? ' dashed' : ''}`, d: cablePath(a, b, this.model.cables.length + i) });
       path.append(svg('title', {}, c.label));
       groups.cables.append(path);
@@ -1151,9 +1153,13 @@ export class SignalPlane extends HTMLElement {
     const reach = 18 / this.view.k;
     const near = (h) => Math.hypot(h.x - p.x, h.y - p.y) <= reach;
     const end = this.hits?.ends.find(near);
+    if (end?.through) return { kind: 'through', cables: [end.through], from: end.from };
     if (end) return { kind: 'move', cable: end.cable, from: end.from };
     const inside = (h) => h.row && p.x >= h.row.x && p.x <= h.row.x + h.row.w && p.y >= h.row.y && p.y <= h.row.y + h.row.h;
     const capture = this.hits?.captures.find((h) => near(h) || inside(h));
+    // An input jack with cables lifts them all (unplugged, or moved to another output); a free one starts a new one.
+    const lifted = capture ? this.model.through.filter((t) => t.from.device === capture.box && capture.port.channels.includes(t.from.channel)) : [];
+    if (lifted.length && near(capture)) return { kind: 'through', cables: lifted, from: { x: capture.x, y: capture.y } };
     if (capture) return { kind: 'capture', box: capture.box, port: capture.port, from: { x: capture.x, y: capture.y } };
     const hit = this.hits?.pins.find(near);
     if (!hit) return null;

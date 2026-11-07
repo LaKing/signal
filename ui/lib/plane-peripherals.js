@@ -261,6 +261,42 @@ function captureDrop(drag, drop, { bindings, instances, main, devices, scope }) 
   return { ops, route: null, routes, note: `${role} · ${drag.port.name} → ${play} on ${drop.port.name}: new slots (rename their roles in project.toml)` };
 }
 
+/**
+ * What cables from a device's input straight to a device's output
+ * (`throughCables`') write when lifted (the owner's, 2026-11-07: "I cannot
+ * disconnect the AT2020 from the outputs"): `drag.cables`, one by its
+ * output end or every cable of an input jack by that jack. Dropped on the
+ * empty plane, their connections are removed; on another output, moved
+ * there: into the role playing on that channel, or into a new stereo
+ * output on free channels (one input into every port of it, inputs in
+ * order onto its ports otherwise). The capture slots stay: their input is
+ * still read, and recorded. `{ops, routes, note}`.
+ */
+function throughDrop(drag, drop, { bindings, instances, main, devices, scope }) {
+  const cables = drag.cables ?? [];
+  const sources = [...new Set(cables.map((c) => strip(c.source)))];
+  const removes = cables.map((c) => ({ op: 'connection.remove', from: strip(c.source), to: strip(c.port) }));
+  const names = cables.map((c) => `${strip(c.source)} → ${strip(c.port)}`).join(', ');
+  const none = { ops: [], route: null, routes: [], note: null };
+  if (!cables.length) return none;
+  if (!drop) return { ...none, ops: removes, note: `${names} removed` };
+  /** Each source into `ports`: one source into all of them, several in order. */
+  const into = (ports) => (sources.length === 1 ? ports.map((port) => [sources[0], port]) : sources.map((source, i) => [source, ports[i % ports.length]]));
+  const occupant = bindings.find((b) => b.device === drop.box && b.channels.includes(drop.channel));
+  if (occupant) {
+    const adds = into(occupant.ports.map(strip));
+    const kept = new Set(cables.map((c) => `${strip(c.source)} ${strip(c.port)}`));
+    if (adds.every(([from, to]) => kept.has(`${from} ${to}`)) && adds.length === cables.length) return none;
+    const ops = [...removes, ...adds.map(([from, to]) => ({ op: 'connection.add', from, to }))];
+    return { ...none, ops, note: `${sources.join(', ')} into ${occupant.role}` };
+  }
+  const play = newRoleName([...bindings.map((b) => b.role), ...instances]);
+  const ops = [...removes, { op: 'device.add', name: play, play: 'stereo', role: play }, ...into([`${play}.l`, `${play}.r`]).map(([from, to]) => ({ op: 'connection.add', from, to }))];
+  const device = drop.box === main?.key ? null : deviceEntry(devices, drop.box);
+  const routes = [{ type: 'device.route', role: play, channels: landingChannels(drop.port, 2, drop.port.channels[0]), device, scope }];
+  return { ...none, ops, routes, note: `${sources.join(', ')} → ${play} on ${drop.port.name}: a new output (rename its role in project.toml)` };
+}
+
 const strip = (address) => String(address).replace(/^\//, '');
 const sideOf = (label) => (/(^|_)(l|left)$/.test(label) ? 'l' : /(^|_)(r|right)$/.test(label) ? 'r' : null);
 
@@ -286,6 +322,7 @@ export function cableDrop(drag, drop, { bindings = [], instances = [], main = nu
   const none = { ops: [], route: null, note: null };
   if (drag?.kind === 'capture') return captureDrop(drag, drop, { bindings, instances, main, devices, scope });
   const deviceOf = (box) => (box === main?.key ? null : deviceEntry(devices, box));
+  if (drag?.kind === 'through') return throughDrop(drag, drop, { bindings, instances, main, devices, scope });
   if (drag?.kind === 'move') {
     const cable = drag.cable;
     if (!drop) return { ...none, ops: [{ op: 'connection.remove', from: strip(cable.pin), to: strip(cable.port) }], note: `${strip(cable.pin)} → ${strip(cable.port)} removed` };
@@ -397,7 +434,8 @@ export function captureBinding(setup, devices, role, width) {
  * instrument between them, so no Stack pin to draw from. One cable `{from:
  * {device, channel}, to: {device, channel}, label}` per such connection
  * whose capture channel the Setup binds and whose play channel `bindings`
- * gives.
+ * gives; `source` and `port` are the connection's two ends, `endpoint`
+ * the play role's.
  */
 export function throughCables({ instances = [], connections = [], setup = null, devices = null, bindings = [] } = {}) {
   const captures = new Map();
@@ -414,7 +452,7 @@ export function throughCables({ instances = [], connections = [], setup = null, 
     for (const b of bindings) {
       const n = b.device ? b.ports.indexOf(c.to) : -1;
       if (n < 0 || !Number.isInteger(b.channels[n])) continue;
-      cables.push({ from, to: { device: b.device, channel: b.channels[n] }, label: `${c.from} → ${c.to} (${b.endpoint})`, dashed: !b.heard });
+      cables.push({ from, to: { device: b.device, channel: b.channels[n] }, source: c.from, port: c.to, endpoint: b.endpoint, label: `${c.from} → ${c.to} (${b.endpoint})`, dashed: !b.heard });
     }
   }
   return cables;
