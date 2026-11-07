@@ -50,6 +50,7 @@
 //! | `std.mass_spring` | [`MassSpring`] | direct | `physical` |
 //! | `std.exciter` | [`Exciter`] | direct | `physical` |
 //! | `std.count` | [`Count`] | direct (the event bridge) | `event` |
+//! | `std.voice_alloc` | [`VoiceAlloc`] | direct, a polyphonic slot's allocator (ADR 0044 §4) | `event` |
 //! | `std.particles` | [`Particles`] | direct, divisor 800 | `visual` |
 //! | `std.mesh2d` | [`Mesh2d`]`<false>` | direct, divisor 800 | `visual` |
 //! | `std.mesh2d_audio` | [`Mesh2d`]`<true>` | direct | `physical` |
@@ -224,6 +225,7 @@ mod tanh_shaper_os8;
 mod transport;
 mod unit_delay;
 mod vector;
+mod voice_alloc;
 mod wavetable;
 
 #[cfg(test)]
@@ -285,6 +287,7 @@ pub use tanh_shaper_os8::TanhShaperOs8;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
 pub use vector::{Index, Pack, Reduce, Unpack, VECTOR_WIDTHS, Vadd, Vmul};
+pub use voice_alloc::{MAX_VOICES, VoiceAlloc};
 pub use wavetable::Wavetable;
 
 use signal_core::{
@@ -455,6 +458,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<MassSpring>(),
         direct::<Exciter>(),
         direct::<Count>(),
+        direct::<VoiceAlloc>(),
         direct::<Particles>(),
         direct::<Mesh2d<false>>(),
         direct::<Mesh2d<true>>(),
@@ -934,6 +938,9 @@ mod tests {
     /// ADR 0033: the position signal.
     const PLAYHEAD: [&str; 1] = ["std.playhead"];
 
+    /// ADR 0044 §4: a polyphonic slot's allocator.
+    const POLY: [&str; 1] = ["std.voice_alloc"];
+
     /// ADR 0035 §5, ADR 0037 §6: the fallback input.
     const PREFER: [&str; 1] = ["std.prefer"];
 
@@ -1026,6 +1033,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + POLY.len()
                 + PREFER.len()
                 + SHAPER_OS8.len()
                 + DSP.len()
@@ -1037,6 +1045,7 @@ mod tests {
             .chain(SEQUENCERS)
             .chain(LADDER)
             .chain(PLAYHEAD)
+            .chain(POLY)
             .chain(PREFER)
             .chain(SHAPER_OS8)
             .chain(DSP.map(|(name, _)| name))
@@ -1066,6 +1075,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + POLY.len()
                 + PREFER.len()
                 + SHAPER_OS8.len()
                 + DSP.len()

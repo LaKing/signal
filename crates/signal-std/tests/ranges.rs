@@ -140,6 +140,12 @@ fn the_value_sets_name_what_the_rustdoc_names() {
 /// snapping is checked against `process` in `playhead.rs`'s tests.
 const WIRING_ONLY: &[&str] = &["std.playhead.release"];
 
+/// Parameters that act only on note events (ADR 0044 §3), which the random
+/// stimulus does not make: `std.voice_alloc.legato` changes how a sounding
+/// voice takes a new note; checked against `process` in `voice_alloc.rs`'s
+/// tests.
+const NOTES_ONLY: &[&str] = &["std.voice_alloc.legato"];
+
 #[test]
 fn a_value_set_snaps_as_process_reads_it() {
     const FRAMES: usize = 512;
@@ -182,7 +188,11 @@ fn a_value_set_snaps_as_process_reads_it() {
             }
             let renders: std::collections::BTreeSet<String> =
                 entries.iter().map(|v| render(*v)).collect();
-            if entries.len() > 1 && renders.len() < 2 && !WIRING_ONLY.contains(&at.as_str()) {
+            if entries.len() > 1
+                && renders.len() < 2
+                && !WIRING_ONLY.contains(&at.as_str())
+                && !NOTES_ONLY.contains(&at.as_str())
+            {
                 unreached.push(at);
             }
         }
