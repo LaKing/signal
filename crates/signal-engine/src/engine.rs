@@ -5543,3 +5543,91 @@ fn push_record(log: &mut Vec<LogRecord>, overflows: &mut u64, record: LogRecord)
         *overflows = overflows.saturating_add(1);
     }
 }
+
+#[cfg(test)]
+mod event_fault_tests {
+    //! [`event_fault`]'s order (review 2026-11-01, P3): the earliest frame
+    //! wins; at one frame the earlier output in descriptor order, and within
+    //! one output its overflow, then its first bad event in emission order.
+
+    use super::{EventSink, FaultReason, PortId, event_fault};
+    use signal_core::{Event, EventPayload};
+
+    fn set(offset: u32, value: f64) -> Event {
+        Event {
+            offset,
+            payload: EventPayload::Set(value),
+        }
+    }
+
+    /// A per-frame sink of `per_frame` events in a call of `len` frames,
+    /// holding `events` (those beyond `per_frame` at a frame overflow).
+    fn sink(per_frame: usize, len: usize, events: &[Event]) -> EventSink {
+        let mut sink = EventSink::per_frame(per_frame, len);
+        sink.start_call(len);
+        for event in events {
+            sink.push(*event);
+        }
+        sink
+    }
+
+    #[test]
+    fn the_earliest_frame_wins_over_descriptor_order() {
+        let sinks = [sink(4, 8, &[set(5, f64::NAN)]), sink(4, 8, &[set(2, 2e6)])];
+        let found = event_fault(&sinks, &[PortId(0), PortId(1)], 8);
+        assert_eq!(found, Some((2, PortId(1), FaultReason::Magnitude)));
+    }
+
+    #[test]
+    fn at_one_frame_the_earlier_output_wins() {
+        let sinks = [sink(4, 8, &[set(3, 2e6)]), sink(4, 8, &[set(3, f64::NAN)])];
+        let found = event_fault(&sinks, &[PortId(7), PortId(9)], 8);
+        assert_eq!(found, Some((3, PortId(7), FaultReason::Magnitude)));
+    }
+
+    #[test]
+    fn within_an_output_the_first_bad_event_emitted_wins_a_frame() {
+        // Two bad events at frame 4: the one emitted first; a later-emitted
+        // one at an earlier frame is earlier still.
+        let sinks = [sink(4, 8, &[set(4, f64::INFINITY), set(4, 3e6)])];
+        let found = event_fault(&sinks, &[PortId(0)], 8);
+        assert_eq!(found, Some((4, PortId(0), FaultReason::NonFinite)));
+        let sinks = [sink(4, 8, &[set(4, 3e6), set(1, f64::NAN)])];
+        let found = event_fault(&sinks, &[PortId(0)], 8);
+        assert_eq!(found, Some((1, PortId(0), FaultReason::NonFinite)));
+    }
+
+    #[test]
+    fn an_overflow_comes_before_a_bad_event_at_its_frame() {
+        // One event a frame: the second at frame 2 overflows, and the first
+        // there is a fault too.
+        let sinks = [sink(1, 8, &[set(2, f64::NAN), set(2, 0.5)])];
+        let found = event_fault(&sinks, &[PortId(0)], 8);
+        assert_eq!(found, Some((2, PortId(0), FaultReason::EventOverflow)));
+        // A bad event before the overflow's frame wins.
+        let sinks = [sink(1, 8, &[set(1, f64::NAN), set(2, 0.5), set(2, 0.5)])];
+        let found = event_fault(&sinks, &[PortId(0)], 8);
+        assert_eq!(found, Some((1, PortId(0), FaultReason::NonFinite)));
+    }
+
+    #[test]
+    fn an_offset_past_the_call_counts_at_its_last_frame_and_triggers_never() {
+        let sinks = [sink(
+            4,
+            4,
+            &[
+                Event {
+                    offset: 0,
+                    payload: EventPayload::Trigger,
+                },
+                set(9, f64::NAN),
+            ],
+        )];
+        let found = event_fault(&sinks, &[PortId(0)], 4);
+        assert_eq!(found, Some((3, PortId(0), FaultReason::NonFinite)));
+        assert_eq!(
+            event_fault(&[sink(4, 4, &[set(0, 1.0)])], &[PortId(0)], 4),
+            None
+        );
+    }
+}
