@@ -281,6 +281,17 @@ impl Host {
             if run.polled.elapsed() >= SECONDARY_POLL {
                 run.polled = Instant::now();
                 let notices = run.output.poll_secondaries();
+                if !notices.is_empty() {
+                    // A device went or came back (the owner's, 2026-11-07:
+                    // "the UI does nothing"): the list is read again and
+                    // every page told, with what changed.
+                    self.list_devices();
+                    let mut push = self.setup_push();
+                    if let Some(map) = push.as_object_mut() {
+                        map.insert("notices".to_owned(), json!(notices));
+                    }
+                    self.broadcast(&push);
+                }
                 self.messages.extend(notices);
             }
             return;

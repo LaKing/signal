@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, absentInputBoxes, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -382,4 +382,29 @@ test('a cable from an input to an output is lifted: dropped on nothing it is rem
   assert.equal(free.ops[1].op, 'device.add');
   assert.equal(free.routes[0].type, 'device.route');
   assert.deepEqual(free.routes[0].channels, [3, 4]);
+});
+
+test('an input device unplugged: its box hollow, "not present", its cables dashed (the owner’s, 2026-11-07)', () => {
+  const setup = {
+    setup: {
+      output: { name: 'SSL 2+ MKII', id: SSL_ID },
+      play: { cue: { channels: [1, 2], device: { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice' } } },
+      capture: { input: { channels: [1], device: { name: 'MacBook Pro Microphone', id: 'coreaudio:BuiltInMicrophoneDevice' } } },
+    },
+  };
+  // The microphone is not listed.
+  const devices = { devices: [ssl(0, 'output'), speakers(1)], output: { found: 0 } };
+  const instances = [
+    { name: 'input', device: { capture: 'mono', role: 'input' }, ports: [{ address: '/input.m', direction: 'out' }] },
+    { name: 'cue', device: { play: 'stereo', role: 'cue' }, ports: [{ address: '/cue.l', direction: 'in' }, { address: '/cue.r', direction: 'in' }] },
+  ];
+  const connections = [{ from: '/input.m', to: '/cue.l' }, { from: '/input.m', to: '/cue.r' }];
+  const endpoints = [{ name: 'cue', role: 'cue', layout: 'stereo', ports: ['/cue.l', '/cue.r'] }];
+  const { boxes, bindings } = peripherals({ setup, devices, endpoints });
+  const through = throughCables({ instances, connections, setup, devices, bindings });
+  assert.equal(through.length, 2);
+  assert.ok(through.every((c) => c.dashed && c.from.present === false));
+  const absent = absentInputBoxes(through, boxes);
+  assert.deepEqual(absent.map((b) => [b.name, b.present, b.note, b.outputs.map((p) => p.name)]), [['MacBook Pro Microphone', false, 'not present', ['In 1']]]);
+  assert.equal(absent[0].key, through[0].from.device);
 });

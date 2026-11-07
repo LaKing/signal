@@ -413,7 +413,9 @@ export function playbackPortOf(box, channel) {
  * channels}`, the box of its device (the Setup's input, else the system's
  * default input, when the binding names none) and its device channels, as
  * the player routes it; `main` without a binding takes the default
- * input's channels from 1. Null when the role is not captured here.
+ * input's channels from 1. A named device not listed (unplugged) is
+ * `present: false` with a key of its own. Null when the role is not
+ * captured here.
  */
 export function captureBinding(setup, devices, role, width) {
   const entry = setup?.setup?.capture?.[role] ?? null;
@@ -423,9 +425,10 @@ export function captureBinding(setup, devices, role, width) {
   const device = named
     ? list.find((d) => d.direction === 'input' && (named.id ? d.id === named.id : d.name === named.name))
     : list.find((d) => d.direction === 'input' && d.default);
-  if (!device) return null;
   const channels = entry ? (entry.channels ?? []).slice(0, width) : Array.from({ length: width }, (_, i) => i + 1);
-  return { key: deviceKey(device), channels };
+  // A named device not listed now (unplugged): bound but absent, drawn hollow with its cables dashed.
+  if (!device) return named ? { key: `absent-input:${named.name ?? ''}`, channels, present: false, name: named.name ?? 'an input' } : null;
+  return { key: deviceKey(device), channels, present: true, name: device.name };
 }
 
 /**
@@ -443,7 +446,7 @@ export function throughCables({ instances = [], connections = [], setup = null, 
     if (!i.device?.capture) continue;
     const ports = (i.ports ?? []).filter((p) => p.direction === 'out' && (p.shape ?? 'signal') === 'signal').map((p) => p.address);
     const bound = captureBinding(setup, devices, i.device.role, ports.length);
-    if (bound) ports.forEach((port, n) => captures.set(port, { device: bound.key, channel: bound.channels[n] }));
+    if (bound) ports.forEach((port, n) => captures.set(port, { device: bound.key, channel: bound.channels[n], present: bound.present, name: bound.name }));
   }
   const cables = [];
   for (const c of connections) {
@@ -452,10 +455,28 @@ export function throughCables({ instances = [], connections = [], setup = null, 
     for (const b of bindings) {
       const n = b.device ? b.ports.indexOf(c.to) : -1;
       if (n < 0 || !Number.isInteger(b.channels[n])) continue;
-      cables.push({ from, to: { device: b.device, channel: b.channels[n] }, source: c.from, port: c.to, endpoint: b.endpoint, label: `${c.from} → ${c.to} (${b.endpoint})`, dashed: !b.heard });
+      cables.push({ from, to: { device: b.device, channel: b.channels[n] }, source: c.from, port: c.to, endpoint: b.endpoint, label: `${c.from} → ${c.to} (${b.endpoint})`, dashed: !b.heard || !from.present });
     }
   }
   return cables;
+}
+
+/**
+ * The boxes of input devices `through` cables start from that the
+ * inventory lacks (unplugged): hollow, "not present", their capture
+ * jacks up to the highest channel a cable uses (the owner's, 2026-11-07:
+ * an unplugged AT2020 showed nothing).
+ */
+export function absentInputBoxes(through, boxes) {
+  const have = new Set(boxes.map((b) => b.key));
+  const missing = new Map();
+  for (const t of through) {
+    if (t.from.present !== false || have.has(t.from.device)) continue;
+    const box = missing.get(t.from.device) ?? { name: t.from.name, channels: 1 };
+    box.channels = Math.max(box.channels, t.from.channel);
+    missing.set(t.from.device, box);
+  }
+  return [...missing].map(([key, b]) => ({ key, name: b.name, present: false, indexes: [], note: 'not present', inputs: [], outputs: capturePorts(b.channels), side: 'left' }));
 }
 
 /**

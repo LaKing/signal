@@ -79,7 +79,7 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes, throughCables } from '../lib/plane-peripherals.js';
+import { absentInputBoxes, cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes, throughCables } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
@@ -728,6 +728,8 @@ export class SignalPlane extends HTMLElement {
   /** The host's `setup` push after a saved Setup change: the Setup, the run, and the device list held with where the Setup's devices are in it. */
   setupPushed(push) {
     this.setupPushes = (this.setupPushes ?? 0) + 1;
+    // A device went away or came back while playing: what changed, said (the list in the push draws it).
+    if (push?.notices?.length) this.say(push.notices.join(' · '));
     this.setup = push;
     this.devices = push?.devices ?? this.devices;
     this.recompute();
@@ -810,10 +812,12 @@ export class SignalPlane extends HTMLElement {
     const { stackOf, unstacked } = stackMembers(shown.plane, owner, instances);
     const pins = new Map(shown.plane.stacks.map((s) => [s.name, edgePins(s, owner, stackOf, connections)]));
     const endpoints = roleEndpoints(instances);
-    const { boxes: all, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
+    const { boxes: listed, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
     const cables = setupCables(pins, bindings);
     // A device's input wired straight to a device's output (ADR 0038 §7): no Stack pin between them.
     const through = throughCables({ instances, connections, setup: this.setup, devices: this.devices, bindings });
+    // An input device unplugged: its box hollow, "not present".
+    const all = [...listed, ...absentInputBoxes(through, listed)];
     // A whole box for every device (the owner's, 2026-11-01): the ones the project and the Setup use first, then the rest.
     const split = splitBoxes(all, { bindings, cables, through, main });
     const boxes = [...split.full, ...split.others];
