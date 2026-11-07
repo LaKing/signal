@@ -47,6 +47,7 @@ dialog.slot-dialog::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 
 .slot-dialog td.summary.auto, .slot-dialog .inferred { color: var(--signal-muted, #8a93a3); }
 .slot-dialog .inferred { opacity: 0.7; }
 .slot-dialog input.field-pin { margin: 0 4px 0 0; vertical-align: middle; }
+.slot-dialog td:has(> input.field-pin) { white-space: nowrap; }
 .slot-dialog .pins { display: inline-flex; gap: 4px; margin-right: 6px; }
 .slot-dialog button.advanced-fold { background: none; border: none; color: var(--signal-muted, #8a93a3); padding: 2px 0; cursor: pointer; }
 @media (max-width: 720px) {
