@@ -163,6 +163,69 @@ fn stage_numbered(
     Ok(staged)
 }
 
+/// How old a staging file must be before [`sweep_stale`] removes it: no
+/// writer keeps one nearly this long (a write of project text takes
+/// milliseconds), so one this old was left by a writer that ended mid-write.
+pub const STALE_STAGING: Duration = Duration::from_secs(60 * 60);
+
+/// Removes the staging files a writer that ended mid-write left in the
+/// project folder `dir` and its project subfolders (`composites/`,
+/// `patterns/`, `interfaces/`, `ui/` and below): entries named exactly as
+/// [`stage`] names them, `.<name>.<pid>.<n>.tmp`, that are regular files
+/// (never a link) last changed more than [`STALE_STAGING`] ago. Anything
+/// else is left alone. Returns how many it removed.
+pub fn sweep_stale(dir: &Path) -> usize {
+    let mut removed = 0;
+    let mut pending = vec![dir.to_owned()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if kind.is_dir() {
+                let top = folder == dir;
+                let project = matches!(&*name, "composites" | "patterns" | "interfaces" | "ui");
+                if !name.starts_with('.') && (!top || project) {
+                    pending.push(entry.path());
+                }
+                continue;
+            }
+            if !kind.is_file() || !is_staging_name(&name) {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > STALE_STAGING);
+            if old && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Whether `name` is a staging file's name as [`stage`] makes it:
+/// `.<name>.<pid>.<n>.tmp`, the pid and counter decimal.
+fn is_staging_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.').and_then(|r| r.strip_suffix(".tmp")) else {
+        return false;
+    };
+    let mut parts = rest.rsplitn(3, '.');
+    let (Some(n), Some(pid), Some(target)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    digits(n) && digits(pid) && !target.is_empty()
+}
+
 /// Writes `bytes` to `path` atomically: a staging file of this writer's
 /// ([`stage`]), renamed over `path`. A failure leaves the old file as it was
 /// and removes only the staging file made here.
@@ -430,6 +493,47 @@ pub fn current(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A writer that ended mid-write left staging files: those old enough
+    /// go, a fresh one (a live writer's), a look-alike and a link stay.
+    #[test]
+    fn stale_staging_files_are_swept() {
+        let dir = std::env::temp_dir().join(format!("signal-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("composites")).unwrap();
+        fs::create_dir_all(dir.join("other")).unwrap();
+        let old = [
+            dir.join(".project.toml.123.0.tmp"),
+            dir.join("composites/.voice.toml.77.12.tmp"),
+        ];
+        let kept = [
+            dir.join(".project.toml.456.1.tmp.bak"),
+            dir.join(".notes.tmp"),
+            dir.join("other/.x.toml.1.1.tmp"),
+        ];
+        for path in old.iter().chain(&kept) {
+            fs::write(path, b"x").unwrap();
+        }
+        let fresh = dir.join(".project.toml.999.3.tmp");
+        fs::write(&fresh, b"x").unwrap();
+        let past = std::time::SystemTime::now() - STALE_STAGING - Duration::from_secs(60);
+        for path in old.iter().chain(&kept) {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+        assert_eq!(sweep_stale(&dir), 2);
+        assert!(old.iter().all(|p| !p.exists()));
+        assert!(kept.iter().all(|p| p.exists()));
+        assert!(fresh.exists(), "a live writer's staging file stays");
+        assert!(is_staging_name(".project.toml.1.2.tmp"));
+        assert!(!is_staging_name(".project.toml.x.2.tmp"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn folder(name: &str) -> PathBuf {

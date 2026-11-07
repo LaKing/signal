@@ -236,6 +236,9 @@ impl Host {
     /// App mode: opens the project folder `dir` (stopped) for its rate,
     /// panel and diagnostics, and serves its `ui/`.
     fn open(&mut self, dir: &Path) {
+        // Staging files a writer that ended mid-write left (an hour old at
+        // least: no live writer keeps one that long).
+        signal_project::transaction::sweep_stale(dir);
         self.opening.begin(dir);
         self.identify();
         self.idle_watch = None;
