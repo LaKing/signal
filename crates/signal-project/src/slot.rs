@@ -523,6 +523,75 @@ pub struct SlotResolution {
     pub unheard: Vec<String>,
 }
 
+/// An auto port's effective type (ADR 0045 §9, `retyped`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PortType {
+    /// Its shape.
+    #[serde(serialize_with = "shape_json")]
+    pub shape: PortShape,
+    /// Its rate divisor.
+    pub rate: u32,
+    /// Its kind.
+    pub kind: PortKind,
+    /// Its unit.
+    pub unit: Option<String>,
+    /// Its range.
+    pub range: Option<(f64, f64)>,
+}
+
+/// An auto port whose inferred type an edit changed (ADR 0045 phase 2,
+/// `retyped` on `reload` and in the `patch` reply).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Retyped {
+    /// The slot, as [`SlotResolution::slot`] names it.
+    pub slot: String,
+    /// The port.
+    pub port: String,
+    /// Its type before the edit.
+    pub before: PortType,
+    /// Its type after it.
+    pub after: PortType,
+}
+
+/// The auto ports of `after`'s slots whose effective type differs from the
+/// same slot's same port in `before` (a slot or port in only one of them
+/// is no retype), in `after`'s order.
+pub fn retyped(before: &[SlotResolution], after: &[SlotResolution]) -> Vec<Retyped> {
+    let type_of = |p: &InterfacePort| PortType {
+        shape: p.shape,
+        rate: p.rate,
+        kind: p.kind,
+        unit: p.unit.clone(),
+        range: p.range,
+    };
+    let mut found = Vec::new();
+    for slot in after {
+        let Some(old) = before.iter().find(|s| s.slot == slot.slot) else {
+            continue;
+        };
+        for port in slot.interface.ports.iter().filter(|p| p.auto.is_some()) {
+            let Some(was) = old
+                .interface
+                .ports
+                .iter()
+                .find(|p| p.name == port.name && p.role == port.role)
+            else {
+                continue;
+            };
+            let (b, a) = (type_of(was), type_of(port));
+            if a != b {
+                found.push(Retyped {
+                    slot: slot.slot.clone(),
+                    port: port.name.clone(),
+                    before: b,
+                    after: a,
+                });
+            }
+        }
+    }
+    found
+}
+
 /// A port as the other end of a host wire sees it: its role, shape, rate
 /// and kind.
 #[derive(Clone, Copy)]

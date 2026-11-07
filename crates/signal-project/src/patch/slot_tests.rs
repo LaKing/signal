@@ -1104,6 +1104,92 @@ fn interface_edits_keep_auto_ports_auto() {
     );
 }
 
+/// ADR 0045 phase 2 (test 6): `add` with `auto` makes an auto port, the
+/// fields it gives pinned; `retype` with `unpin` makes fields inferred (a
+/// typed port becomes auto, every other field pinned at its effective
+/// value, `unit = ""` and `range = []` where it had none); each undone byte
+/// for byte (`round_trip`); a field given and unpinned, `auto` on a
+/// parameter, `auto = false` and an unknown field are refused.
+#[test]
+fn add_auto_and_retype_unpin() {
+    let (added, _) = round_trip(
+        AUTO,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "add": [{"name": "z", "role": "input", "auto": true}, {"name": "e", "role": "input", "auto": true, "shape": "events"}]}),
+        )],
+    );
+    assert!(added.contains("z = {}"), "{added}");
+    assert!(
+        added.contains(r#"e = { auto = true, shape = "events" }"#),
+        "{added}"
+    );
+    // Unpinning one field of the typed output `y` after pinning it.
+    let typed = AUTO.replace(
+        r#"y = { auto = true, kind = "audio", unit = "", range = [] }"#,
+        r#"y = { shape = "events", rate = 2, kind = "trigger" }"#,
+    );
+    let (unpinned, _) = round_trip(
+        &typed,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "retype": [{"name": "y", "unpin": ["rate"]}]}),
+        )],
+    );
+    assert!(
+        unpinned.contains(
+            r#"y = { auto = true, shape = "events", kind = "trigger", unit = "", range = [] }"#
+        ),
+        "{unpinned}"
+    );
+    // §9's example: unpinning `kind` of an audio port.
+    let audio = AUTO.replace(
+        r#"y = { auto = true, kind = "audio", unit = "", range = [] }"#,
+        r#"y = "audio""#,
+    );
+    let (kind, _) = round_trip(
+        &audio,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "retype": [{"name": "y", "unpin": ["kind"]}]}),
+        )],
+    );
+    assert!(
+        kind.contains(r#"y = { auto = true, shape = "signal", rate = 1, unit = "", range = [] }"#),
+        "{kind}"
+    );
+    // An auto port: unpinning a pinned field infers it; all five → `{}`.
+    let (all, _) = round_trip(
+        AUTO,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "retype": [{"name": "y", "unpin": ["kind", "unit", "range"]}]}),
+        )],
+    );
+    assert!(all.contains("outputs = { y = {} }"), "{all}");
+    assert_eq!(plan_dump(&all), plan_dump(AUTO));
+    for (entry, said) in [
+        (
+            serde_json::json!({"retype": [{"name": "y", "kind": "audio", "unpin": ["kind"]}]}),
+            "both given and unpinned",
+        ),
+        (
+            serde_json::json!({"retype": [{"name": "y", "unpin": ["colour"]}]}),
+            "unknown field",
+        ),
+        (
+            serde_json::json!({"add": [{"name": "p", "role": "parameter", "auto": true}]}),
+            "a parameter has no auto type",
+        ),
+        (
+            serde_json::json!({"add": [{"name": "q", "role": "input", "auto": false}]}),
+            "true or absent",
+        ),
+    ] {
+        let mut op_json = entry.clone();
+        op_json["op"] = serde_json::json!("slot.interface");
+        op_json["slot"] = serde_json::json!("fx");
+        let error = apply(AUTO, None, &[op(op_json)], &ctx()).unwrap_err();
+        assert!(error.to_string().contains(said), "{said}: {error}");
+    }
+}
+
 /// ADR 0045 §5: a library template may hold no auto port; a project
 /// template may.
 #[test]

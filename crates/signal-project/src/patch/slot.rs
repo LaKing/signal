@@ -124,6 +124,15 @@ pub struct PortJson {
     /// Presentation only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// ADR 0045 §9, an `add`: an auto port, typed by its connections; the
+    /// fields given here are pinned. Without it an `add` is a typed port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<bool>,
+    /// ADR 0045 §9, a `retype`: these fields (`shape`, `rate`, `kind`,
+    /// `unit`, `range`) become inferred. A typed port becomes auto, every
+    /// other field pinned at its effective value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpin: Option<Vec<String>>,
 }
 
 impl<'de> Deserialize<'de> for Role {
@@ -837,27 +846,101 @@ fn interface_port(
                 .or(base.and_then(|b| b.range))
         },
         group: keep(&port.group, base.map(|b| &b.group)),
-        // ADR 0045: a retype of an auto port keeps it auto, the fields it
-        // gives pinned (phase 2 adds `add.auto` and `retype.unpin`).
-        auto: base
-            .filter(|_| role != Role::Parameter)
-            .and_then(|b| b.auto.as_ref())
-            .map(|auto| crate::slot::Auto {
-                inferred: auto
-                    .inferred
-                    .iter()
-                    .copied()
-                    .filter(|field| match field {
-                        Field::Shape => port.shape.is_none(),
-                        Field::Rate => port.rate.is_none(),
-                        Field::Kind => port.kind.is_none(),
-                        Field::Unit => port.unit.is_none(),
-                        Field::Range => port.range.is_none(),
-                    })
-                    .collect(),
-                from: auto.from.clone(),
-            }),
+        auto: auto_of(port, base, role)?,
     })
+}
+
+/// Whether `port` (an entry) gives field `field` a value: such a field is
+/// pinned.
+fn gives(port: &PortJson, field: Field) -> bool {
+    match field {
+        Field::Shape => port.shape.is_some(),
+        Field::Rate => port.rate.is_some(),
+        Field::Kind => port.kind.is_some(),
+        Field::Unit => port.unit.is_some(),
+        Field::Range => port.range.is_some(),
+    }
+}
+
+/// The field `name` names in an `unpin` list.
+fn field_named(name: &str) -> Option<Field> {
+    match name {
+        "shape" => Some(Field::Shape),
+        "rate" => Some(Field::Rate),
+        "kind" => Some(Field::Kind),
+        "unit" => Some(Field::Unit),
+        "range" => Some(Field::Range),
+        _ => None,
+    }
+}
+
+/// What makes the port `port` builds auto (ADR 0045 §9), `base` the
+/// declaration it retypes: an `add` with `auto` infers every field it
+/// gives no value; a `retype` of an auto port keeps it auto, the fields it
+/// gives pinned; `unpin` makes those fields inferred (a typed port becomes
+/// auto, every other field pinned at its effective value). A field both
+/// given and unpinned, `auto` on a parameter or anything but `true`, and
+/// an unknown field, are refused.
+fn auto_of(
+    port: &PortJson,
+    base: Option<&InterfacePort>,
+    role: Role,
+) -> Result<Option<crate::slot::Auto>, PatchError> {
+    let default_from = || crate::slot::AutoFrom {
+        end: crate::slot::AutoEnd::Default,
+        port: None,
+    };
+    let unpin = port.unpin.as_deref().unwrap_or(&[]);
+    if role == Role::Parameter && (port.auto.is_some() || !unpin.is_empty()) {
+        return Err(bad(format!(
+            "`{}`: a parameter has no auto type (ADR 0045 §1)",
+            port.name
+        )));
+    }
+    if port.auto == Some(false) {
+        return Err(bad(format!("`{}`: `auto` is true or absent", port.name)));
+    }
+    let mut unpinned = Vec::new();
+    for name in unpin {
+        let field = field_named(name).ok_or_else(|| {
+            bad(format!(
+                "`{}`: unknown field `{name}` to unpin; fields: shape, rate, kind, unit, range",
+                port.name
+            ))
+        })?;
+        if gives(port, field) {
+            return Err(bad(format!(
+                "`{}`: `{name}` is both given and unpinned",
+                port.name
+            )));
+        }
+        unpinned.push(field);
+    }
+    let base_auto = base
+        .filter(|b| b.role == role && role != Role::Parameter)
+        .and_then(|b| b.auto.as_ref());
+    let inferred: Vec<Field> = crate::slot::FIELDS
+        .iter()
+        .copied()
+        .filter(|&field| {
+            if unpinned.contains(&field) {
+                return true;
+            }
+            if gives(port, field) {
+                return false;
+            }
+            match (port.auto, base_auto) {
+                (Some(true), _) => true,
+                (_, Some(auto)) => auto.inferred.contains(&field),
+                (_, None) => false,
+            }
+        })
+        .collect();
+    let auto = port.auto == Some(true) || base_auto.is_some() || !unpinned.is_empty();
+    Ok(auto.then(|| crate::slot::Auto {
+        inferred,
+        from: base_auto.map_or_else(default_from, |a| a.from.clone()),
+    }))
 }
 
 fn name_problem(name: &str) -> Option<String> {

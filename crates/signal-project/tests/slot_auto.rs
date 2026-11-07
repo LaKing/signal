@@ -1099,3 +1099,31 @@ fn find<'v>(
         _ => None,
     }
 }
+
+/// ADR 0045 phase 2: `retyped` names the auto ports whose inferred type
+/// an edit changes, with their type before and after; an edit that
+/// changes no inferred type retypes nothing.
+#[test]
+fn an_edit_that_changes_an_inferred_type_is_retyped() {
+    let instances = format!(
+        "c = {{ module = \"std.const\" }}\nosc = {{ module = \"std.sine_osc\" }}\nfx = {{ slot = {{ inputs = {{ in = {{}} }}, outputs = {{ out = {{}} }} }}, load = \"std.gain\" }}\n{OUT}"
+    );
+    let project = |from: &str| {
+        Project::from_sources(sources(
+            &host(&instances, &[(from, "fx.in"), ("fx.out", "out.l")]),
+            &[],
+        ))
+        .unwrap()
+    };
+    let (constant, osc) = (project("c.out"), project("osc.out"));
+    let found = signal_project::retyped_by(&constant, &osc, &registry());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        (found[0].slot.as_str(), found[0].port.as_str()),
+        ("/fx", "in")
+    );
+    assert_eq!(found[0].before.kind, PortKind::Generic);
+    assert_ne!(found[0].after, found[0].before);
+    // The same project again: nothing retyped.
+    assert!(signal_project::retyped_by(&osc, &project("osc.out"), &registry()).is_empty());
+}

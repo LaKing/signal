@@ -1412,6 +1412,17 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
         "{file}"
     );
     assert!(file.contains("input = \"in\""), "{file}");
+    // ADR 0045 phase 2: an auto port added, a typed one unpinned.
+    mcp.ok(
+        "slot_interface",
+        json!({"slot": "fx", "add": [{"name": "side", "role": "input", "auto": true}], "retype": [{"name": "y", "unpin": ["kind"]}]}),
+    );
+    let file = mcp.file("project.toml");
+    assert!(file.contains("side = {}"), "{file}");
+    assert!(
+        file.contains(r#"y = { auto = true, shape = "signal", rate = 1, unit = "", range = [] }"#),
+        "{file}"
+    );
     // Removing a wired port: refused, naming the wire.
     let refusal = mcp.refused("slot_interface", json!({"slot": "fx", "remove": ["input"]}));
     assert!(refusal.contains("osc.out → fx.input"), "{refusal}");

@@ -225,6 +225,13 @@ impl Host {
             }
         }
         let new = Project::from_sources_in(edited.clone(), &self.opening.dir);
+        // ADR 0045 phase 2: the auto ports this edit retypes, for the reply.
+        let retyped = match (loaded, new.as_ref().ok()) {
+            (Some(before), Some(after)) => {
+                signal_project::retyped_by(before, after, &self.registry)
+            }
+            _ => Vec::new(),
+        };
         // The edited project when the current one does not load: a level's
         // edit leaves its exports and the paths of its instances as they were,
         // unless it edits the exports too (ADR 0037, editable insides: an
@@ -594,6 +601,11 @@ impl Host {
                 Op::PanelRestore { file, was: None, .. } if kept.contains(&format!("ui/{file}").as_str())
             )).collect::<Vec<_>>(),
         });
+        if !retyped.is_empty()
+            && let Some(map) = reply.as_object_mut()
+        {
+            map.insert("retyped".to_owned(), json!(retyped));
+        }
         // ADR 0037, editable insides: the other files written, each with
         // its level and new base (`null`: removed).
         if !patched.files.is_empty() {

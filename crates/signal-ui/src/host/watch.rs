@@ -75,6 +75,14 @@ impl Host {
         )
         .ok();
         run.file = None;
+        // ADR 0045 phase 2: the project before, to report the auto ports
+        // the reload retypes (kept only when it holds a slot).
+        let before = run
+            .current
+            .files
+            .iter()
+            .any(|f| f.text.contains("slot"))
+            .then(|| run.current.clone());
         let mut observed = Observed {
             values: &mut self.live.values,
             reports: &mut self.reports,
@@ -102,6 +110,9 @@ impl Host {
                 ));
                 self.messages.push(format!("watch: {applied}"));
                 let edited = applied.sets > 0 || applied.swap.is_some();
+                let retyped = before.as_ref().map_or_else(Vec::new, |before| {
+                    signal_project::retyped_by(before, &run.current, &self.registry)
+                });
                 (
                     json!({
                         "type": "reload",
@@ -113,6 +124,7 @@ impl Host {
                         "message": applied.to_string(),
                         "files": files,
                         "presentation": false,
+                        "retyped": retyped,
                     }),
                     edited && applied.swap.is_none(),
                 )

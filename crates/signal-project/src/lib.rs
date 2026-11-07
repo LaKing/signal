@@ -77,8 +77,8 @@ pub use pattern::{
 pub use schema::schema;
 pub use slot::{
     Auto, AutoEnd, AutoFrom, ContentNames, ContentPort, Field, Interface, InterfacePort,
-    LibraryInterface, Match, Role, SlotResolution, content_names, interface_templates,
-    library_interfaces, library_template, project_content,
+    LibraryInterface, Match, PortType, Retyped, Role, SlotResolution, content_names,
+    interface_templates, library_interfaces, library_template, project_content, retyped,
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{
@@ -1833,6 +1833,20 @@ pub fn render_paths(text: &str) -> Vec<String> {
         }
     }
     paths.into_iter().collect()
+}
+
+/// The auto ports an edit retyped (ADR 0045 phase 2): `before` and `after`
+/// planned, their slots' auto ports compared ([`retyped`]); empty when either
+/// does not plan, or neither holds a slot (no plan is made then).
+pub fn retyped_by(before: &Project, after: &Project, registry: &Registry) -> Vec<Retyped> {
+    let has_slots = |p: &Project| p.files.iter().any(|f| f.text.contains("slot"));
+    if !has_slots(before) && !has_slots(after) {
+        return Vec::new();
+    }
+    match (before.plan(registry), after.plan(registry)) {
+        (Ok(b), Ok(a)) => retyped(&b.slots, &a.slots),
+        _ => Vec::new(),
+    }
 }
 
 /// A capture slot's `render` file (ADR 0038 §3) `relative` in the project

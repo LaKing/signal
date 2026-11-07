@@ -384,7 +384,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "slot_interface",
         group: Group::Patch,
-        description: "Edits a slot's interface: `add` [{name, role: input|output|parameter, shape?, rate?, kind?, unit?, range?, group?}], `remove` [names] (a wired port is refused unless `removeWires`), `rename` {old: new} (the level's wires, exports, `map` keys and panel bindings follow), `retype` [{name, ...fields}], or alone `detach` (write the template's ports inline) or `template` (set the interface to that template).",
+        description: "Edits a slot's interface: `add` [{name, role: input|output|parameter, shape?, rate?, kind?, unit?, range?, group?, auto?}] (`auto: true`: a port typed by its connections, ADR 0045, the fields given pinned), `remove` [names] (a wired port is refused unless `removeWires`), `rename` {old: new} (the level's wires, exports, `map` keys and panel bindings follow), `retype` [{name, ...fields, unpin?}] (`unpin`: [shape|rate|kind|unit|range] become inferred; a typed port becomes auto with the rest pinned), or alone `detach` (write the template's ports inline) or `template` (set the interface to that template).",
         schema: || {
             object(
                 json!({"slot": {"type": "string"}, "add": {"type": "array", "items": {"type": "object"}}, "remove": {"type": "array", "items": {"type": "string"}}, "rename": {"type": "object"}, "retype": {"type": "array", "items": {"type": "object"}}, "removeWires": {"type": "boolean"}, "detach": {"type": "boolean"}, "template": {"type": "string"}, "level": {"type": "string"}, "base": {"type": "string"}}),
