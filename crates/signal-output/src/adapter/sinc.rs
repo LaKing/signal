@@ -80,6 +80,14 @@ impl FilterSpec {
         }
     }
 
+    /// Whether its taps reach the design attenuation (105 dB by Kaiser's
+    /// formula): not when [`MAX_TAPS`] cut them short, which a high
+    /// source rate over a low destination does (192 → 44.1 kHz needs
+    /// about 630); [`Decimator`](super::Decimator) halves the rate first.
+    pub fn reaches_design(&self) -> bool {
+        self.predicted_attenuation_db >= DESIGN_ATTENUATION_DB
+    }
+
     /// Half the taps: how far ahead of the read position the converter
     /// reads, in source frames. Being symmetric about the read position, the
     /// filter's group delay is this lookahead.
@@ -108,7 +116,7 @@ impl FilterSpec {
 }
 
 /// Kaiser's β for a stopband attenuation of `a` dB.
-fn kaiser_beta(a: f64) -> f64 {
+pub(crate) fn kaiser_beta(a: f64) -> f64 {
     if a > 50.0 {
         0.1102 * (a - 8.7)
     } else if a >= 21.0 {
@@ -119,7 +127,7 @@ fn kaiser_beta(a: f64) -> f64 {
 }
 
 /// The modified Bessel function of the first kind, order 0 (power series).
-fn bessel_i0(x: f64) -> f64 {
+pub(crate) fn bessel_i0(x: f64) -> f64 {
     let quarter = x * x / 4.0;
     let mut term = 1.0;
     let mut sum = 1.0;

@@ -18,8 +18,8 @@ mod adapter_support;
 
 use std::f64::consts::TAU;
 
-use adapter_support::spectrum::{convert, db, fit, largest, tone};
-use signal_output::adapter::{FilterSpec, PHASES, SincTable};
+use adapter_support::spectrum::{convert_staged, db, fit, largest, staged_len, tone};
+use signal_output::adapter::{Decimator, FilterSpec, PHASES, SincTable};
 
 /// −1 dBFS.
 const AMPLITUDE: f64 = 0.891_250_938_133_745_5;
@@ -70,25 +70,121 @@ const RATIOS: [Ratio; 5] = [
     },
 ];
 
-/// One tone through the converter: (gain in dB, residual over the tone in
-/// dB, largest residual component over the tone in dB, its frequency in Hz
-/// at the output).
+/// The rates the adapter accepts beyond 44.1 and 48 kHz (review
+/// 2026-11-06, finding 4): high source rates are halved first
+/// ([`Decimator`]), high destinations convert directly.
+const HIGH: [Ratio; 11] = [
+    Ratio {
+        name: "96 → 44.1 kHz",
+        source: 96_000,
+        dest: 44_100,
+        step: 96_000.0 / 44_100.0,
+    },
+    Ratio {
+        name: "96 → 48 kHz",
+        source: 96_000,
+        dest: 48_000,
+        step: 2.0,
+    },
+    Ratio {
+        name: "88.2 → 44.1 kHz",
+        source: 88_200,
+        dest: 44_100,
+        step: 2.0,
+    },
+    Ratio {
+        name: "192 → 44.1 kHz",
+        source: 192_000,
+        dest: 44_100,
+        step: 192_000.0 / 44_100.0,
+    },
+    Ratio {
+        name: "192 → 48 kHz",
+        source: 192_000,
+        dest: 48_000,
+        step: 4.0,
+    },
+    Ratio {
+        name: "192 → 48 kHz + 100 ppm",
+        source: 192_000,
+        dest: 48_000,
+        step: 4.0004,
+    },
+    Ratio {
+        name: "176.4 → 48 kHz",
+        source: 176_400,
+        dest: 48_000,
+        step: 176_400.0 / 48_000.0,
+    },
+    Ratio {
+        name: "176.4 → 44.1 kHz",
+        source: 176_400,
+        dest: 44_100,
+        step: 4.0,
+    },
+    Ratio {
+        name: "44.1 → 96 kHz",
+        source: 44_100,
+        dest: 96_000,
+        step: 44_100.0 / 96_000.0,
+    },
+    Ratio {
+        name: "48 → 192 kHz",
+        source: 48_000,
+        dest: 192_000,
+        step: 0.25,
+    },
+    Ratio {
+        name: "44.1 → 192 kHz",
+        source: 44_100,
+        dest: 192_000,
+        step: 44_100.0 / 192_000.0,
+    },
+];
+
+/// For each high-rate ratio, tones beyond its lower Nyquist frequency, up
+/// to the source's: those that fold into the output band at each halving.
+fn beyond(r: &Ratio) -> Vec<f64> {
+    let low = f64::from(r.source.min(r.dest));
+    let top = f64::from(r.source) / 2.0;
+    [
+        low / 2.0 + 50.0,
+        low / 2.0 + 1_000.0,
+        30_000.0,
+        50_000.0,
+        70_000.0,
+        74_000.0,
+        80_000.0,
+        95_000.0,
+    ]
+    .into_iter()
+    .filter(|&hz| hz > low / 2.0 && hz < top - 100.0)
+    .collect()
+}
+
+/// The converter's side of `r`: its rate after the halvings, its filter,
+/// source frames per converter frame and the halvings' delay; and a start
+/// past both filters' warm-up, in converter frames.
+fn inner(r: &Ratio) -> (u32, FilterSpec, f64, f64, f64) {
+    let decimator = Decimator::for_rates(r.source, r.dest, 1).expect("a staging");
+    let rate = decimator.rate_out();
+    let spec = FilterSpec::for_rates(rate, r.dest);
+    let scale = f64::from(1u32 << decimator.halvings());
+    let delay = decimator.delay_frames();
+    let start = spec.taps as f64 + (2.0 * delay / scale).ceil() + 0.37;
+    (rate, spec, scale, delay, start)
+}
+
+/// One tone through the conversion (the halvings, then the converter):
+/// (gain in dB, residual over the tone in dB, largest residual component
+/// over the tone in dB, its frequency in Hz at the output).
 fn measure(r: &Ratio, hz: f64, frames: usize) -> (f64, f64, f64, f64) {
-    let spec = FilterSpec::for_rates(r.source, r.dest);
-    let cycles = hz / f64::from(r.source);
-    let start = spec.taps as f64 + 0.37;
-    let input = tone(
-        cycles,
-        AMPLITUDE,
-        (start + frames as f64 * r.step) as usize + spec.taps + 8,
-    );
-    let (out, step) = convert(spec, &input, r.step, start, frames);
-    // Output sample j is the input at start + j·step.
-    let omega = TAU * cycles * step;
-    let phase0 = TAU * cycles * start;
-    let shifted: Vec<f32> = out.clone();
-    let f = fit(&shifted, omega);
-    let _ = phase0;
+    let (rate, _, _, _, start) = inner(r);
+    let len = staged_len(r.source, r.dest, r.step, start, frames);
+    let input = tone(hz / f64::from(r.source), AMPLITUDE, len);
+    let run = convert_staged(r.source, r.dest, &input, r.step, start, frames);
+    // Output sample j is the converter's input at start + j·step.
+    let f = fit(&run.out, TAU * hz / f64::from(rate) * run.step);
     let (spur_cycles, spur) = largest(&f.residual);
     (
         db(f.amplitude / AMPLITUDE),
@@ -125,15 +221,10 @@ fn sweep_ratio(r: &Ratio, points: usize, frames: usize) -> (f64, f64, f64, f64, 
 /// The rejection of a tone at `hz` (beyond the lower Nyquist frequency):
 /// the input's amplitude over everything at the output, in dB.
 fn rejection(r: &Ratio, hz: f64, frames: usize) -> f64 {
-    let spec = FilterSpec::for_rates(r.source, r.dest);
-    let cycles = hz / f64::from(r.source);
-    let start = spec.taps as f64 + 0.37;
-    let input = tone(
-        cycles,
-        AMPLITUDE,
-        (start + frames as f64 * r.step) as usize + spec.taps + 8,
-    );
-    let (out, _) = convert(spec, &input, r.step, start, frames);
+    let (_, _, _, _, start) = inner(r);
+    let len = staged_len(r.source, r.dest, r.step, start, frames);
+    let input = tone(hz / f64::from(r.source), AMPLITUDE, len);
+    let out = convert_staged(r.source, r.dest, &input, r.step, start, frames).out;
     let rms = (out.iter().map(|&y| f64::from(y).powi(2)).sum::<f64>() / out.len() as f64).sqrt();
     -db(rms * 2f64.sqrt() / AMPLITUDE)
 }
@@ -178,12 +269,17 @@ fn interpolation_error(spec: FilterSpec, samples: usize) -> (f64, f64) {
 /// frame (parabolic interpolation) minus where the read position meets
 /// `at`, in output frames.
 fn impulse_offset(r: &Ratio, at: usize) -> f64 {
-    let spec = FilterSpec::for_rates(r.source, r.dest);
-    let mut input = vec![0.0f32; at + 4 * spec.taps];
+    let (_, spec, scale, delay, _) = inner(r);
+    let mut input = vec![0.0f32; at + (4 * spec.taps) * scale as usize + 2 * delay as usize];
     input[at] = 1.0;
     let start = 0.37;
-    let frames = ((at + 2 * spec.taps) as f64 / r.step) as usize;
-    let (out, step) = convert(spec, &input, r.step, start, frames);
+    // Where the impulse is in the converter's frames: each halving's
+    // output n is its filter centred on input frame 2n.
+    let at = (at as f64 + delay) / scale;
+    let step = r.step / scale;
+    let frames = ((at + 2.0 * spec.taps as f64) / step) as usize;
+    let run = convert_staged(r.source, r.dest, &input, r.step, start, frames);
+    let (out, step) = (run.out, run.step);
     let (peak, _) =
         out.iter().enumerate().fold(
             (0, f32::MIN),
@@ -195,7 +291,7 @@ fn impulse_offset(r: &Ratio, at: usize) -> f64 {
         f64::from(out[peak + 1]),
     );
     let peak = peak as f64 + 0.5 * (a - c) / (a - 2.0 * b + c);
-    peak - (at as f64 - start) / step
+    peak - (at - start) / step
 }
 
 #[test]
@@ -222,9 +318,41 @@ fn converter_meets_the_targets() {
     for spec in [
         FilterSpec::for_rates(48_000, 48_000),
         FilterSpec::for_rates(48_000, 44_100),
+        // The longest a high rate uses (96 → 48 kHz, unhalved).
+        FilterSpec::for_rates(96_000, 48_000),
     ] {
         let (sum, _) = interpolation_error(spec, 2000);
         assert!(sum <= -REJECTION_DB, "phase interpolation {sum} dB");
+    }
+}
+
+/// The high rates the adapter accepts, through the same measurements:
+/// the halvings and the converter together meet §4's targets.
+#[test]
+fn high_rates_meet_the_targets() {
+    for r in &HIGH {
+        let (ripple, _, spur, tone_hz, spur_hz) = sweep_ratio(r, 10, 8192);
+        let (_, thd_n, _, _) = measure(r, 1000.0, 8192);
+        let offset = impulse_offset(r, 2000);
+        let worst = beyond(r)
+            .into_iter()
+            .map(|hz| (hz, rejection(r, hz, 8192)))
+            .fold((0.0, f64::MAX), |w, x| if x.1 < w.1 { x } else { w });
+        println!(
+            "{}: ripple {ripple:.5} dB, spur {spur:.1} dB ({tone_hz:.0} → {spur_hz:.0} Hz), THD+N {thd_n:.1} dB, impulse {offset:+.3}, least rejection {:.1} dB at {:.0} Hz",
+            r.name, worst.1, worst.0
+        );
+        assert!(ripple <= RIPPLE_DB, "{}: ripple {ripple} dB", r.name);
+        assert!(spur <= -REJECTION_DB, "{}: spur {spur} dB", r.name);
+        assert!(thd_n <= THD_N_DB, "{}: THD+N {thd_n} dB", r.name);
+        assert!(offset.abs() <= 1.0, "{}: impulse {offset}", r.name);
+        assert!(
+            worst.1 >= REJECTION_DB,
+            "{}: {} dB at {} Hz",
+            r.name,
+            worst.1,
+            worst.0
+        );
     }
 }
 
@@ -235,8 +363,8 @@ fn converter_quality_full() {
         "| ratio | taps | worst gain deviation 20 Hz–20 kHz (dB) | worst residual, any tone (dB) | worst spur (dB) at tone → spur | THD+N 1 kHz −1 dBFS (dB) | impulse vs group delay (frames) |"
     );
     println!("|---|---:|---:|---:|---:|---:|---:|");
-    for r in &RATIOS {
-        let spec = FilterSpec::for_rates(r.source, r.dest);
+    for r in RATIOS.iter().chain(&HIGH) {
+        let (_, spec, _, _, _) = inner(r);
         let (ripple, residual, spur, tone_hz, spur_hz) = sweep_ratio(r, 61, 32_768);
         let (_, thd_n, _, _) = measure(r, 1000.0, 32_768);
         let offset = impulse_offset(r, 2000);
@@ -244,6 +372,15 @@ fn converter_quality_full() {
             "| {} | {} | {ripple:.5} | {residual:.1} | {spur:.1} at {tone_hz:.0} → {spur_hz:.0} Hz | {thd_n:.1} | {offset:+.3} |",
             r.name, spec.taps
         );
+    }
+    for r in &HIGH {
+        let rejections: Vec<String> = beyond(r)
+            .iter()
+            .map(|&hz| format!("{hz:.0} Hz: {:.1} dB", rejection(r, hz, 32_768)))
+            .collect();
+        if !rejections.is_empty() {
+            println!("{} rejection: {}", r.name, rejections.join(", "));
+        }
     }
     let down = &RATIOS[3];
     let rejections: Vec<String> = BEYOND
@@ -319,6 +456,40 @@ fn prototype(spec: FilterSpec) -> (f64, f64) {
         }
     }
     (ripple, db(stop))
+}
+
+/// The halvings' cost in a push: 64 channels, a 512-frame push at the
+/// source rate (verification 6, finding 4). A timing; not a target.
+#[test]
+#[ignore = "a benchmark; run with --release"]
+fn halving_cost() {
+    for (source, dest) in [
+        (96_000, 44_100),
+        (192_000, 48_000),
+        (192_000, 44_100),
+        (176_400, 44_100),
+    ] {
+        let channels = 64;
+        let mut d = Decimator::for_rates(source, dest, channels).unwrap();
+        let input: Vec<f32> = (0..512 * channels)
+            .map(|n| (n as f32 * 0.001).sin())
+            .collect();
+        let mut out = vec![0.0f32; 512 * channels];
+        let pushes = 2_000;
+        let start = std::time::Instant::now();
+        for _ in 0..pushes {
+            d.process(&input, &mut out);
+        }
+        let us = start.elapsed().as_secs_f64() * 1e6 / f64::from(pushes);
+        println!(
+            "{source} → {dest}: taps {:?}, {:.0} multiply-adds per source frame, {us:.1} µs per 512-frame push of 64 channels ({:.2} % of its {:.2} ms); {}",
+            d.taps(),
+            d.multiply_adds_per_frame(),
+            us / (512.0 / f64::from(source) * 1e6) * 100.0,
+            512.0 / f64::from(source) * 1e3,
+            std::hint::black_box(out[0])
+        );
+    }
 }
 
 /// The converter's cost, ns per output frame, stereo (verification 6).

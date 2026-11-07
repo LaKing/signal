@@ -34,7 +34,13 @@ fn pull(output: &mut AdapterOutput, out: &mut [f32], time: Option<u64>, total: &
 #[test]
 fn push_and_pull_allocate_nothing_on_any_path() {
     assert!(alloc_counter::is_installed());
-    for (source_rate, dest_rate) in [(48_000, 48_000), (48_000, 44_100), (44_100, 48_000)] {
+    for (source_rate, dest_rate) in [
+        (48_000, 48_000),
+        (48_000, 44_100),
+        (44_100, 48_000),
+        // A halving before the converter.
+        (192_000, 48_000),
+    ] {
         let channels = 2;
         // The source period that matches a 128-frame pull at these rates,
         // so one push per pull is the steady state.
@@ -104,6 +110,24 @@ fn push_and_pull_allocate_nothing_on_any_path() {
         assert!(input.dropped_frames() > 0, "the ring filled up");
         assert!(out.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
     }
+}
+
+/// Two halvings (192 → 44.1 kHz) in the push, pushes of any length
+/// included: nothing allocates.
+#[test]
+fn two_halvings_allocate_nothing() {
+    let config = AdapterConfig::new(8, 192_000, 44_100, 558, 128);
+    let (mut input, mut output) = clock_adapter(config).unwrap();
+    assert_eq!(input.decimator().halvings(), 2);
+    let block: Vec<f32> = (0..4_100 * 8).map(|n| (n as f32 * 0.003).sin()).collect();
+    let mut out = vec![0.0f32; 128 * 8];
+    let mut total = Counts::default();
+    for n in 0..400usize {
+        let frames = [558, 1, 3, 557, 4_100][n % 5];
+        push(&mut input, &block[..frames * 8], None, &mut total);
+        pull(&mut output, &mut out, None, &mut total);
+    }
+    assert_eq!(total, Counts::default());
 }
 
 /// The two ends on two threads, as in a route: nothing allocates on

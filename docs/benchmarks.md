@@ -1103,6 +1103,24 @@ Sine fits at the exact fixed-point output frequency (the residual is everything 
 - **Group delay.** The filter is symmetric about the read position: an impulse comes out where the read position passes it (±0.1 frame). Its lookahead, half the taps (48 or 80 source frames), is part of F*.
 - Equal nominal rates at 44.1 kHz keep the 20 kHz passband, so their transition (20–22.05 kHz) and taps (160) are the 44.1 ↔ 48 kHz ones; at 48 kHz and above, 96.
 
+**High rates** (review 2026-11-06, finding 4; `high_rates_meet_the_targets` and the full sweep). The review measured, through the converter alone, 86.3 dB of rejection at 96 → 44.1 kHz, 46.9 dB at 192 → 44.1, 84.2 dB at 192 → 48, and −0.031 dB at 20 kHz at 192 → 44.1: 256 taps cannot reach the targets there. Since 2026-11-07 the source rate is halved first where the converter would need more (ADR 0052 §4, `decimator.rs`). Measurement, 2026-11-07, the full sweep (61 tones, 32 768 output frames each), the halvings and the converter together:
+
+| Ratio | Halvings (taps) | Converter taps | Worst gain deviation to 20 kHz (dB) | Worst spur (dB) | THD+N 1 kHz (dB) | Impulse vs delay (frames) | Least rejection beyond the lower Nyquist (dB) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 96 → 44.1 kHz | 1 (117) | 160 | 0.00006 | −121.1 | −129.3 | −0.024 | 107.4 at 22.1 kHz |
+| 96 → 48 kHz | 0 | 176 | 0.00001 | −132.6 | −133.5 | +0.072 | 112.7 at 24.05 kHz |
+| 88.2 → 44.1 kHz | 1 (307) | 160 | 0.00007 | −148.0 | −133.6 | −0.056 | 122.1 at 23.05 kHz |
+| 192 → 44.1 kHz | 2 (27, 117) | 160 | 0.00011 | −121.0 | −128.8 | +0.106 | 107.4 at 22.1 kHz |
+| 192 → 48 kHz | 1 (29) | 176 | 0.00002 | −135.1 | −135.0 | −0.097 | 112.7 at 24.05 kHz |
+| 192 → 48 kHz + 100 ppm | 1 (29) | 176 | 0.00002 | −135.5 | −132.8 | −0.091 | 112.7 at 24.05 kHz |
+| 176.4 → 48 kHz | 1 (31) | 160 | 0.00004 | −134.4 | −133.5 | −0.040 | 111.7 at 24.05 kHz |
+| 176.4 → 44.1 kHz | 2 (29, 307) | 160 | 0.00007 | −148.5 | −132.9 | +0.100 | 116.2 at 74 kHz |
+| 44.1 → 96 kHz | 0 | 160 | 0.00003 | −122.0 | −131.6 | +0.006 | (images: in the spur) |
+| 48 → 192 kHz | 0 | 160 | 0.00003 | −142.5 | −135.3 | +0.001 | (images: in the spur) |
+| 44.1 → 192 kHz | 0 | 160 | 0.00003 | −122.0 | −131.5 | +0.003 | (images: in the spur) |
+
+Rejection was measured at the lower Nyquist frequency + 50 Hz and + 1 kHz, 30, 50, 70, 74, 80 and 95 kHz (those below the source's Nyquist frequency), which fold into the output band at each halving. **The halvings' cost** (`halving_cost`, a timing on the M5 Max, release, 64 channels, a 512-frame push): 96 → 44.1 kHz 119 µs (2.2 % of the push's 5.33 ms), 192 → 48 kHz 37 µs (1.4 %), 192 → 44.1 kHz 87 µs (3.3 %), 176.4 → 44.1 kHz 177 µs (6.1 %); summed in eight lanes, the plain sum was about three times slower. They run on the producing side: the engine's callback for an output, the device's for an input.
+
 ### The drift loop (verifications 1 and 3)
 
 All 28 runs (4 period pairs × 7 clock errors, 300 simulated seconds each, track statistics from 60 s after the switch to track): **zero slips, zero drops.**

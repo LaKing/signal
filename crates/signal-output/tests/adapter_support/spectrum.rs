@@ -6,7 +6,7 @@
 use std::f64::consts::TAU;
 
 use realfft::RealFftPlanner;
-use signal_output::adapter::{FilterSpec, ONE, Resampler};
+use signal_output::adapter::{Decimator, FilterSpec, ONE, Resampler};
 
 /// Runs the converter at a fixed `step` (source frames per output frame,
 /// rounded to 32.32 as the adapter does) from source position `start`, over
@@ -37,6 +37,59 @@ pub fn convert(
         position = position.wrapping_add(step_fixed);
     }
     (out, step_fixed as f64 / ONE as f64)
+}
+
+/// A conversion as the adapter makes it: the halvings ([`Decimator`]),
+/// then the converter.
+pub struct Staged {
+    /// The output.
+    pub out: Vec<f32>,
+    /// The step the converter used, in its own (halved) source frames.
+    pub step: f64,
+    /// The converter's filter.
+    pub spec: FilterSpec,
+    /// Source frames per converter frame: 2^halvings.
+    pub scale: f64,
+    /// The halvings' delay in source frames.
+    pub delay: f64,
+}
+
+/// Converts `input` (at `source`) to `dest` as the adapter does, at a
+/// fixed `step` in source frames per output frame, from converter position
+/// `start`, for `frames` output frames.
+pub fn convert_staged(
+    source: u32,
+    dest: u32,
+    input: &[f32],
+    step: f64,
+    start: f64,
+    frames: usize,
+) -> Staged {
+    let mut decimator = Decimator::for_rates(source, dest, 1).expect("a staging");
+    let scale = f64::from(1u32 << decimator.halvings());
+    let mut halved = vec![0.0f32; input.len()];
+    let made = decimator.process(input, &mut halved);
+    halved.truncate(made);
+    let spec = FilterSpec::for_rates(decimator.rate_out(), dest);
+    let (out, step) = convert(spec, &halved, step / scale, start, frames);
+    Staged {
+        out,
+        step,
+        spec,
+        scale,
+        delay: decimator.delay_frames(),
+    }
+}
+
+/// The source frames [`convert_staged`] needs for `frames` output frames
+/// from `start` at `step` (source frames per output frame).
+pub fn staged_len(source: u32, dest: u32, step: f64, start: f64, frames: usize) -> usize {
+    let decimator = Decimator::for_rates(source, dest, 1).expect("a staging");
+    let scale = f64::from(1u32 << decimator.halvings());
+    let spec = FilterSpec::for_rates(decimator.rate_out(), dest);
+    ((start + frames as f64 * step / scale + spec.taps as f64 + 8.0) * scale
+        + decimator.delay_frames()) as usize
+        + 8
 }
 
 /// A tone of `amplitude` at `cycles` per source frame, `len` frames, as

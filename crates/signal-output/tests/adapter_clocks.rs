@@ -91,6 +91,25 @@ fn every_pair_locks_and_tracks() {
     }
 }
 
+/// The same at source rates the adapter halves first (review 2026-11-06,
+/// finding 4): a 192 or 96 kHz producer into 48 or 44.1 kHz, the loop on
+/// the halved stream, 12 s each.
+#[test]
+fn halved_sources_lock_and_track() {
+    for (sp, dp, sr, dr) in [
+        (512, 128, 192_000, 48_000),
+        (512, 441, 192_000, 44_100),
+        (256, 128, 96_000, 44_100),
+    ] {
+        for epsilon in [0.0, 100.0, -300.0] {
+            let mut s = Scenario::new(sr, dr, sp, dp);
+            s.epsilon_ppm = epsilon;
+            s.seconds = 12.0;
+            converges(&s, 0.0);
+        }
+    }
+}
+
 /// Verification 1 and 3, full: every pair at every ε, 300 s each, track
 /// statistics from 60 s after lock.
 #[test]

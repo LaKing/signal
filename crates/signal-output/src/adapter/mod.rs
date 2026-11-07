@@ -6,7 +6,10 @@
 //!
 //! - **Ring.** [`AdapterInput::push`] puts frames into a lock-free `rtrb`
 //!   ring at the source's rate; a full ring drops and counts them, never
-//!   blocks. Each push also leaves a **mark**: the frames pushed so far and
+//!   blocks. A source rate the converter cannot meet ADR 0052 §4's targets
+//!   from within [`MAX_TAPS`] is halved first ([`Decimator`]): the ring
+//!   and everything after it count frames at the halved rate. Each push
+//!   also leaves a **mark**: the frames pushed so far and
 //!   the push's host time, if the caller has one.
 //! - **Converter.** [`AdapterOutput::pull`] makes exactly the frames its
 //!   caller must deliver, reading the ring through a polyphase
@@ -51,7 +54,8 @@
 //! tables, crossfade gains) is allocated by [`clock_adapter`] on the
 //! control thread; [`AdapterInput::push`] and [`AdapterOutput::pull`]
 //! allocate, lock and block nowhere, and their work is bounded:
-//! `push` copies at most the ring's free space; `pull` makes at most
+//! `push` copies at most the ring's free space (a high source rate first
+//! halved by the [`Decimator`]'s fixed filters); `pull` makes at most
 //! `max_pull` frames per piece (a longer buffer runs in pieces), each frame
 //! from at most two read heads (one, but two during a crossfade), each head
 //! `taps` multiply-adds for its coefficients plus `taps × channels` for the
@@ -60,10 +64,12 @@
 //! (`channels × 2 × capacity` stores).
 //! [`AdapterOutput::worst_case_multiply_adds`] gives the bound.
 
+mod decimator;
 mod drift;
 mod resampler;
 pub mod sinc;
 
+pub use decimator::{Decimator, MAX_HALVINGS, STAGE_ATTENUATION_DB, staging};
 pub use drift::{DriftLoop, LoopMode, LoopParams, PPM};
 pub use resampler::{ONE, Resampler, frame_of, frames_between};
 pub use sinc::{FilterSpec, MAX_TAPS, PHASES, SincTable};
@@ -129,6 +135,9 @@ pub const SUSPECT_SECONDS: f64 = 10.0;
 /// clamp only now and then, slipping every few seconds instead. A device
 /// within reach never slips once locked, nor while it locks.
 pub const SUSPECT_SLIPS: usize = 3;
+
+/// The frames the decimator delivers per piece of a push.
+const STAGED_FRAMES: usize = 512;
 
 /// The most channels a splice's alignment mixes into its reference: the
 /// search's cost does not grow with the channel count.
@@ -210,6 +219,9 @@ pub enum AdapterError {
     Shape,
     /// A jitter margin or loop constant negative or not finite.
     Loop,
+    /// Rates no staging converts within ADR 0052 §4's targets
+    /// ([`staging`]).
+    Ratio,
 }
 
 impl std::fmt::Display for AdapterError {
@@ -221,6 +233,10 @@ impl std::fmt::Display for AdapterError {
             AdapterError::Loop => write!(
                 f,
                 "a clock adapter's jitter margin and loop constants must be finite and non-negative"
+            ),
+            AdapterError::Ratio => write!(
+                f,
+                "a clock adapter converts these rates only with a filter longer than it allows (ADR 0052 §4); halving the source rate does not reach them"
             ),
             AdapterError::Shape => write!(
                 f,
@@ -250,6 +266,10 @@ pub struct AdapterInput {
     ring: rtrb::Producer<f32>,
     marks: rtrb::Producer<Mark>,
     channels: usize,
+    /// The halvings before the ring (none for most rates).
+    decimator: Decimator,
+    /// What the decimator delivers, [`STAGED_FRAMES`] at a time.
+    staged: Vec<f32>,
     pushed: u32,
     dropped_frames: u64,
     dropped_marks: u64,
@@ -260,17 +280,25 @@ impl AdapterInput {
     /// with the push's host time in nanoseconds if there is one. What does
     /// not fit is dropped and counted; returns the frames taken.
     /// Real-time safe: copies, never blocks.
+    ///
+    /// With a source rate the adapter halves ([`Decimator`]), the frames
+    /// pass its stages first, and what it counts (taken, dropped, the
+    /// marks) is frames at the halved rate.
     pub fn push(&mut self, interleaved: &[f32], time_ns: Option<u64>) -> usize {
         let channels = self.channels;
-        let frames = interleaved.len() / channels;
-        let room = self.ring.slots() / channels;
-        let taken = frames.min(room);
-        let samples = interleaved.get(..taken * channels).unwrap_or(&[]);
-        if self.ring.push_entire_slice(samples).is_err() {
-            self.dropped_frames += frames as u64;
-            return 0;
-        }
-        self.dropped_frames += (frames - taken) as u64;
+        let taken = if self.decimator.halvings() == 0 {
+            self.push_ring(interleaved)
+        } else {
+            let chunk = STAGED_FRAMES << self.decimator.halvings();
+            let mut taken = 0;
+            for piece in interleaved.chunks(chunk * channels) {
+                let made = self.decimator.process(piece, &mut self.staged);
+                let staged = std::mem::take(&mut self.staged);
+                taken += self.push_ring(staged.get(..made * channels).unwrap_or(&[]));
+                self.staged = staged;
+            }
+            taken
+        };
         self.pushed = self.pushed.wrapping_add(taken as u32);
         let mark = Mark {
             pushed: self.pushed,
@@ -281,6 +309,27 @@ impl AdapterInput {
             self.dropped_marks += 1;
         }
         taken
+    }
+
+    /// Puts interleaved frames into the ring, as many as fit; counts the
+    /// rest as dropped. Returns the frames taken.
+    fn push_ring(&mut self, interleaved: &[f32]) -> usize {
+        let channels = self.channels;
+        let frames = interleaved.len() / channels;
+        let room = self.ring.slots() / channels;
+        let taken = frames.min(room);
+        let samples = interleaved.get(..taken * channels).unwrap_or(&[]);
+        if self.ring.push_entire_slice(samples).is_err() {
+            self.dropped_frames += frames as u64;
+            return 0;
+        }
+        self.dropped_frames += (frames - taken) as u64;
+        taken
+    }
+
+    /// The halvings before the ring.
+    pub fn decimator(&self) -> &Decimator {
+        &self.decimator
     }
 
     /// Frames dropped because the ring was full.
@@ -368,7 +417,14 @@ struct Crossfade {
 /// The pulling end of a clock adapter, where the converter runs.
 #[derive(Debug)]
 pub struct AdapterOutput {
-    config: AdapterConfig,
+    /// The configuration the converter sees: the source rate and period
+    /// after the halvings.
+    inner: AdapterConfig,
+    /// The configuration as given.
+    outer: AdapterConfig,
+    /// The halvings, and their delay in source frames.
+    halvings: u32,
+    staged_delay: f64,
     ring: rtrb::Consumer<f32>,
     marks: rtrb::Consumer<Mark>,
     last_mark: Option<Mark>,
@@ -446,6 +502,17 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
     {
         return Err(AdapterError::Shape);
     }
+    let decimator = Decimator::for_rates(config.source_rate, config.dest_rate, config.channels)
+        .ok_or(AdapterError::Ratio)?;
+    let outer = config;
+    let halvings = decimator.halvings();
+    let staged_delay = decimator.delay_frames();
+    let config = AdapterConfig {
+        source_rate: decimator.rate_out(),
+        source_period: config.source_period.div_ceil(1 << halvings),
+        ..config
+    };
+    let step = config.nominal_step();
     // Every constant the callbacks clamp with must be finite and
     // non-negative (`f64::clamp` panics on NaN or reversed bounds).
     let p = &config.loop_params;
@@ -495,9 +562,21 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         pushed: 0,
         dropped_frames: 0,
         dropped_marks: 0,
+        staged: vec![
+            0.0;
+            if halvings == 0 {
+                0
+            } else {
+                STAGED_FRAMES * channels
+            }
+        ],
+        decimator,
     };
     let output = AdapterOutput {
-        config,
+        inner: config,
+        outer,
+        halvings,
+        staged_delay,
         ring: ring_out,
         marks: marks_out,
         last_mark: None,
@@ -580,9 +659,9 @@ impl AdapterOutput {
     /// frames, converted from the ring; `time_ns` is this callback's host
     /// time, if there is one. Real-time safe (module docs).
     pub fn pull(&mut self, out: &mut [f32], time_ns: Option<u64>) {
-        let channels = self.config.channels;
+        let channels = self.inner.channels;
         out.fill(0.0);
-        let piece = self.config.max_pull * channels;
+        let piece = self.inner.max_pull * channels;
         let mut offset_frames = 0u64;
         for chunk in out.chunks_mut(piece) {
             let time = time_ns.map(|t| {
@@ -596,9 +675,15 @@ impl AdapterOutput {
         }
     }
 
-    /// The configuration.
+    /// The configuration as given.
     pub fn config(&self) -> &AdapterConfig {
-        &self.config
+        &self.outer
+    }
+
+    /// The halvings before the converter ([`Decimator`]): the converter
+    /// reads `source_rate / 2^halvings`.
+    pub fn halvings(&self) -> u32 {
+        self.halvings
     }
 
     /// The converter's filter.
@@ -612,17 +697,19 @@ impl AdapterOutput {
     /// push to its read, and is pushed on average half a period after its
     /// own time. F* includes the converter's half length, its group delay;
     /// the device's own latency comes on top (ADR 0052 §3). Verified by the
-    /// marker delays of `tests/adapter_clocks.rs`.
+    /// marker delays of `tests/adapter_clocks.rs`. With halvings, at the
+    /// source's own rate, their delay included.
     pub fn latency_frames(&self) -> f64 {
-        self.target - self.config.source_period as f64 / 2.0
+        (self.target - self.inner.source_period as f64 / 2.0) * f64::from(1u32 << self.halvings)
+            + self.staged_delay
     }
 
     /// The most multiply-adds one pull piece can take: two heads (a
     /// crossfade) over `max_pull` frames, each `taps × (1 + channels)`,
     /// plus a splice's alignment ([`align_multiply_adds`](AdapterOutput::align_multiply_adds)).
     pub fn worst_case_multiply_adds(&self) -> usize {
-        let channels = self.config.channels;
-        2 * self.config.max_pull * self.converter.taps() * (1 + channels)
+        let channels = self.inner.channels;
+        2 * self.inner.max_pull * self.converter.taps() * (1 + channels)
             + self.align_multiply_adds()
     }
 
@@ -633,7 +720,7 @@ impl AdapterOutput {
     pub fn align_multiply_adds(&self) -> usize {
         let splice = self.splice_frames;
         let s = coarse_step(splice, splice);
-        3 * splice * self.config.channels.min(ALIGN_CHANNELS)
+        3 * splice * self.inner.channels.min(ALIGN_CHANNELS)
             + 3 * ALIGN_COARSE_BUDGET
             + 3 * (2 * s - 1) * splice
             + 3 * splice
@@ -675,7 +762,7 @@ impl AdapterOutput {
 
     /// Frames waiting in the ring.
     fn ring_frames(&self) -> usize {
-        self.ring.slots() / self.config.channels
+        self.ring.slots() / self.inner.channels
     }
 
     /// The index one past the last frame available (history and ring).
@@ -702,7 +789,7 @@ impl AdapterOutput {
         }
         let pushed = frames_between(mark.pushed, frame_of(self.position)) as f64
             - (self.position as u32) as f64 / ONE as f64;
-        Some(pushed + f64::from(self.config.source_rate) * since - f64::from(mark.frames) / 2.0)
+        Some(pushed + f64::from(self.inner.source_rate) * since - f64::from(mark.frames) / 2.0)
     }
 
     /// Moves ring frames into the history up to index `until` (or as many
@@ -713,7 +800,7 @@ impl AdapterOutput {
             return;
         }
         let frames = (wanted as usize).min(self.ring_frames());
-        let samples = frames * self.config.channels;
+        let samples = frames * self.inner.channels;
         if let Ok(chunk) = self.ring.read_chunk(samples) {
             let (first, second) = chunk.as_slices();
             self.converter.write_split(first, second);
@@ -724,7 +811,7 @@ impl AdapterOutput {
     /// Discards up to `frames` ring frames; returns how many went.
     fn discard(&mut self, frames: usize) -> usize {
         let frames = frames.min(self.ring_frames());
-        match self.ring.read_chunk(frames * self.config.channels) {
+        match self.ring.read_chunk(frames * self.inner.channels) {
             Ok(chunk) => {
                 chunk.commit_all();
                 frames
@@ -776,7 +863,7 @@ impl AdapterOutput {
         if self.fade_wait > 0 || self.suspect {
             self.fade.start_out(0);
         } else {
-            self.fade.start_in(fade_frames(self.config.dest_rate));
+            self.fade.start_in(fade_frames(self.inner.dest_rate));
         }
         self.state = AdapterState::Locking;
         self.starts += 1;
@@ -914,7 +1001,7 @@ impl AdapterOutput {
             return false;
         };
         let since = (i128::from(now) - i128::from(then)) as f64 * 1e-9;
-        let period = self.config.source_period as f64 / f64::from(self.config.source_rate);
+        let period = self.inner.source_period as f64 / f64::from(self.inner.source_rate);
         since > STOP_PERIODS * period + self.jitter
     }
 
@@ -923,7 +1010,7 @@ impl AdapterOutput {
         let wider = (self.jitter + JITTER_STEP_SECONDS).min(MAX_JITTER_SECONDS);
         if wider > self.jitter {
             self.jitter = wider;
-            let target = self.config.target_for(wider);
+            let target = self.inner.target_for(wider);
             self.drift.shift(self.target - target);
             self.target = target;
         }
@@ -969,7 +1056,7 @@ impl AdapterOutput {
         // A splice starts while J's worth of frames is still left beyond
         // this pull, so the old head has them for its crossfade; in the
         // steady state the margin is half a source period more than J.
-        let margin = (self.jitter * f64::from(self.config.dest_rate)).ceil() as u64;
+        let margin = (self.jitter * f64::from(self.inner.dest_rate)).ceil() as u64;
         let lacking = (frames as u64 + margin).saturating_sub(serves);
         let short = lacking as f64 * step_frames + 1.0;
         // A crossfade under way finishes first, unless this pull would run
@@ -1042,7 +1129,7 @@ impl AdapterOutput {
         self.take_until(until);
         let written = self.converter.written();
 
-        let channels = self.config.channels;
+        let channels = self.inner.channels;
         for frame_out in out.chunks_exact_mut(channels) {
             self.frame.iter_mut().for_each(|s| *s = 0.0);
             let mut main_gain = 1.0f32;
@@ -1094,7 +1181,7 @@ impl AdapterOutput {
             let (silent, rest) = out.split_at_mut((wait * channels).min(out.len()));
             silent.fill(0.0);
             if self.fade_wait == 0 {
-                self.fade.start_in(fade_frames(self.config.dest_rate));
+                self.fade.start_in(fade_frames(self.inner.dest_rate));
             }
             self.fade.apply(rest, channels);
         } else {
@@ -1114,7 +1201,7 @@ impl AdapterOutput {
             if self.suspect && locked && !self.stopping {
                 // Locked again: back in.
                 self.suspect = false;
-                self.fade.start_in(fade_frames(self.config.dest_rate));
+                self.fade.start_in(fade_frames(self.inner.dest_rate));
             } else if !self.suspect
                 && (self.clamped_total >= SUSPECT_SECONDS
                     || self.clock - self.slip_times[0] <= SUSPECT_SECONDS)
@@ -1166,7 +1253,7 @@ impl AdapterOutput {
         } else {
             self.far_for = 0.0;
         }
-        let period = self.config.dest_period as f64 * self.frame_seconds;
+        let period = self.inner.dest_period as f64 * self.frame_seconds;
         let jumped = match (self.last_pull, time_ns) {
             (Some((then, delivered)), Some(now)) => {
                 let expected = then as f64 * 1e-9 + delivered as f64 * self.frame_seconds;
