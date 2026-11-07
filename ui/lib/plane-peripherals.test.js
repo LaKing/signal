@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, absentInputBoxes, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, absentInputBoxes, keepOrder, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -407,4 +407,24 @@ test('an input device unplugged: its box hollow, "not present", its cables dashe
   const absent = absentInputBoxes(through, boxes);
   assert.deepEqual(absent.map((b) => [b.name, b.present, b.note, b.outputs.map((p) => p.name)]), [['MacBook Pro Microphone', false, 'not present', ['In 1']]]);
   assert.equal(absent[0].key, through[0].from.device);
+});
+
+test('device boxes keep their places: a rewired cable or an unplugged device moves no other box (the owner’s, 2026-11-07)', () => {
+  const box = (key) => ({ key });
+  const keys = (r) => r.boxes.map((b) => b.key);
+  // The first drawing: as given (used devices first).
+  const first = keepOrder([box('ssl'), box('mic'), box('spk'), box('dell')], []);
+  assert.deepEqual(keys(first), ['ssl', 'mic', 'spk', 'dell']);
+  // A cable now uses dell: splitBoxes would put it first; it stays.
+  const rewired = keepOrder([box('ssl'), box('dell'), box('mic'), box('spk')], first.order);
+  assert.deepEqual(keys(rewired), ['ssl', 'mic', 'spk', 'dell']);
+  // mic unplugged: gone from the list, its place remembered; back (here as a hollow box, appended), it returns there.
+  const gone = keepOrder([box('ssl'), box('spk'), box('dell')], rewired.order);
+  assert.deepEqual(keys(gone), ['ssl', 'spk', 'dell']);
+  assert.deepEqual(gone.order, ['ssl', 'mic', 'spk', 'dell']);
+  const back = keepOrder([box('ssl'), box('spk'), box('dell'), box('mic')], gone.order);
+  assert.deepEqual(keys(back), ['ssl', 'mic', 'spk', 'dell']);
+  // A new device goes after the box before it in the list given.
+  const added = keepOrder([box('ssl'), box('new'), box('mic'), box('spk'), box('dell')], back.order);
+  assert.deepEqual(keys(added), ['ssl', 'new', 'mic', 'spk', 'dell']);
 });

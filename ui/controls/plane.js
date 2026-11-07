@@ -79,7 +79,7 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { absentInputBoxes, cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes, throughCables } from '../lib/plane-peripherals.js';
+import { absentInputBoxes, cableDrop, keepOrder, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes, throughCables } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
@@ -745,6 +745,8 @@ export class SignalPlane extends HTMLElement {
     const project = `${graph?.projectId ?? `${graph?.folder ?? ''}\n${graph?.project ?? ''}`}\n${graphGeneration(graph) ?? ''}`;
     if (project !== this.placedFor) {
       this.placed.clear();
+      // Another opening orders its device boxes afresh.
+      this.boxOrder = [];
       this.placedFor = project;
       if (this.selection?.kind === 'engine') this.select(null);
     }
@@ -818,9 +820,13 @@ export class SignalPlane extends HTMLElement {
     const through = throughCables({ instances, connections, setup: this.setup, devices: this.devices, bindings });
     // An input device unplugged: its box hollow, "not present".
     const all = [...listed, ...absentInputBoxes(through, listed)];
-    // A whole box for every device (the owner's, 2026-11-01): the ones the project and the Setup use first, then the rest.
+    // A whole box for every device (the owner's, 2026-11-01): the ones the project and the Setup use first, then the rest,
+    // at the first drawing; after it every box keeps its place (the owner's, 2026-11-07: a rewired cable moved the
+    // outputs, an unplugged device's box went elsewhere), a new one after the box before it.
     const split = splitBoxes(all, { bindings, cables, through, main });
-    const boxes = [...split.full, ...split.others];
+    const kept = keepOrder([...split.full, ...split.others], this.boxOrder);
+    this.boxOrder = kept.order;
+    const boxes = kept.boxes;
     const others = [];
     this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, through, unstacked, main };
     if (!this.focused || !shown.plane.stacks.some((s) => s.name === this.focused)) this.focused = shown.plane.stacks[0]?.name ?? null;

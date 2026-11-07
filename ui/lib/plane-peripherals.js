@@ -427,7 +427,8 @@ export function captureBinding(setup, devices, role, width) {
     : list.find((d) => d.direction === 'input' && d.default);
   const channels = entry ? (entry.channels ?? []).slice(0, width) : Array.from({ length: width }, (_, i) => i + 1);
   // A named device not listed now (unplugged): bound but absent, drawn hollow with its cables dashed.
-  if (!device) return named ? { key: `absent-input:${named.name ?? ''}`, channels, present: false, name: named.name ?? 'an input' } : null;
+  // Its key is the one it had while listed, so its box keeps its place (`keepOrder`).
+  if (!device) return named ? { key: deviceKey(named), channels, present: false, name: named.name ?? 'an input' } : null;
   return { key: deviceKey(device), channels, present: true, name: device.name };
 }
 
@@ -459,6 +460,30 @@ export function throughCables({ instances = [], connections = [], setup = null, 
     }
   }
   return cables;
+}
+
+/**
+ * `boxes` in the order they were drawn before (`previous`, keys), so a
+ * device unplugged keeps its place as a hollow box and comes back to it
+ * (the owner's, 2026-11-07: "the not-present box is somewhere else
+ * entirely"). A box not drawn before goes after the one before it here.
+ * `{boxes, order}`: `order` keeps the keys of boxes gone, for their
+ * return.
+ */
+export function keepOrder(boxes, previous = []) {
+  const rank = new Map(previous.map((key, i) => [key, i]));
+  let last = -1;
+  const ranked = boxes.map((box, i) => {
+    const known = rank.get(box.key);
+    last = known ?? last + 1e-3;
+    return { box, rank: last, i };
+  });
+  ranked.sort((a, b) => a.rank - b.rank || a.i - b.i);
+  const here = new Set(boxes.map((b) => b.key));
+  const order = [...ranked.map((r) => ({ key: r.box.key, rank: r.rank })), ...previous.filter((key) => !here.has(key)).map((key) => ({ key, rank: rank.get(key) }))]
+    .sort((a, b) => a.rank - b.rank)
+    .map((r) => r.key);
+  return { boxes: ranked.map((r) => r.box), order };
 }
 
 /**
