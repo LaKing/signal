@@ -1110,10 +1110,12 @@ fn play_device(
         // C6: macOS counts no demotions for a process; sample the policy.
         demotions.sample(&scheduling.ports);
         // ADR 0052 §6: a secondary device gone is stopped, one back is
-        // rebuilt.
+        // rebuilt; an input device too (hot-plug).
         if polled.elapsed() >= SECONDARY_POLL {
             polled = Instant::now();
-            for notice in driver.poll_secondaries() {
+            let mut notices = driver.poll_secondaries();
+            notices.extend(driver.poll_captures());
+            for notice in notices {
                 eprintln!("signal: {notice}");
             }
         }

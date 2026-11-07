@@ -165,11 +165,15 @@ impl Output {
     }
 
     /// Control thread, now and then while running (ADR 0052 §6): stops a
-    /// secondary device that went away, rebuilds one that is back; what
-    /// changed, one line each.
+    /// secondary device that went away, rebuilds one that is back, and the
+    /// same for input devices (hot-plug); what changed, one line each.
     pub fn poll_secondaries(&mut self) -> Vec<String> {
         match self {
-            Output::Device(driver) => driver.poll_secondaries(),
+            Output::Device(driver) => {
+                let mut notices = driver.poll_secondaries();
+                notices.extend(driver.poll_captures());
+                notices
+            }
             Output::Null(..) => Vec::new(),
         }
     }

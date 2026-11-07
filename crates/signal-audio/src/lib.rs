@@ -52,7 +52,10 @@ mod select;
 mod stats;
 
 pub use callback::{CallbackControl, FeedControl, OutputCallback};
-pub use capture::{AdaptedSource, CaptureFeed, RingSource, SideFeed, SideSink, capture_ring};
+pub use capture::{
+    AdaptedSource, CaptureFeed, RingSource, SideFeed, SideSink, SourceSlot, SwapSource,
+    capture_ring, swap_source,
+};
 pub use config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
     fault_message, rate_moved, rate_notice, start_failure,

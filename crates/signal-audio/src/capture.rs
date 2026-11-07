@@ -249,3 +249,72 @@ impl InputSource for AdaptedSource {
         frames
     }
 }
+
+/// A capture side whose device may come and go while the run plays (ADR
+/// 0038 §8 hot-plug, the owner's AT2020): the run's [`InputSource`] stays,
+/// and the control thread hands it a new [`AdaptedSource`] when the device
+/// opens again, or none when it went away. The replaced one goes back to
+/// be dropped off the audio thread. With none it delivers nothing (the run
+/// reads 0 and counts the frames missing).
+pub struct SwapSource {
+    current: Option<Box<AdaptedSource>>,
+    incoming: Consumer<Option<Box<AdaptedSource>>>,
+    outgoing: Producer<Box<AdaptedSource>>,
+}
+
+/// The control thread's end of a [`SwapSource`].
+pub struct SourceSlot {
+    incoming: Producer<Option<Box<AdaptedSource>>>,
+    outgoing: Consumer<Box<AdaptedSource>>,
+}
+
+/// A slot and its source, empty. Control thread.
+pub fn swap_source() -> (SourceSlot, SwapSource) {
+    // A few hand-overs in flight at most: a poll sends one at a time.
+    let (tx, rx) = RingBuffer::new(4);
+    let (back_tx, back_rx) = RingBuffer::new(8);
+    (
+        SourceSlot {
+            incoming: tx,
+            outgoing: back_rx,
+        },
+        SwapSource {
+            current: None,
+            incoming: rx,
+            outgoing: back_tx,
+        },
+    )
+}
+
+impl SourceSlot {
+    /// Hands the source `source` (or none) to the audio thread; false when
+    /// the queue is full (the caller tries again at its next poll).
+    pub fn set(&mut self, source: Option<AdaptedSource>) -> bool {
+        self.collect();
+        self.incoming.push(source.map(Box::new)).is_ok()
+    }
+
+    /// Drops what the audio thread handed back.
+    pub fn collect(&mut self) {
+        while self.outgoing.pop().is_ok() {}
+    }
+}
+
+impl InputSource for SwapSource {
+    fn read(&mut self, out: &mut [f32], offset: usize) -> usize {
+        // A hand-over is taken only while the queue back has room for the
+        // source it replaces: one is never freed here.
+        while self.outgoing.slots() > 0 {
+            let Ok(next) = self.incoming.pop() else {
+                break;
+            };
+            if let Some(old) = std::mem::replace(&mut self.current, next) {
+                let _ = self.outgoing.push(old);
+            }
+        }
+        match self.current.as_mut() {
+            Some(source) => source.read(out, offset),
+            None => 0,
+        }
+    }
+}
