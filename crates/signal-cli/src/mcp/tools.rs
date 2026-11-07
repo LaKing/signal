@@ -2654,6 +2654,7 @@ fn render(context: &Context, arguments: &Value) -> Outcome {
         sample_rate: None,
         block: 256,
         threads: 0,
+        inputs: Vec::new(),
     };
     let rendered =
         render_project(&args, context.registry, context.setup).map_err(|f| refused(f.message()))?;

@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use signal_core::Registry;
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance};
 use signal_eval::Metrics;
-use signal_output::{Render, RenderError, render, render_sides};
+use signal_output::inputs::{RecordedInput, RunInput};
+use signal_output::{Render, RenderError, render_fed};
 pub(crate) use signal_project::located;
 use signal_project::provenance;
 use signal_project::{LoadError, Project};
@@ -50,6 +51,12 @@ pub(crate) struct RenderArgs {
     /// output is identical for every count.
     #[arg(long, default_value_t = 0)]
     pub(crate) threads: u32,
+    /// Feeds capture slot SLOT from a WAV file, for this render only (ADR
+    /// 0038 §9): `--input mic=take.wav`. Its rate must be the render's and
+    /// its channels the slot's; past its end the slot reads 0, as a slot
+    /// with none does. The manifest records its hash. Repeatable.
+    #[arg(long = "input", value_name = "SLOT=WAV")]
+    pub(crate) inputs: Vec<String>,
 }
 
 pub(crate) fn run(
@@ -129,15 +136,14 @@ pub(crate) fn render_project(
     // M2.7-2: GPU-backed instances on this machine's devices; dropped after
     // the engine.
     let mut gpu = Gpu::new(registry, uses_gpu(plan), project.gpu_pins(plan), setup);
+    // ADR 0038 §9: the capture slots `--input` feeds; the others read 0.
+    let (inputs, input_hashes) =
+        render_inputs(&args.inputs, plan, sample_rate, args.block as usize)?;
     let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
-    let (mut rendered, side_renders) = if others.is_empty() {
-        let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
-        (rendered, Vec::new())
-    } else {
-        render_sides(&mut engine, frames, &main, &others)
-            .map_err(|e| render_failure(&project, dir, e))?
-    };
+    let sides = (!others.is_empty()).then_some((&main, &others[..]));
+    let (mut rendered, side_renders) = render_fed(&mut engine, frames, sides, inputs)
+        .map_err(|e| render_failure(&project, dir, e))?;
     (rendered.compute_devices, rendered.placement) = gpu.record();
     let gpu_warnings = gpu.warnings();
     let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
@@ -149,6 +155,7 @@ pub(crate) fn render_project(
         .extend(project.include_file_hashes());
     provenance.included_projects = project.included_projects();
     provenance.library_interface_hashes = project.library_interface_hashes();
+    provenance.render_input_hashes = input_hashes;
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
     // ADR 0038 §9: the other play sides, each in its own WAV.
@@ -218,6 +225,98 @@ pub(crate) fn render_project(
         text,
         notes,
     })
+}
+
+/// The capture slots `specs` (`SLOT=WAV`) feed: one [`RunInput`] each, the
+/// WAV's samples as f32, and the FNV-1a 64 of those words by slot. A slot
+/// is a source of `plan` by its name (`mic`, `band.mic`) or address; its
+/// WAV must be at `rate` with the slot's channels.
+fn render_inputs(
+    specs: &[String],
+    plan: &signal_graph::ExecutionPlan,
+    rate: u32,
+    block: usize,
+) -> Result<(Vec<RunInput>, std::collections::BTreeMap<String, String>), Failure> {
+    let sources = signal_project::session::plan_sources(plan);
+    let mut inputs = Vec::new();
+    let mut hashes = std::collections::BTreeMap::new();
+    for spec in specs {
+        let (slot, file) = spec
+            .split_once('=')
+            .filter(|(slot, file)| !slot.is_empty() && !file.is_empty())
+            .ok_or_else(|| Failure::Usage(format!("--input {spec}: give SLOT=WAV")))?;
+        let found = sources.iter().find(|(address, _)| {
+            signal_project::session::slot_name(address) == slot || address.to_string() == slot
+        });
+        let Some((address, width)) = found else {
+            let names: Vec<String> = sources
+                .iter()
+                .map(|(a, _)| signal_project::session::slot_name(a))
+                .collect();
+            return Err(Failure::Usage(format!(
+                "--input {spec}: `{slot}` is no capture slot of the project{}",
+                if names.is_empty() {
+                    " (it has none)".to_owned()
+                } else {
+                    format!(" ({})", names.join(", "))
+                }
+            )));
+        };
+        let slot = signal_project::session::slot_name(address);
+        if hashes.contains_key(&slot) {
+            return Err(Failure::Usage(format!("--input: `{slot}` is fed twice")));
+        }
+        let words = read_wav(Path::new(file), rate, *width)
+            .map_err(|e| Failure::Usage(format!("--input {spec}: {e}")))?;
+        hashes.insert(slot, format!("{:016x}", signal_core::fnv1a64_words(&words)));
+        let (input, _) = RunInput::new(
+            address.clone(),
+            *width,
+            Box::new(RecordedInput::new(words, *width)),
+            block,
+            None,
+        );
+        inputs.push(input);
+    }
+    Ok((inputs, hashes))
+}
+
+/// The samples of WAV `path` as f32, interleaved: float WAVs as stored,
+/// integer ones scaled to ±1. Its rate must be `rate` and its channels
+/// `channels`.
+fn read_wav(path: &Path, rate: u32, channels: usize) -> Result<Vec<f32>, String> {
+    let mut reader =
+        hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let spec = reader.spec();
+    if spec.sample_rate != rate {
+        return Err(format!(
+            "{} is at {} Hz; the render runs at {rate} Hz",
+            path.display(),
+            spec.sample_rate
+        ));
+    }
+    if usize::from(spec.channels) != channels {
+        return Err(format!(
+            "{} has {} channels; the slot has {channels}",
+            path.display(),
+            spec.channels
+        ));
+    }
+    let read = |e: hound::Error| format!("{}: {e}", path.display());
+    match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<f32>, _>>()
+            .map_err(read),
+        hound::SampleFormat::Int => {
+            let scale = 1.0 / (1u64 << (spec.bits_per_sample.clamp(1, 32) - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|s| s as f32 * scale))
+                .collect::<Result<Vec<f32>, _>>()
+                .map_err(read)
+        }
+    }
 }
 
 /// Why [`write_artifacts`] failed.

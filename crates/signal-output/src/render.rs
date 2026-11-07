@@ -169,6 +169,20 @@ impl SideRender {
     }
 }
 
+/// [`render`] (`sides: None`) or [`render_sides`], `inputs` feeding the
+/// sources (`signal render --input`, ADR 0038 §9); a source none serves
+/// reads 0.
+pub fn render_fed(
+    engine: &mut Engine,
+    frames: u64,
+    sides: Option<(&InstanceAddress, &[InstanceAddress])>,
+    inputs: Vec<RunInput>,
+) -> Result<(Render, Vec<SideRender>), RenderError> {
+    let block = engine.config().block_capacity;
+    render_inner(engine, frames, block, |_| Ok(None), &[], &[], sides, inputs)
+        .map(|(render, _, sides)| (render, sides))
+}
+
 /// [`render`] of a project with several play sides (ADR 0038 §9): `main`
 /// is the sink `audio.wav` records (the [`Render`]), and each of `others`
 /// is recorded beside it, in that order. The engine runs as for

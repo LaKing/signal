@@ -34,6 +34,11 @@ pub struct Provenance {
     pub included_projects: Vec<IncludedProject>,
     /// A hash of `Cargo.lock`.
     pub cargo_lock_hash: String,
+    /// FNV-1a 64 of each input fed to a capture side (`signal render
+    /// --input`, ADR 0038 §9: the words its source read, f32, interleaved),
+    /// by slot. Absent when there are none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub render_input_hashes: BTreeMap<String, String>,
 }
 
 /// A project included as content (ADR 0035 §13).

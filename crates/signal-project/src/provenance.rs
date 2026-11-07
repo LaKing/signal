@@ -43,6 +43,8 @@ pub fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
         included_projects: Vec::new(),
         cargo_lock_hash: fs::read(source.join("Cargo.lock"))
             .map_or_else(|_| UNKNOWN.to_owned(), |bytes| hex(fnv1a64(&bytes))),
+        // The caller's: what `signal render --input` fed.
+        render_input_hashes: Default::default(),
     }
 }
 

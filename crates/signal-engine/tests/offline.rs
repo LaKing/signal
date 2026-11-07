@@ -30,6 +30,7 @@ fn provenance() -> Provenance {
         library_interface_hashes: Default::default(),
         included_projects: Vec::new(),
         cargo_lock_hash: "fedcba9876543210".to_owned(),
+        render_input_hashes: Default::default(),
     }
 }
 

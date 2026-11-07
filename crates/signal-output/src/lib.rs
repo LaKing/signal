@@ -64,7 +64,7 @@ pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use render::{
     Render, SideRender, render, render_blocks, render_blocks_tapped, render_blocks_tapped_main,
-    render_sides, render_with,
+    render_fed, render_sides, render_with,
 };
 pub use routing::{
     CaptureSide, Captured, Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedCapture,
