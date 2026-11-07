@@ -327,3 +327,28 @@ fn a_render_file_missing_misplaced_or_on_a_play_side_is_refused() {
         assert!(stderr.contains(said), "{said}: {stderr}");
     }
 }
+
+/// A render file reached through a linked folder is refused: no file
+/// outside the project is read by a render.
+#[test]
+fn a_render_file_through_a_link_is_refused() {
+    let dir = with_fixture("linked-fixture", &[0.5; 10]);
+    let outside = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("render-input/outside");
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    fs::rename(dir.join("fixtures/voice.wav"), outside.join("voice.wav")).unwrap();
+    fs::remove_dir_all(dir.join("fixtures")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("fixtures")).unwrap();
+    let out = dir.join("out");
+    let run = signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--frames",
+        "100",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("through a link"), "{stderr}");
+}

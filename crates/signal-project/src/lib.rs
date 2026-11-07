@@ -1835,6 +1835,28 @@ pub fn render_paths(text: &str) -> Vec<String> {
     paths.into_iter().collect()
 }
 
+/// A capture slot's `render` file (ADR 0038 §3) `relative` in the project
+/// folder `dir`, reached through no link: every component, folders
+/// included, is checked, so no file outside the folder is read (packed or
+/// rendered). `Err` says why: a link on the way, or not a regular file.
+pub fn render_file(dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    let mut path = dir.to_owned();
+    for part in relative.split('/') {
+        path.push(part);
+        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "`{relative}` is reached through a link; a render file lies in the project folder itself"
+            ));
+        }
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        Ok(path)
+    } else {
+        Err(format!("`{relative}` is not a regular file"))
+    }
+}
+
 /// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or
 /// ends in `.signal`; every other value is a module reference.
 pub(crate) fn is_project_path(load: &str) -> bool {

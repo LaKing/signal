@@ -158,10 +158,11 @@ pub(crate) fn render_project(
         else {
             continue;
         };
-        let path = load_dir.join(file);
         let invalid = |message: String| {
             Failure::Invalid(located(dir, vec![project.instances_error(message)]))
         };
+        let path = signal_project::render_file(load_dir, file)
+            .map_err(|e| invalid(format!("{name}: render file `{file}`: {e}")))?;
         let bytes = std::fs::read(&path)
             .map_err(|e| invalid(format!("{name}: render file `{file}`: {e}")))?;
         let words = read_wav(&path, sample_rate, width)

@@ -310,6 +310,56 @@ fn packing_needs_project_toml_and_refuses_links() {
     }
 }
 
+/// ADR 0038 §3: a capture slot's `render` WAV is packed wherever in the
+/// folder it lies; one reached through a linked folder (or itself a link)
+/// is refused, so no file outside the project is read.
+#[cfg(unix)]
+#[test]
+fn a_render_file_is_packed_and_never_through_a_link() {
+    let project = |dir: &Path, render: &str| {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("project.toml"),
+            format!(
+                "schema_version = 1\n[project]\nname = \"r\"\nsample_rate = 48000\nseed = 1\n\
+                 [instances]\nmic = {{ device = {{ capture = \"mono\" }}, render = \"{render}\" }}\n\
+                 out = {{ module = \"std.audio_out\" }}\n"
+            ),
+        )
+        .unwrap();
+    };
+    let dir = base("pack-render").join("p");
+    project(&dir, "fixtures/voice.wav");
+    fs::create_dir_all(dir.join("fixtures")).unwrap();
+    fs::write(dir.join("fixtures/voice.wav"), b"RIFF").unwrap();
+    let packed = pack(&dir).unwrap();
+    let names: Vec<String> = ZipArchive::new(Cursor::new(&packed))
+        .unwrap()
+        .file_names()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        names.contains(&"fixtures/voice.wav".to_owned()),
+        "{names:?}"
+    );
+
+    // A linked parent folder pointing outside.
+    let outside = base("pack-render-outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("private.wav"), b"secret").unwrap();
+    let linked = base("pack-render-linked").join("p");
+    project(&linked, "assets/private.wav");
+    std::os::unix::fs::symlink(&outside, linked.join("assets")).unwrap();
+    assert!(
+        matches!(pack(&linked), Err(ArchiveError::Symlink(name)) if name == "assets/private.wav")
+    );
+    // The file itself a link.
+    let file_link = base("pack-render-file-link").join("p");
+    project(&file_link, "voice.wav");
+    std::os::unix::fs::symlink(outside.join("private.wav"), file_link.join("voice.wav")).unwrap();
+    assert!(matches!(pack(&file_link), Err(ArchiveError::Symlink(_))));
+}
+
 /// AC4: '..', absolute paths, symlinks and device files are refused.
 #[test]
 fn reading_accepts_only_relative_regular_files() {

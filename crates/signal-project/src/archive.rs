@@ -226,14 +226,25 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
     // in the folder it lies; one missing is left out (the render says so).
     if let Ok(text) = fs::read_to_string(dir.join(PROJECT_FILE)) {
         for relative in crate::render_paths(&text) {
-            let path = dir.join(&relative);
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                return Err(ArchiveError::Symlink(relative));
+            // Every component, folders included, as the walk above judges
+            // them: a link anywhere on the way is refused, so no file
+            // outside the folder is read.
+            let mut path = dir.to_owned();
+            let mut regular = true;
+            for part in relative.split('/') {
+                path.push(part);
+                match fs::symlink_metadata(&path) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(ArchiveError::Symlink(relative));
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        regular = false;
+                        break;
+                    }
+                }
             }
-            if meta.is_file() {
+            if regular && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
                 files.insert(relative, path);
             }
         }
