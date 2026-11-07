@@ -158,7 +158,7 @@ A direct primitive in `signal-std`, category `event`, at divisor 1. It is **one 
     - `alloc`'s parameters are **not exported**.
   - **Values:** interface parameter values and `set` values are values on the instance `synth`. They reach every voice through the exports, as for any composite.
   - **The host's wires** on the slot's ports become wires on these exports by name.
-- **The definition's name** is deterministic and cannot collide with any written module. It is `poly:<host definition>/<slot>`, for example `poly:project/synth`, or `poly:pad_rack/synth` for a slot inside the project composite `pad_rack`.
+- **The definition's name** is deterministic and cannot collide with any written module. It is `poly:<host definition>/<slot>`, for example `poly:/synth` at the project root (amended 2026-11-07, see Notes; first written `poly:project/synth`), or `poly:pad_rack/synth` for a slot inside the project composite `pad_rack`.
   - `:` and `/` are outside the module-name grammar (`[a-z][a-z0-9_]*`, with the prefixes `std.`, `lib.`, `core.`), so no file can name it.
   - N is not part of the name. Survival across a change of N is decided per primitive instance, by address and type (`semantics.md` §12), so the name does not affect it.
   - Wherever a plan dump or `describe` records a composite definition's name, this is the name it records, and test 2 compares the dumps with that one name replaced by the hand-written composite's.
@@ -434,6 +434,14 @@ The owner asked (2026-10-27): "lehet a polifóniát dinamikusan kezelni?" ("can 
 - Not yet: the parameter sends to added voices on a live growth of N (§8, phase 2).
 
 **2026-11-07, phase 1 steps 4 and 5: `lib.poly_voice`, `describe`, `projects/studio-poly`, the CPU measurement** (operator; delegated). `lib.poly_voice` is in the library (`crates/signal-lib/interfaces/poly_voice.toml`, text hash `bdc391924b112a10`, pinned, with its `CHANGELOG.md` entry under 0.4); the UI's template list (`ui/lib/slot.js`) and MCP's `slot.add` text do not offer it yet, since the UI's voices controls are phase 3's. `describe` and `graph` carry the side table, so each poly slot's entry gains `voices` (`count`, `legato`, `definition`, `voices`) without further code. `projects/studio-poly` is the studio plus a pad (eight `moog_voice` voices, `patterns/chords.toml`) on the bus's `d`, its golden added with it (`tests/golden/studio-poly`, `crates/signal-cli/tests/studio_poly.rs`; every other golden unchanged). The pad sets its voice's `volume` to −8 dB for four-note chords (decision 6). Measured (`docs/benchmarks.md`, "Polyphonic slots"): about 3.2 % of a core per voice at 48 kHz offline, twice §9's estimate. `lib.poly_voice` matching `moog_voice` gives one kind warning, `hz` (`moog_voice` exports it as control, as `lib.voice` does). Phase 1's tests 1 to 6 and 8 are covered offline as far as built; the live tests (7, 8 real time) are phase 2's.
+
+**2026-11-07, review of 8f01c59** (an independent read-only review; fixes by the operator):
+- Mono ↔ poly was not a Replace live: the content plan that filters Replaces planned the written instance alone. It now records whether the slot has voices (`slot_content_plan`); `slot_live.rs` `adding_voices_is_a_replace_and_changing_n_is_not` checks both edits, each replayed bit for bit.
+- Two slot outputs matching one content output (`map = { l = "out", r = "out" }`) share one sum chain instead of colliding.
+- A composite's export of an `each` port is an error at the export, as a host wire on it is (it vanished silently).
+- The generated name at the root is `poly:/<slot>` (not `poly:project/<slot>`, which a composite named `project` could collide with); in a composite it stays `poly:<composite>/<slot>`.
+- `voices` is a reserved key for the patch tools (Group into slot, the slot table's values) and cannot name an interface port (as `from` and `remove`).
+- Left for phase 3: `PortJson` (the interface dialog and `slot.retype`) has no `voice` field, so a role is set in the text; a retype to an auto port drops a written `voice` (ADR 0045 §6 refuses the pair anyway).
 
 ## Decisions on the questions (2026-10-27)
 The owner's answers are quoted in Hungarian, with translations. The rest are the operator's decisions, delegated, on the recommendations offered.

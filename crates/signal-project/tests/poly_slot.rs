@@ -219,7 +219,7 @@ fn the_side_table_records_the_voices() {
     let voices = slot.voices.as_ref().expect("voices");
     assert_eq!(voices.count, 4);
     assert!(!voices.legato);
-    assert_eq!(voices.definition, "poly:project/synth");
+    assert_eq!(voices.definition, "poly:/synth");
     assert_eq!(voices.voices, ["v0", "v1", "v2", "v3"]);
     let notes = slot.matches.iter().find(|m| m.port == "notes").unwrap();
     assert_eq!(notes.content, None);
@@ -413,4 +413,80 @@ fn the_role_is_on_the_resolved_port() {
         .find(|p| p.name == "hz")
         .unwrap();
     assert_eq!(hz.voice, Some(signal_project::Voice::Each));
+}
+
+/// Two slot outputs matching one content output (mono into `l` and `r`)
+/// share one sum (review of 8f01c59: they collided).
+#[test]
+fn two_outputs_of_one_content_output_share_a_sum() {
+    let text = r#"schema_version = 1
+[project]
+name = "host"
+[instances]
+ed = { module = "std.edge" }
+synth = { slot = { inputs = { notes = { shape = "events", voice = "alloc" }, hz = { kind = "frequency", voice = "each" } }, outputs = { l = "audio", r = "audio" } }, load = "tone", map = { l = "out", r = "out" }, voices = 2 }
+out = { module = "std.audio_out" }
+[wiring]
+connections = [
+  { from = "ed.rise", to = "synth.notes" },
+  { from = "synth.l", to = "out.l" },
+  { from = "synth.r", to = "out.r" },
+]
+"#;
+    let planned = planned(text, &[]);
+    let adds = planned
+        .plan
+        .instances
+        .iter()
+        .filter(|i| i.address.as_str().starts_with("/synth/sum_"))
+        .count();
+    assert_eq!(adds, 1, "one add for two voices");
+}
+
+/// A composite's export of an `each` port is an error, as a host wire on
+/// it is (review of 8f01c59: it vanished silently).
+#[test]
+fn an_export_of_an_each_port_is_an_error() {
+    let rack = format!(
+        r#"schema_version = 1
+[composite]
+name = "rack"
+[instances]
+synth = {{ slot = {INTERFACE}, load = "tone", voices = 2 }}
+[exports]
+inputs = {{ pitch = "synth.hz", notes = "synth.notes" }}
+outputs = {{ out = "synth.out" }}
+"#
+    );
+    let text = r#"schema_version = 1
+[project]
+name = "host"
+[instances]
+r = { module = "rack" }
+"#;
+    let found = match try_plan(text, &[("composites/rack.toml", &rack)]) {
+        Ok(_) => panic!("plans"),
+        Err(found) => found,
+    };
+    assert!(
+        has(
+            &found,
+            &[
+                "composites/rack.toml:",
+                "`hz` is fed by the slot's allocator",
+                "export `pitch`"
+            ]
+        ),
+        "{found:#?}"
+    );
+    // Without the export, the composite's poly slot plans, its definition
+    // named after the composite.
+    let rack = rack.replace("pitch = \"synth.hz\", ", "");
+    let planned = planned(text, &[("composites/rack.toml", &rack)]);
+    let slot = planned
+        .slots
+        .iter()
+        .find(|s| s.slot == "rack/synth")
+        .unwrap();
+    assert_eq!(slot.voices.as_ref().unwrap().definition, "poly:rack/synth");
 }

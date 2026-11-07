@@ -626,7 +626,16 @@ pub(super) fn read_slot(
         .keys()
         .into_iter()
         .filter(|k| {
-            !["slot", "load", "map", "set", "seed", "snapshot_exclude"].contains(&k.as_str())
+            ![
+                "slot",
+                "load",
+                "map",
+                "voices",
+                "set",
+                "seed",
+                "snapshot_exclude",
+            ]
+            .contains(&k.as_str())
         })
         .collect();
     let exclude = tab

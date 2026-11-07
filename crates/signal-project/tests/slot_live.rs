@@ -406,6 +406,61 @@ fn loading_an_identical_copy_is_no_replace() {
     );
 }
 
+/// ADR 0044 §8: adding `voices` moves the content to `/deck/v0/…`, so it is
+/// a Replace (review of 8f01c59: the content's plan alone hid it); a change
+/// of N is an ordinary edit.
+#[test]
+fn adding_voices_is_a_replace_and_changing_n_is_not() {
+    let registry = registry();
+    // The voices sum (raw, ADR 0044 decision 6): the output's gain keeps
+    // them under the live ceiling, which a replay does not apply.
+    let quiet = |project: &Project| {
+        let mut files = project.files.clone();
+        files[0].text = files[0].text.replace(
+            "out = { module = \"std.audio_out\" }",
+            "out = { module = \"std.audio_out\", gain = 0.25 }",
+        );
+        Project::from_sources(files).unwrap()
+    };
+    let old = quiet(&host(Some("voice_a"), ""));
+    let with_voices = |n: u32| {
+        let mut files = old.files.clone();
+        files[0].text = files[0].text.replace(
+            "load = \"voice_a\"",
+            &format!("load = \"voice_a\", voices = {n}"),
+        );
+        Project::from_sources(files).unwrap()
+    };
+    let mut run = Run::start(&old, &registry, 1, 53);
+    run.play(1_000);
+    let (_, applied) = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &old,
+        with_voices(2),
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(applied.replaced, 1, "{applied}");
+    run.play(2_000);
+    run.finish(&registry, "voices-replace");
+
+    let two = with_voices(2);
+    let mut run = Run::start(&two, &registry, 1, 54);
+    run.play(1_000);
+    let (_, applied) = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &two,
+        with_voices(3),
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(applied.replaced, 0, "{applied}");
+    run.play(2_000);
+    run.finish(&registry, "voices-grow");
+}
+
 /// An interface edit that changes no match (an input nothing wires) plans
 /// byte-identically: no swap, nothing sent.
 #[test]

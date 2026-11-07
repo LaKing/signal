@@ -59,7 +59,8 @@ pub fn restorable(file: &str) -> bool {
 }
 
 /// The keys of an instance entry that are not parameter values.
-const RESERVED: [&str; 10] = [
+const RESERVED: [&str; 11] = [
+    "voices",
     "module",
     "project",
     "slot",

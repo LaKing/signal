@@ -336,7 +336,7 @@ fn port_name_problem(name: &str) -> Option<String> {
         Some(format!(
             "invalid port name `{name}`; names use a-z, 0-9, _ and start with a-z"
         ))
-    } else if name == "from" || name == "remove" {
+    } else if name == "from" || name == "remove" || name == "voices" {
         Some(format!(
             "`{name}` is reserved in a slot's interface and cannot name a port"
         ))
@@ -585,7 +585,7 @@ pub struct SlotVoices {
     pub count: u32,
     /// The allocator's legato.
     pub legato: bool,
-    /// The generated definition its instance is of (`poly:project/synth`).
+    /// The generated definition its instance is of (`poly:/synth` at the root, `poly:rack/synth` in the composite `rack`).
     pub definition: String,
     /// Each voice's address relative to the slot's (`v0`, `v1`, …); empty
     /// for an empty slot.
@@ -1147,7 +1147,20 @@ impl Project {
             ..CompositeDef::default()
         };
         let plan = signal_graph::build_plan(&root, &definitions, registry, 0).ok()?;
-        serde_json::to_string(&plan).ok()
+        // ADR 0044 §8: mono ↔ poly moves the content to other addresses, so
+        // the two never play alike (review of 8f01c59: the plan of the
+        // written instance alone did not show it).
+        let spans = if def.is_empty() {
+            Some(&self.spans.root)
+        } else {
+            self.spans.composites.get(def)
+        };
+        let poly = spans
+            .and_then(|s| s.contents.get(slot))
+            .and_then(|c| c.slot.as_ref())
+            .is_some_and(|s| s.voices.is_some());
+        let text = serde_json::to_string(&plan).ok()?;
+        Some(if poly { format!("voices {text}") } else { text })
     }
 
     /// This project with the slots `slots` unloaded: their content gone
@@ -1313,6 +1326,9 @@ impl Project {
                 for id in &self.content.ids {
                     let id = format!("{id}/");
                     r.slot = r.slot.replace(&id, "");
+                    if let Some(voices) = r.voices.as_mut() {
+                        voices.definition = voices.definition.replace(&id, "");
+                    }
                     for port in &mut r.interface.ports {
                         if let Some(from) = port.auto.as_mut().and_then(|a| a.from.port.as_mut()) {
                             *from = from.replace(&id, "");
@@ -1407,6 +1423,8 @@ fn resolve_def(
     // Per slot: its matched names (slot port → content name), and whether
     // it is loaded.
     let mut renames: BTreeMap<&str, (bool, BTreeMap<String, String>)> = BTreeMap::new();
+    // The `each` ports of the slots with voices (ADR 0044 §2).
+    let mut fed: BTreeSet<(String, String)> = BTreeSet::new();
     for (slot_name, content) in &spans.contents {
         let Some(slot) = &content.slot else {
             continue;
@@ -1436,6 +1454,15 @@ fn resolve_def(
             .voices
             .as_ref()
             .map(|(voices, span)| (*voices, span.start));
+        if poly.is_some() {
+            fed.extend(
+                interface
+                    .ports
+                    .iter()
+                    .filter(|p| p.voice == Some(Voice::Each) && p.role == Role::Input)
+                    .map(|p| (slot_name.clone(), p.name.clone())),
+            );
+        }
         if let Some((voices, _)) = poly {
             resolution.voices = Some(SlotVoices {
                 count: voices.count,
@@ -2006,7 +2033,7 @@ fn resolve_def(
     }
     out.def.connections = connections;
     out.spans.connections = connection_spans;
-    exports(&mut out, &renames, &interfaces, name);
+    exports(&mut out, &renames, &interfaces, &fed, name);
     out
 }
 
@@ -2065,6 +2092,7 @@ fn exports(
     out: &mut Resolved,
     renames: &BTreeMap<&str, (bool, BTreeMap<String, String>)>,
     interfaces: &BTreeMap<&str, &Interface>,
+    fed: &BTreeSet<(String, String)>,
     name: &str,
 ) {
     let file = out.spans.file;
@@ -2129,6 +2157,18 @@ fn exports(
                         Role::Output => "an output",
                         Role::Parameter => "a parameter",
                     }
+                ),
+            ));
+            return Some(None);
+        }
+        // ADR 0044 §2: an `each` port of a slot with voices, as a host wire.
+        if fed.contains(&(slot.to_owned(), port.to_owned())) {
+            errors.push((
+                file,
+                at,
+                format!(
+                    "{}: `{port}` is fed by the slot's allocator (`voice = \"each\"`, ADR 0044 §2); export `{export}` cannot reach it",
+                    slot_text(slot)
                 ),
             ));
             return Some(None);
@@ -2223,9 +2263,10 @@ fn content_spans_of<'s>(spans: &'s DefSpans, name: &str) -> Option<&'s ContentSp
 }
 
 /// ADR 0044 §5: the generated definition of the polyphonic slot `slot` of
-/// the definition `host` (`""`: the project root).
+/// the definition `host`: `poly:pad_rack/synth`, and `poly:/synth` at the
+/// project root (`poly:project/…` would collide with a composite named
+/// `project`, review of 8f01c59).
 fn poly_name(host: &str, slot: &str) -> String {
-    let host = if host.is_empty() { "project" } else { host };
     format!("poly:{host}/{slot}")
 }
 
@@ -2427,8 +2468,12 @@ fn generate(
                 });
             }
             (Role::Output, _) => {
+                // Several slot outputs may match one content output (mono
+                // into `l` and `r`): one sum, both exported from it.
                 host.insert(port.name.clone(), target.clone());
-                sums.push((port.name.clone(), target.clone()));
+                if !sums.iter().any(|(_, t)| t == target) {
+                    sums.push((port.name.clone(), target.clone()));
+                }
             }
             (Role::Parameter, _) => {
                 host.insert(port.name.clone(), target.clone());
