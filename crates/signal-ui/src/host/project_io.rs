@@ -9,7 +9,7 @@ use signal_project::archive;
 use signal_project::transaction;
 
 use crate::app;
-use crate::document::{Document, Ticket};
+use crate::document::{Document, Look, Ticket, look};
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
@@ -36,6 +36,47 @@ pub(super) struct SaveWait {
     ticket: Ticket,
     save_as: Option<PathBuf>,
     waiter: SaveWaiter,
+}
+
+/// A folder project's Save As packing on a thread of its own (review
+/// 2026-11-01, `control-and-realtime-cost`: it packed on the control
+/// thread): the new file, its id, and what the thread reports, the outcome
+/// and the folder's look when it packed (packed again while the folder
+/// changed under it).
+pub(super) struct FolderSave {
+    file: PathBuf,
+    id: String,
+    result: std::sync::mpsc::Receiver<(Result<(), String>, Look)>,
+    done: SaveDone,
+}
+
+/// The most times a folder Save As packs again because the folder changed
+/// while it packed.
+const FOLDER_SAVE_TRIES: usize = 4;
+
+/// Packs `dir` with project id `id` into `file`, again while its files
+/// change under the packing (at most [`FOLDER_SAVE_TRIES`] times); the
+/// outcome and the look the bytes were packed at. Its own thread.
+fn pack_folder(dir: &Path, file: &Path, id: &str) -> (Result<(), String>, Look) {
+    let mut last = look(dir);
+    for _ in 0..FOLDER_SAVE_TRIES {
+        let packed = archive::pack_identified(dir, Some(id));
+        let now = look(dir);
+        if now == last {
+            let saved = packed
+                .and_then(|bytes| archive::write_atomic(file, &bytes))
+                .map_err(|e| format!("{} was not saved: {e}", file.display()));
+            return (saved, now);
+        }
+        last = now;
+    }
+    (
+        Err(format!(
+            "{} was not saved: the project's files kept changing while it was packed",
+            file.display()
+        )),
+        last,
+    )
 }
 
 impl Host {
@@ -177,7 +218,7 @@ impl Host {
     /// Whether a save of the document is running or waiting to start (the
     /// control loop then steps rather than sleeping in a wait).
     pub fn saving(&self) -> bool {
-        self.opening.document.as_ref().is_some_and(Document::saving)
+        self.folder_save.is_some() || self.opening.document.as_ref().is_some_and(Document::saving)
     }
 
     /// Save As (app mode), waiting for it: the project written to the
@@ -233,27 +274,96 @@ impl Host {
                 });
             }
             None => {
+                if self.folder_save.is_some() {
+                    return done(Err(format!(
+                        "{} was not saved: another Save As is being written",
+                        file.display()
+                    )));
+                }
                 // The new file's own id, and the folder's machine-local
                 // state copied to it (ADR 0038 §6, amendment of
-                // 2026-11-01); the folder keeps its own.
+                // 2026-11-01); the folder keeps its own. Packed on a
+                // thread of its own; a later step opens the new file.
                 let id = crate::local_state::fresh_id(file);
-                let saved = archive::pack_identified(&self.opening.dir, Some(&id))
-                    .and_then(|bytes| archive::write_atomic(file, &bytes))
-                    .map_err(|e| format!("{} was not saved: {e}", file.display()));
-                if saved.is_ok() {
-                    self.copy_folder_state(file, &id);
-                }
-                done(saved.and_then(|()| self.open_project(file, Edits::Discard)));
+                self.start_folder_save(file.to_owned(), id, done);
             }
         }
     }
 
-    /// Waits for the document's saves to finish, and answers them.
+    /// Waits for the document's saves (and a folder's Save As) to finish,
+    /// and answers them.
     pub(super) fn finish_saves(&mut self) {
         if let Some(document) = self.opening.document.as_mut() {
             document.finish_saves();
         }
+        self.collect_folder_save(true);
         self.answer_saves();
+    }
+
+    /// Starts a folder project's Save As to `file` (id `id`) on a thread of
+    /// its own; `done` is called by the step that sees it written.
+    fn start_folder_save(&mut self, file: PathBuf, id: String, done: SaveDone) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = self.opening.dir.clone();
+        let target = file.clone();
+        let key = id.clone();
+        let spawned = std::thread::Builder::new()
+            .name("signal-save-as".to_owned())
+            .spawn(move || {
+                let _ = tx.send(pack_folder(&dir, &target, &key));
+            });
+        if let Err(error) = spawned {
+            return done(Err(format!("{} was not saved: {error}", file.display())));
+        }
+        self.folder_save = Some(FolderSave {
+            file,
+            id,
+            result: rx,
+            done,
+        });
+    }
+
+    /// A folder Save As finished (`wait`: waiting for it): its state copied
+    /// and the new file opened, unless the folder changed since it was
+    /// packed, which packs it again.
+    pub(super) fn collect_folder_save(&mut self, wait: bool) {
+        let Some(save) = self.folder_save.as_ref() else {
+            return;
+        };
+        let outcome = if wait {
+            save.result.recv().ok()
+        } else {
+            match save.result.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        let Some(save) = self.folder_save.take() else {
+            return;
+        };
+        let (saved, packed_at) = outcome.unwrap_or_else(|| {
+            (
+                Err(format!(
+                    "{} was not saved: the save ended without a result",
+                    save.file.display()
+                )),
+                Vec::new(),
+            )
+        });
+        if saved.is_ok() && look(&self.opening.dir) != packed_at {
+            // Edited after it was packed: the file must hold the edit.
+            self.start_folder_save(save.file, save.id, save.done);
+            if wait {
+                self.collect_folder_save(true);
+            }
+            return;
+        }
+        if saved.is_ok() {
+            self.copy_folder_state(&save.file, &save.id);
+        }
+        let file = save.file;
+        (save.done)(saved.and_then(|()| self.open_project(&file, Edits::Discard)));
     }
 
     /// Answers the document's saves that finished: a Save As written is the
@@ -261,6 +371,7 @@ impl Host {
     /// answered `saved` (or `not-saved`) and is the window's message, as an
     /// app message's outcome is.
     pub(super) fn answer_saves(&mut self) {
+        self.collect_folder_save(false);
         let Some(document) = self.opening.document.as_mut() else {
             return;
         };

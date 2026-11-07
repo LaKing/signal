@@ -251,6 +251,8 @@ pub struct Host {
     opening: Opening,
     /// App mode: the document's saves not yet answered, in the order asked.
     saves: Vec<SaveWait>,
+    /// A folder project's Save As packing on its thread.
+    folder_save: Option<project_io::FolderSave>,
     /// Live notes each client holds (`note`, ADR 0039), and the note-offs
     /// of those whose client went that the Controller has not taken yet.
     auditions: Auditions,
@@ -486,6 +488,7 @@ impl Host {
                 restorable: std::collections::HashSet::new(),
             },
             saves: Vec::new(),
+            folder_save: None,
             auditions: Auditions::default(),
             unsaved_pushed: None,
             graph_pushed: None,

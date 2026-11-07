@@ -60,9 +60,9 @@ pub fn project_name(path: &Path) -> String {
 }
 
 /// The working folder's files, as a cheap look: paths, sizes, change times.
-type Look = Vec<(PathBuf, u64, Option<SystemTime>)>;
+pub(crate) type Look = Vec<(PathBuf, u64, Option<SystemTime>)>;
 
-fn look(dir: &Path) -> Look {
+pub(crate) fn look(dir: &Path) -> Look {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_owned()];
     while let Some(folder) = pending.pop() {
