@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, absentInputBoxes, keepOrder, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, absentInputBoxes, captureBinding, keepOrder, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -314,9 +314,10 @@ test('an input dragged onto a role already playing is wired into it; nothing dro
     { op: 'connection.add', from: 'input.m', to: 'out.r' },
   ]);
   assert.equal(result.routes.length, 1);
-  // Shift (this project only) still binds the capture role in the Setup: devices.local.toml binds play roles only.
+  assert.equal(result.routes[0].scope, 'machine');
+  // Shift (this project only) binds the capture role in devices.local.toml.
   const shifted = cableDrop(drag, { box: sslBox.key, port: sslBox.inputs[0], channel: 1 }, { bindings, instances: ['out'], main, devices, scope: 'project' });
-  assert.equal(shifted.routes[0].scope, 'machine');
+  assert.equal(shifted.routes[0].scope, 'project');
   const nothing = cableDrop(drag, null, { bindings, main, devices });
   assert.deepEqual([nothing.ops, nothing.routes], [[], []]);
   assert.match(nothing.note, /drop an input/);
@@ -427,4 +428,17 @@ test('device boxes keep their places: a rewired cable or an unplugged device mov
   // A new device goes after the box before it in the list given.
   const added = keepOrder([box('ssl'), box('new'), box('mic'), box('spk'), box('dell')], back.order);
   assert.deepEqual(keys(added), ['ssl', 'new', 'mic', 'spk', 'dell']);
+});
+
+test('a capture role bound for this project only: devices.local.toml’s capture over the Setup’s, key by key', () => {
+  const devices = { devices: [mic(0), ssl(1, 'input')] };
+  const setup = {
+    setup: { capture: { voice: { channels: [1], device: { name: 'MacBook Pro Microphone', id: 'coreaudio:BuiltInMicrophoneDevice' } } } },
+    local: { capture: { voice: { channels: [2], device: null } } },
+  };
+  const bound = captureBinding(setup, devices, 'voice', 1);
+  assert.deepEqual([bound.key, bound.channels], ['id:coreaudio:BuiltInMicrophoneDevice', [2]]);
+  // Only in devices.local.toml.
+  const only = captureBinding({ setup: {}, local: { capture: { voice: { channels: [1], device: { name: 'MacBook Pro Microphone', id: 'coreaudio:BuiltInMicrophoneDevice' } } } } }, devices, 'voice', 1);
+  assert.equal(only.key, 'id:coreaudio:BuiltInMicrophoneDevice');
 });

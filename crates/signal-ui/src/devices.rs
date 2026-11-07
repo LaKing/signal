@@ -44,18 +44,28 @@ pub const LOCAL_FILE: &str = "devices.local.toml";
 const GITIGNORE_LINE: &str = "devices.local.toml";
 
 /// `devices.local.toml` of the project folder `dir`, as read: its
-/// `[play.<role>]` tables and the problems found (never fatal). A missing
-/// file is empty.
-pub fn read_local(dir: &Path) -> (BTreeMap<String, LocalPlay>, Vec<String>) {
+/// `[play.<role>]` and `[capture.<role>]` tables and the problems found
+/// (never fatal). A missing file is empty.
+pub fn read_local(dir: &Path) -> (Local, Vec<String>) {
     let path = dir.join(LOCAL_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (BTreeMap::new(), Vec::new());
+            return (Local::default(), Vec::new());
         }
-        Err(error) => return (BTreeMap::new(), vec![format!("{LOCAL_FILE}: {error}")]),
+        Err(error) => return (Local::default(), vec![format!("{LOCAL_FILE}: {error}")]),
     };
     parse_local(&text)
+}
+
+/// `devices.local.toml`'s tables (ADR 0038 §6): the Setup's, for this
+/// project.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Local {
+    /// `[play.<role>]`.
+    pub play: BTreeMap<String, LocalPlay>,
+    /// `[capture.<role>]` (ADR 0038 §7): its device an input.
+    pub capture: BTreeMap<String, LocalPlay>,
 }
 
 /// One role's override in `devices.local.toml`: either key may be absent
@@ -69,8 +79,8 @@ pub struct LocalPlay {
 }
 
 /// [`read_local`] of the text.
-pub fn parse_local(text: &str) -> (BTreeMap<String, LocalPlay>, Vec<String>) {
-    let mut found = BTreeMap::new();
+pub fn parse_local(text: &str) -> (Local, Vec<String>) {
+    let mut found = Local::default();
     let mut problems = Vec::new();
     let table = match text.parse::<toml::Table>() {
         Ok(table) => table,
@@ -82,17 +92,31 @@ pub fn parse_local(text: &str) -> (BTreeMap<String, LocalPlay>, Vec<String>) {
             return (found, problems);
         }
     };
-    let Some(play) = table.get("play") else {
-        return (found, problems);
+    found.play = parse_section(&table, "play", &mut problems);
+    found.capture = parse_section(&table, "capture", &mut problems);
+    (found, problems)
+}
+
+/// One section's `[<section>.<role>]` tables.
+fn parse_section(
+    table: &toml::Table,
+    section: &str,
+    problems: &mut Vec<String>,
+) -> BTreeMap<String, LocalPlay> {
+    let mut found = BTreeMap::new();
+    let Some(tables) = table.get(section) else {
+        return found;
     };
-    let Some(play) = play.as_table() else {
-        problems.push(format!("{LOCAL_FILE}: play must be tables [play.<role>]"));
-        return (found, problems);
+    let Some(tables) = tables.as_table() else {
+        problems.push(format!(
+            "{LOCAL_FILE}: {section} must be tables [{section}.<role>]"
+        ));
+        return found;
     };
-    for (role, entry) in play {
+    for (role, entry) in tables {
         let Some(entry) = entry.as_table().filter(|_| valid_role(role)) else {
             problems.push(format!(
-                "{LOCAL_FILE}: play.{role} is not a role's table; ignored"
+                "{LOCAL_FILE}: {section}.{role} is not a role's table; ignored"
             ));
             continue;
         };
@@ -104,31 +128,49 @@ pub fn parse_local(text: &str) -> (BTreeMap<String, LocalPlay>, Vec<String>) {
                         local.channels = Some(channels);
                     }
                     _ => problems.push(format!(
-                        "{LOCAL_FILE}: play.{role}.channels: device channels from 1; ignored"
+                        "{LOCAL_FILE}: {section}.{role}.channels: device channels from 1; ignored"
                     )),
                 },
                 "device" => match value.clone().try_into::<DeviceEntry>() {
                     Ok(device) if !device.name.is_empty() => local.device = Some(device),
                     _ => problems.push(format!(
-                        "{LOCAL_FILE}: play.{role}.device: a device table (name, id, signature); ignored"
+                        "{LOCAL_FILE}: {section}.{role}.device: a device table (name, id, signature); ignored"
                     )),
                 },
                 other => problems.push(format!(
-                    "{LOCAL_FILE}: play.{role}: unknown key '{other}'; ignored"
+                    "{LOCAL_FILE}: {section}.{role}: unknown key '{other}'; ignored"
                 )),
             }
         }
         found.insert(role.clone(), local);
     }
-    (found, problems)
+    found
 }
 
 /// The Setup with `devices.local.toml`'s overrides merged over its
-/// `[play.<role>]` key by key (ADR 0038 §6: local, then the Setup, then the
-/// defaults). An override of `main`'s channels replaces `output_channels`.
-pub fn effective(setup: &Setup, local: &BTreeMap<String, LocalPlay>) -> Setup {
+/// `[play.<role>]` and `[capture.<role>]` key by key (ADR 0038 §6: local,
+/// then the Setup, then the defaults). An override of `main`'s channels
+/// replaces `output_channels`.
+pub fn effective(setup: &Setup, local: &Local) -> Setup {
     let mut merged = setup.clone();
-    for (role, over) in local {
+    for (role, over) in &local.capture {
+        let base = merged.capture.get(role);
+        let entry = PlayEntry {
+            channels: over
+                .channels
+                .clone()
+                .or_else(|| base.map(|b| b.channels.clone()))
+                .unwrap_or_default(),
+            device: over
+                .device
+                .clone()
+                .or_else(|| base.and_then(|b| b.device.clone())),
+        };
+        if !entry.channels.is_empty() {
+            merged.capture.insert(role.clone(), entry);
+        }
+    }
+    for (role, over) in &local.play {
         let base = merged.play.get(role).cloned().or_else(|| {
             (role == MAIN).then(|| PlayEntry {
                 channels: setup.output_channels.clone().unwrap_or_default(),
@@ -164,10 +206,17 @@ pub fn effective(setup: &Setup, local: &BTreeMap<String, LocalPlay>) -> Setup {
 pub fn effective_setup(setup: &Setup, dir: &Path) -> (Setup, Vec<String>) {
     let (local, mut problems) = read_local(dir);
     let merged = effective(setup, &local);
-    for role in local.keys() {
+    for role in local.play.keys() {
         if !merged.play.contains_key(role) && !(role == MAIN && merged.output_channels.is_some()) {
             problems.push(format!(
                 "{LOCAL_FILE}: play.{role} has no channels here or in the Setup; ignored"
+            ));
+        }
+    }
+    for role in local.capture.keys() {
+        if !merged.capture.contains_key(role) {
+            problems.push(format!(
+                "{LOCAL_FILE}: capture.{role} has no channels here or in the Setup; ignored"
             ));
         }
     }
@@ -288,19 +337,22 @@ pub fn capture_json(setup: &Setup) -> Value {
 }
 
 /// `setup.get`'s `local` (additive): `devices.local.toml`'s overrides of
-/// the project folder `dir`, `{play: {role: {channels, device}}, problems}`.
+/// the project folder `dir`, `{play: {role: {channels, device}}, capture:
+/// {…}, problems}`.
 pub fn local_json(dir: &Path) -> Value {
     let (local, problems) = read_local(dir);
-    let play: serde_json::Map<String, Value> = local
-        .iter()
-        .map(|(role, l)| {
-            (
-                role.clone(),
-                json!({"channels": l.channels, "device": l.device}),
-            )
-        })
-        .collect();
-    json!({"file": LOCAL_FILE, "play": play, "problems": problems})
+    let tables = |section: &BTreeMap<String, LocalPlay>| -> serde_json::Map<String, Value> {
+        section
+            .iter()
+            .map(|(role, l)| {
+                (
+                    role.clone(),
+                    json!({"channels": l.channels, "device": l.device}),
+                )
+            })
+            .collect()
+    };
+    json!({"file": LOCAL_FILE, "play": tables(&local.play), "capture": tables(&local.capture), "problems": problems})
 }
 
 /// Where a binding is written.
@@ -437,10 +489,22 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
         None | Some("play") => {}
         Some("capture") => {
             if scope == Scope::Project {
-                return Err(refused(
-                    "not-built",
-                    "a capture role is bound in the Setup (scope \"machine\"); devices.local.toml binds play roles only for now",
-                ));
+                let dir =
+                    dir.ok_or_else(|| refused("no-project", "open a project folder first"))?;
+                write_local(
+                    dir,
+                    "capture",
+                    &role,
+                    Some((&channels, device.as_ref())),
+                    &mut notes,
+                )?;
+                return Ok(Routed {
+                    role,
+                    scope,
+                    setup_changed: false,
+                    local_written: true,
+                    notes,
+                });
             }
             setup
                 .capture
@@ -492,7 +556,13 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
         }
         Scope::Project => {
             let dir = dir.ok_or_else(|| refused("no-project", "open a project folder first"))?;
-            write_local(dir, &role, Some((&channels, device.as_ref())), &mut notes)?;
+            write_local(
+                dir,
+                "play",
+                &role,
+                Some((&channels, device.as_ref())),
+                &mut notes,
+            )?;
             Ok(Routed {
                 role,
                 scope,
@@ -511,7 +581,28 @@ pub fn unroute(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result
     let role = role_of(message)?;
     let scope = scope_of(message)?;
     let mut notes = Vec::new();
+    let capture = match message.get("side").and_then(Value::as_str) {
+        None | Some("play") => false,
+        Some("capture") => true,
+        Some(other) => {
+            return Err(refused(
+                "bad-value",
+                format!("side is \"play\" or \"capture\", not \"{other}\""),
+            ));
+        }
+    };
+    let section = if capture { "capture" } else { "play" };
     match scope {
+        Scope::Machine if capture => {
+            let removed = setup.capture.remove(&role).is_some();
+            Ok(Routed {
+                role,
+                scope,
+                setup_changed: removed,
+                local_written: false,
+                notes,
+            })
+        }
         Scope::Machine => {
             let removed = setup.play.remove(&role).is_some();
             let short = role == MAIN && setup.output_channels.take().is_some();
@@ -525,7 +616,7 @@ pub fn unroute(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result
         }
         Scope::Project => {
             let dir = dir.ok_or_else(|| refused("no-project", "open a project folder first"))?;
-            write_local(dir, &role, None, &mut notes)?;
+            write_local(dir, section, &role, None, &mut notes)?;
             Ok(Routed {
                 role,
                 scope,
@@ -544,12 +635,14 @@ fn same_device(a: &DeviceEntry, b: &DeviceEntry) -> bool {
     }
 }
 
-/// Writes (or, with `None`, removes) `role`'s table in `dir`'s
-/// `devices.local.toml`, keeping everything else (comments, other roles,
-/// the plane's places); atomic. The first write inside a git work tree
-/// appends the file to the project folder's `.gitignore`.
+/// Writes (or, with `None`, removes) `role`'s table of `section` (`play`
+/// or `capture`) in `dir`'s `devices.local.toml`, keeping everything else
+/// (comments, other roles, the plane's places); atomic. The first write
+/// inside a git work tree appends the file to the project folder's
+/// `.gitignore`.
 fn write_local(
     dir: &Path,
+    section: &str,
     role: &str,
     binding: Option<(&[u16], Option<&DeviceEntry>)>,
     notes: &mut Vec<String>,
@@ -570,14 +663,14 @@ fn write_local(
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| failed(format!("not valid TOML ({})", e.to_string().trim())))?;
     let play = doc
-        .entry("play")
+        .entry(section)
         .or_insert_with(|| {
             let mut table = toml_edit::Table::new();
             table.set_implicit(true);
             toml_edit::Item::Table(table)
         })
         .as_table_mut()
-        .ok_or_else(|| failed("play is not a table".to_owned()))?;
+        .ok_or_else(|| failed(format!("{section} is not a table")))?;
     match binding {
         None => {
             play.remove(role);
@@ -775,7 +868,8 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(refused.code, "not-built");
+        // The project scope writes devices.local.toml: a folder is needed.
+        assert_eq!(refused.code, "no-project");
         assert!(
             route(
                 &json!({"side": "middle", "role": "x", "channels": [1]}),
@@ -888,6 +982,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0038 §6, §7: a capture role bound for this project only:
+    /// `[capture.<role>]` in devices.local.toml, merged over the Setup's key
+    /// by key, and removed again; the Setup untouched.
+    #[test]
+    fn a_capture_route_for_this_project_writes_devices_local_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "signal-devices-local-capture-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mic = json!({"name": "AT2020USB+", "id": "coreaudio:at", "signature": ""});
+        let mut setup = Setup::default();
+        setup.capture.insert(
+            "voice".to_owned(),
+            PlayEntry {
+                channels: vec![1],
+                device: None,
+            },
+        );
+        let routed = route(
+            &json!({"side": "capture", "role": "voice", "channels": [2], "device": mic, "scope": "project"}),
+            &mut setup,
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(routed.local_written && !routed.setup_changed);
+        let text = fs::read_to_string(dir.join(LOCAL_FILE)).unwrap();
+        assert!(text.contains("[capture.voice]\nchannels = [2]\n"), "{text}");
+        let (merged, problems) = effective_setup(&setup, &dir);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(merged.capture["voice"].channels, vec![2]);
+        assert_eq!(
+            merged.capture["voice"].device.as_ref().unwrap().name,
+            "AT2020USB+"
+        );
+        assert_eq!(setup.capture["voice"].channels, vec![1]);
+        // Key by key: a device alone keeps the Setup's channels.
+        let (local, _) =
+            parse_local("[capture.voice]\ndevice = { name = \"Mic\", signature = \"\" }\n");
+        assert_eq!(effective(&setup, &local).capture["voice"].channels, vec![1]);
+        let local_json = local_json(&dir);
+        assert_eq!(local_json["capture"]["voice"]["channels"], json!([2]));
+        unroute(
+            &json!({"side": "capture", "role": "voice", "scope": "project"}),
+            &mut setup,
+            Some(&dir),
+        )
+        .unwrap();
+        let (merged, _) = effective_setup(&setup, &dir);
+        assert_eq!(merged.capture["voice"].channels, vec![1]);
+        // On the machine scope, the Setup's own binding goes.
+        let routed = unroute(
+            &json!({"side": "capture", "role": "voice"}),
+            &mut setup,
+            None,
+        )
+        .unwrap();
+        assert!(routed.setup_changed && setup.capture.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_local_override_of_main_replaces_output_channels() {
         let setup = Setup {
@@ -933,12 +1089,19 @@ mod tests {
         let state = base.join("Local/0123456789abcdef0123456789abcdef");
         fs::create_dir_all(&state).unwrap();
         let mut notes = Vec::new();
-        write_local(&state, "cue", Some((&[3, 4], None)), &mut notes).unwrap();
+        write_local(&state, "play", "cue", Some((&[3, 4], None)), &mut notes).unwrap();
         assert!(notes.is_empty() && !state.join(".gitignore").exists());
         fs::write(project.join("project.toml"), "").unwrap();
-        write_local(&project, "cue", Some((&[3, 4], None)), &mut notes).unwrap();
+        write_local(&project, "play", "cue", Some((&[3, 4], None)), &mut notes).unwrap();
         assert_eq!(notes.len(), 1);
-        write_local(&project, "monitor", Some((&[3, 4], None)), &mut notes).unwrap();
+        write_local(
+            &project,
+            "play",
+            "monitor",
+            Some((&[3, 4], None)),
+            &mut notes,
+        )
+        .unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(
             fs::read_to_string(project.join(".gitignore")).unwrap(),

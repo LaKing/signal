@@ -350,7 +350,7 @@ The bar at the top left names where the view is ("Signal Project › Stack prima
 - a cable's device end (or a hollow endpoint's) onto another port: only the role's binding (`device.route`), on the clock device or, on another device's port, that device (`main` moved there moves the clock);
 - a cable's device end dropped on the empty plane: its connection removed.
 
-Shift held when letting go writes the binding for this project only (`devices.local.toml`), else for every project (the Setup). A line under the plane says what was written, or why not.
+Shift held when letting go writes the binding for this project only (`devices.local.toml`), else for every project (the Setup); a cable from a device's input binds its capture role the same way (`[capture.<role>]`). A line under the plane says what was written, or why not.
 
 ## Schematic
 

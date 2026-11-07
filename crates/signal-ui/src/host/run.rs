@@ -553,12 +553,13 @@ impl Host {
                 self.setup.cpu_workers.unwrap_or(0),
             )
         };
-        // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
+        // ADR 0038 §7: the project's inputs, from the capture roles of the
+        // Setup (devices.local.toml over it).
         let captures = signal_project::device::capture_sides(&project, &plan);
         let specs = crate::player::capture_specs(
             &self.backend,
             &self.devices,
-            &self.setup,
+            &setup,
             &captures,
             &mut notes,
         );

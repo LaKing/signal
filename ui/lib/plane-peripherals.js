@@ -245,8 +245,8 @@ function captureDrop(drag, drop, { bindings, instances, main, devices, scope }) 
   const taken = [...bindings.map((b) => b.role), ...instances];
   const role = newInputRoleName(taken);
   const ops = [{ op: 'device.add', name: role, capture: 'mono', role }];
-  // A capture role is bound in the Setup (devices.local.toml binds play roles only for now).
-  const routes = [{ type: 'device.route', side: 'capture', role, channels: drag.port.channels.slice(0, 1), device: deviceEntry(devices, drag.box, 'input'), scope: 'machine' }];
+  // The Setup's [capture.<role>], or this project's devices.local.toml (Shift), as the output it plays on.
+  const routes = [{ type: 'device.route', side: 'capture', role, channels: drag.port.channels.slice(0, 1), device: deviceEntry(devices, drag.box, 'input'), scope }];
   const occupant = bindings.find((b) => b.device === drop.box && b.channels.includes(drop.channel));
   const into = (ports) => ports.forEach((port) => ops.push({ op: 'connection.add', from: `${role}.m`, to: strip(port) }));
   if (occupant) {
@@ -409,7 +409,8 @@ export function playbackPortOf(box, channel) {
 }
 
 /**
- * Where the Setup binds capture role `role` (ADR 0038 §4, §7): `{key,
+ * Where the Setup (`devices.local.toml`'s `capture` over it) binds
+ * capture role `role` (ADR 0038 §4, §6, §7): `{key,
  * channels}`, the box of its device (the Setup's input, else the system's
  * default input, when the binding names none) and its device channels, as
  * the player routes it; `main` without a binding takes the default
@@ -418,7 +419,10 @@ export function playbackPortOf(box, channel) {
  * captured here.
  */
 export function captureBinding(setup, devices, role, width) {
-  const entry = setup?.setup?.capture?.[role] ?? null;
+  // devices.local.toml over the Setup, key by key (ADR 0038 §6).
+  const machine = setup?.setup?.capture?.[role] ?? null;
+  const local = setup?.local?.capture?.[role] ?? null;
+  const entry = machine || local ? { channels: local?.channels ?? machine?.channels ?? [], device: local?.device ?? machine?.device ?? null } : null;
   if (!entry && role !== 'main') return null;
   const list = devices?.devices ?? [];
   const named = entry?.device ?? setup?.setup?.input ?? null;
