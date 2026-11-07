@@ -146,6 +146,8 @@ function writeZoomLock(on) {
   }
 }
 
+/** The least opacity of the Setup's cables when a Stack is focused: seen behind the Wiring level's translucent Stack. */
+const CABLES_SURROUND = 0.6;
 /** The layers in the bar, top to bottom (ADR 0051; the owner's names, 2026-11-01). */
 const LAYERS = [['setup', 'Project'], ['stack', 'Stack'], ['wiring', 'Wiring'], ['control', 'Control'], ['engine', 'Engine']];
 const LAYER_NAME = Object.fromEntries(LAYERS);
@@ -216,6 +218,10 @@ ${BAR_CSS}
 :host([data-panning]) .stage { cursor: move; }
 .stack { position: absolute; box-sizing: border-box; background: #20242c; border: 2px solid #3a414d; border-radius: 6px; }
 .stack.other { transition: none; }
+/* At the Wiring level the Stack lets the Setup's cables behind it show through (the owner's, 2026-11-07). */
+:host([data-level="wiring"]) .stack { background: rgb(32 36 44 / 0.6); }
+:host([data-level="wiring"]) .stack .rack { opacity: 0.6; }
+:host([data-level="wiring"]) .w-box { fill-opacity: 0.6; }
 .fit-icon { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; margin: 0; flex: none;
   background: none; border: none; color: var(--signal-muted, #8a93a3); opacity: 0.7; cursor: pointer; }
 .fit-icon:hover, .fit-icon:focus-visible { color: var(--signal-accent, #4fc3f7); opacity: 1; outline: none; }
@@ -524,8 +530,10 @@ export class SignalPlane extends HTMLElement {
     this.tabIndex = 0;
     this.stage = html('div', { className: 'stage' });
     this.world = html('div', { className: 'world' });
+    // The Setup's cables behind the Stacks (the owner's, 2026-11-07), its peripherals, pins and a dragged cable over them.
+    this.cableSvg = svg('svg', { class: 'setup' });
     this.setupSvg = svg('svg', { class: 'setup' });
-    this.world.append(this.setupSvg);
+    this.world.append(this.cableSvg, this.setupSvg);
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
     // The sidebar: a fixed column left of the stage, what is selected and its net (`renderSide`); the stage, and the view, beside it.
@@ -1016,8 +1024,10 @@ export class SignalPlane extends HTMLElement {
     const { bounds } = this.layout;
     const pad = 400;
     const box = { x: bounds.x - pad, y: bounds.y - pad, w: bounds.w + 2 * pad, h: bounds.h + 2 * pad };
-    Object.assign(this.setupSvg.style, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`, height: `${box.h}px` });
-    this.setupSvg.setAttribute('viewBox', `${box.x} ${box.y} ${box.w} ${box.h}`);
+    for (const layer of [this.cableSvg, this.setupSvg]) {
+      Object.assign(layer.style, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`, height: `${box.h}px` });
+      layer.setAttribute('viewBox', `${box.x} ${box.y} ${box.w} ${box.h}`);
+    }
     const groups = { cables: svg('g'), boxes: svg('g'), pins: svg('g') };
     const pinAt = new Map();
     // What a cable drag can start from or land on (plane units).
@@ -1130,7 +1140,8 @@ export class SignalPlane extends HTMLElement {
       this.model.unstacked.forEach((name, i) => groups.boxes.append(svg('text', { class: 'tray-text', x: t.x + 24, y: t.y + BOX_PU.title * PU + (i + 0.75) * TRAY_LINE_PU * PU }, fitText(name, capChars(TEXT.port, t.w - 48)))));
     }
     this.ghost = svg('path', { class: 'cable ghost', d: '' });
-    this.setupSvg.replaceChildren(groups.cables, groups.boxes, groups.pins, this.ghost);
+    this.cableSvg.replaceChildren(groups.cables);
+    this.setupSvg.replaceChildren(groups.boxes, groups.pins, this.ghost);
   }
 
   // Setup-level cables, dragged (ADR 0051 §3, §9).
@@ -1420,7 +1431,8 @@ export class SignalPlane extends HTMLElement {
       const on = style.display !== 'none' && !element.hidden && Number(style.opacity) > 0 && style.visibility !== 'hidden';
       return walk(element, on, { elements: 1, drawn: on ? 1 : 0 });
     };
-    const layers = { setup: layer(this.setupSvg), chrome: { elements: 0, drawn: 0 } };
+    const setup = [layer(this.cableSvg), layer(this.setupSvg)];
+    const layers = { setup: { elements: setup[0].elements + setup[1].elements, drawn: setup[0].drawn + setup[1].drawn }, chrome: { elements: 0, drawn: 0 } };
     for (const part of [this.bar, this.notes]) {
       const counted = layer(part);
       layers.chrome.elements += counted.elements;
@@ -1475,6 +1487,8 @@ export class SignalPlane extends HTMLElement {
     const fades = this.fadesNow();
     const level = this.layer ?? levelOf(r, this.engineBandNow());
     this.dataset.level = level;
+    // The cables fade less than the rest of the Setup: deeper in, they still show through the Wiring level's Stack.
+    opacity(this.cableSvg, Math.max(fades.setup, CABLES_SURROUND));
     opacity(this.setupSvg, fades.setup);
     for (const [name, s] of this.stacks) {
       const focused = name === this.focused;
