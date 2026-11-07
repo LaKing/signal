@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 43] = [
+const TOOLS: [&str; 44] = [
     "project_info",
     "graph",
     "modules",
@@ -47,6 +47,7 @@ const TOOLS: [&str; 43] = [
     "slot_load",
     "slot_unload",
     "slot_map",
+    "slot_voices",
     "slot_interface",
     "slot_inside",
     "slot_group",
@@ -1398,6 +1399,11 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
         "slot_map",
         json!({"slot": "fx", "map": {"x": "in", "y": "out"}}),
     );
+    // ADR 0044 §7: the slot's voices written, then removed.
+    mcp.ok("slot_voices", json!({"slot": "fx", "voices": 2}));
+    assert!(mcp.file("project.toml").contains("voices = 2"));
+    mcp.ok("slot_voices", json!({"slot": "fx", "voices": null}));
+    assert!(!mcp.file("project.toml").contains("voices"));
     mcp.ok(
         "patch",
         json!({"ops": [{"op": "connection.add", "from": "osc.out", "to": "fx.x"}]}),

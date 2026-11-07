@@ -1,5 +1,6 @@
 ---
 source: crates/signal-cli/tests/cli.rs
+assertion_line: 436
 expression: text
 ---
 {
@@ -254,6 +255,39 @@ expression: text
           },
           "type": "array",
           "uniqueItems": true
+        },
+        "voices": {
+          "anyOf": [
+            {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "assign": {
+                  "const": "rotate"
+                },
+                "count": {
+                  "maximum": 64,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "legato": {
+                  "type": "boolean"
+                },
+                "steal": {
+                  "const": "oldest"
+                }
+              },
+              "required": [
+                "count"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "ADR 0044 §1: a slot's voices, a count from 1 to 64 or a table { count, assign = \"rotate\", steal = \"oldest\", legato }."
         }
       },
       "type": "object"
@@ -463,6 +497,7 @@ expression: text
             "std.vmul4",
             "std.vmul64",
             "std.vmul8",
+            "std.voice_alloc",
             "std.wavetable"
           ]
         },
@@ -702,6 +737,15 @@ expression: text
             },
             "unit": {
               "type": "string"
+            },
+            "voice": {
+              "description": "ADR 0044 §2: the port's role in a slot with `voices` (shared, each, sum, alloc); only on a typed port.",
+              "enum": [
+                "shared",
+                "each",
+                "sum",
+                "alloc"
+              ]
             }
           },
           "type": "object"

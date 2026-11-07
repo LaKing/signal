@@ -972,6 +972,42 @@ fn name_problem(name: &str) -> Option<String> {
 }
 
 /// A JSON value (a `slot` key or a `map`) as TOML text.
+/// ADR 0044 §1, §7: `voices` as written from `slot.voices`'s value: a
+/// count from 1 to 64 (`N`), `{ "count": N, "legato": bool }` (written
+/// `N` without legato, `{ count = N, legato = true }` with it), or `null`
+/// (`None`: removed).
+pub(crate) fn voices_text(value: &serde_json::Value) -> Result<Option<String>, PatchError> {
+    let count = |value: &serde_json::Value| {
+        value
+            .as_u64()
+            .filter(|n| (1..=u64::from(crate::slot::MAX_VOICES)).contains(n))
+            .ok_or_else(|| bad("`voices`: a count from 1 to 64"))
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(_) => Ok(Some(count(value)?.to_string())),
+        serde_json::Value::Object(table) => {
+            if let Some(key) = table.keys().find(|k| *k != "count" && *k != "legato") {
+                return Err(bad(format!(
+                    "`voices.{key}`: `slot.voices` writes `count` and `legato`"
+                )));
+            }
+            let n = count(table.get("count").unwrap_or(&serde_json::Value::Null))?;
+            let legato = match table.get("legato") {
+                None | Some(serde_json::Value::Bool(false)) => false,
+                Some(serde_json::Value::Bool(true)) => true,
+                Some(_) => return Err(bad("`voices.legato`: true or false")),
+            };
+            Ok(Some(if legato {
+                format!("{{ count = {n}, legato = true }}")
+            } else {
+                n.to_string()
+            }))
+        }
+        _ => Err(bad("`voices`: a count, `{count, legato}` or null")),
+    }
+}
+
 pub(crate) fn json_text(value: &serde_json::Value) -> Result<String, PatchError> {
     fn convert(value: &serde_json::Value) -> Result<Value, PatchError> {
         Ok(match value {
@@ -1011,6 +1047,8 @@ pub(super) enum SlotEdit<'o> {
     },
     Unload,
     Map(&'o BTreeMap<String, serde_json::Value>),
+    /// ADR 0044 §7: `voices` written (`null` removes it).
+    Voices(&'o serde_json::Value),
     Interface {
         add: &'o [PortJson],
         remove: &'o [String],
@@ -1329,6 +1367,9 @@ impl Patching<'_> {
                     self.notes
                         .push("removed seed: the slot is empty".to_owned());
                 }
+            }
+            SlotEdit::Voices(value) => {
+                changes.push(set(&["voices"], voices_text(value)?));
             }
             SlotEdit::Map(map) => {
                 for (key, value) in map {

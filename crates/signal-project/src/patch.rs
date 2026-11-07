@@ -185,6 +185,15 @@ pub enum Op {
         /// The slot's name at the level.
         slot: String,
     },
+    /// ADR 0044 §7: the slot's `voices` written: a count from 1 to 64,
+    /// `{count, legato}`, or `null` (removed: the slot mono again).
+    #[serde(rename = "slot.voices")]
+    SlotVoices {
+        /// The slot's name at the level.
+        slot: String,
+        /// The new value.
+        voices: serde_json::Value,
+    },
     /// ADR 0037 §4: the slot's `map` written (`{}` removes it).
     #[serde(rename = "slot.map")]
     SlotMap {
@@ -2379,6 +2388,9 @@ impl Patching<'_> {
             }
             Op::SlotUnload { slot } => return self.slot_edit(slot, slot::SlotEdit::Unload),
             Op::SlotMap { slot, map } => return self.slot_edit(slot, slot::SlotEdit::Map(map)),
+            Op::SlotVoices { slot, voices } => {
+                return self.slot_edit(slot, slot::SlotEdit::Voices(voices));
+            }
             Op::SlotInterface {
                 slot,
                 add,

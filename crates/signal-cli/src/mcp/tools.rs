@@ -382,6 +382,18 @@ const TOOLS: &[Tool] = &[
         run: slot_map,
     },
     Tool {
+        name: "slot_voices",
+        group: Group::Patch,
+        description: "Writes a slot's `voices` (ADR 0044): a count from 1 to 64 makes it polyphonic (its content copied per voice, notes into its `alloc` port spread over them, outputs summed), {count, legato} with the allocator's legato, null makes it mono again. Adding or removing voices is a Replace live; a change of the count an ordinary edit. Judged by the gain guard like any patch.",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "voices": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 64}, {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 64}, "legato": {"type": "boolean"}}, "required": ["count"]}, {"type": "null"}]}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot", "voices"],
+            )
+        },
+        run: slot_voices,
+    },
+    Tool {
         name: "slot_interface",
         group: Group::Patch,
         description: "Edits a slot's interface: `add` [{name, role: input|output|parameter, shape?, rate?, kind?, unit?, range?, group?, auto?}] (`auto: true`: a port typed by its connections, ADR 0045, the fields given pinned), `remove` [names] (a wired port is refused unless `removeWires`), `rename` {old: new} (the level's wires, exports, `map` keys and panel bindings follow), `retype` [{name, ...fields, unpin?}] (`unpin`: [shape|rate|kind|unit|range] become inferred; a typed port becomes auto with the rest pinned), or alone `detach` (write the template's ports inline) or `template` (set the interface to that template).",
@@ -2159,6 +2171,10 @@ fn slot_unload(context: &Context, arguments: &Value) -> Outcome {
 
 fn slot_map(context: &Context, arguments: &Value) -> Outcome {
     slot_op(context, arguments, json!({"op": "slot.map"}))
+}
+
+fn slot_voices(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.voices"}))
 }
 
 fn slot_interface(context: &Context, arguments: &Value) -> Outcome {

@@ -354,6 +354,56 @@ fn unload_load_and_replace_write_load_and_keep_what_the_content_takes() {
     );
 }
 
+/// ADR 0044 §7: `slot.voices` writes a count, a table with legato, or
+/// removes the key; out-of-range values are refused.
+#[test]
+fn voices_is_written_and_removed() {
+    let (text, _) = round_trip(
+        HOST,
+        &[op(
+            serde_json::json!({"op": "slot.voices", "slot": "fx", "voices": 8}),
+        )],
+    );
+    assert!(text.contains("voices = 8"), "{text}");
+    let (text, _) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.voices", "slot": "fx", "voices": {"count": 1, "legato": true}}),
+        )],
+    );
+    assert!(
+        text.contains("voices = { count = 1, legato = true }"),
+        "{text}"
+    );
+    let (text, _) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.voices", "slot": "fx", "voices": null}),
+        )],
+    );
+    assert!(!text.contains("voices"), "{text}");
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(65),
+        serde_json::json!(2.5),
+        serde_json::json!({"count": 2, "sleep": true}),
+        serde_json::json!("8"),
+    ] {
+        assert!(
+            apply(
+                HOST,
+                None,
+                &[op(
+                    serde_json::json!({"op": "slot.voices", "slot": "fx", "voices": bad}),
+                )],
+                &ctx()
+            )
+            .is_err(),
+            "{bad}"
+        );
+    }
+}
+
 #[test]
 fn map_is_written_and_removed() {
     let (text, _) = round_trip(
