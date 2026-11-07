@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -320,4 +320,35 @@ test('an input dragged onto a role already playing is wired into it; nothing dro
   const nothing = cableDrop(drag, null, { bindings, main, devices });
   assert.deepEqual([nothing.ops, nothing.routes], [[], []]);
   assert.match(nothing.note, /drop an input/);
+});
+
+test('a device input wired straight to a device output is one cable from the capture jack to the playback jack', () => {
+  const devices = { devices: [ssl(0, 'output'), ssl(1, 'input'), mic(2), speakers(3)], output: { found: 0 } };
+  const setup = {
+    setup: {
+      output: { name: 'SSL 2+ MKII', id: SSL_ID },
+      play: { cue: { channels: [1, 2], device: { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice' } } },
+      capture: { input: { channels: [1], device: { name: 'MacBook Pro Microphone', id: 'coreaudio:BuiltInMicrophoneDevice' } } },
+    },
+  };
+  const instances = [
+    { name: 'input', device: { capture: 'mono', role: 'input' }, ports: [{ address: '/input.m', direction: 'out' }] },
+    { name: 'cue', device: { play: 'stereo', role: 'cue' }, ports: [{ address: '/cue.l', direction: 'in' }, { address: '/cue.r', direction: 'in' }] },
+  ];
+  const connections = [{ from: '/input.m', to: '/cue.l' }, { from: '/input.m', to: '/cue.r' }];
+  const endpoints = [{ name: 'cue', role: 'cue', layout: 'stereo', ports: ['/cue.l', '/cue.r'] }];
+  const { boxes, bindings, main } = peripherals({ setup, devices, endpoints });
+  const through = throughCables({ instances, connections, setup, devices, bindings });
+  const micKey = 'id:coreaudio:BuiltInMicrophoneDevice';
+  const speakersKey = 'id:coreaudio:BuiltInSpeakerDevice';
+  assert.deepEqual(through.map((c) => [c.from.device, c.from.channel, c.to.device, c.to.channel]), [
+    [micKey, 1, speakersKey, 1],
+    [micKey, 1, speakersKey, 2],
+  ]);
+  // The capture device gets a whole box, so its jack can be drawn.
+  const split = splitBoxes(boxes, { bindings, cables: [], through, main });
+  assert.ok(split.full.some((b) => b.key === micKey));
+  // A capture role the Setup does not bind draws nothing.
+  const unbound = { setup: { ...setup.setup, capture: {} } };
+  assert.deepEqual(throughCables({ instances, connections, setup: unbound, devices, bindings }), []);
 });

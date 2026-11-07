@@ -271,6 +271,22 @@ pub fn play_json(setup: &Setup) -> Value {
     Value::Object(roles)
 }
 
+/// `setup.get`'s `setup.capture` (ADR 0038 §7, additive): every capture
+/// role the Setup binds, `{role: {channels, device}}`.
+pub fn capture_json(setup: &Setup) -> Value {
+    let roles: serde_json::Map<String, Value> = setup
+        .capture
+        .iter()
+        .map(|(role, entry)| {
+            (
+                role.clone(),
+                json!({"channels": entry.channels, "device": entry.device}),
+            )
+        })
+        .collect();
+    Value::Object(roles)
+}
+
 /// `setup.get`'s `local` (additive): `devices.local.toml`'s overrides of
 /// the project folder `dir`, `{play: {role: {channels, device}}, problems}`.
 pub fn local_json(dir: &Path) -> Value {

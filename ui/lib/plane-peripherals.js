@@ -345,8 +345,8 @@ export function landingPorts(pinLabel, ports, index) {
  * bound device that is absent. The rest are `others`, one compact list in
  * inventory order. `{full, others}`, each in `boxes`' order.
  */
-export function splitBoxes(boxes, { bindings = [], cables = [], main = null } = {}) {
-  const keys = new Set([...bindings.map((b) => b.device), ...cables.map((c) => c.device), main?.key ?? null].filter(Boolean));
+export function splitBoxes(boxes, { bindings = [], cables = [], through = [], main = null } = {}) {
+  const keys = new Set([...bindings.map((b) => b.device), ...cables.map((c) => c.device), ...through.map((t) => t.from.device), main?.key ?? null].filter(Boolean));
   const full = [];
   const others = [];
   for (const box of boxes) (keys.has(box.key) || !box.present ? full : others).push(box);
@@ -369,6 +369,55 @@ export function endpointLabel(binding) {
 /** The port of `box` that carries device channel `channel` on its playback side, or null. */
 export function playbackPortOf(box, channel) {
   return box?.inputs.find((p) => p.channels.includes(channel)) ?? null;
+}
+
+/**
+ * Where the Setup binds capture role `role` (ADR 0038 §4, §7): `{key,
+ * channels}`, the box of its device (the Setup's input, else the system's
+ * default input, when the binding names none) and its device channels, as
+ * the player routes it; `main` without a binding takes the default
+ * input's channels from 1. Null when the role is not captured here.
+ */
+export function captureBinding(setup, devices, role, width) {
+  const entry = setup?.setup?.capture?.[role] ?? null;
+  if (!entry && role !== 'main') return null;
+  const list = devices?.devices ?? [];
+  const named = entry?.device ?? setup?.setup?.input ?? null;
+  const device = named
+    ? list.find((d) => d.direction === 'input' && (named.id ? d.id === named.id : d.name === named.name))
+    : list.find((d) => d.direction === 'input' && d.default);
+  if (!device) return null;
+  const channels = entry ? (entry.channels ?? []).slice(0, width) : Array.from({ length: width }, (_, i) => i + 1);
+  return { key: deviceKey(device), channels };
+}
+
+/**
+ * The cables straight from a device's input to a device's output (ADR
+ * 0038 §7): a capture slot's output wired to a play side's input, with no
+ * instrument between them, so no Stack pin to draw from. One cable `{from:
+ * {device, channel}, to: {device, channel}, label}` per such connection
+ * whose capture channel the Setup binds and whose play channel `bindings`
+ * gives.
+ */
+export function throughCables({ instances = [], connections = [], setup = null, devices = null, bindings = [] } = {}) {
+  const captures = new Map();
+  for (const i of instances) {
+    if (!i.device?.capture) continue;
+    const ports = (i.ports ?? []).filter((p) => p.direction === 'out' && (p.shape ?? 'signal') === 'signal').map((p) => p.address);
+    const bound = captureBinding(setup, devices, i.device.role, ports.length);
+    if (bound) ports.forEach((port, n) => captures.set(port, { device: bound.key, channel: bound.channels[n] }));
+  }
+  const cables = [];
+  for (const c of connections) {
+    const from = captures.get(c.from);
+    if (!from || !Number.isInteger(from.channel)) continue;
+    for (const b of bindings) {
+      const n = b.device ? b.ports.indexOf(c.to) : -1;
+      if (n < 0 || !Number.isInteger(b.channels[n])) continue;
+      cables.push({ from, to: { device: b.device, channel: b.channels[n] }, label: `${c.from} → ${c.to} (${b.endpoint})`, dashed: !b.heard });
+    }
+  }
+  return cables;
 }
 
 /**

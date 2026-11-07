@@ -79,7 +79,7 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
+import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes, throughCables } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
@@ -804,11 +804,13 @@ export class SignalPlane extends HTMLElement {
     const endpoints = roleEndpoints(instances);
     const { boxes: all, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
     const cables = setupCables(pins, bindings);
+    // A device's input wired straight to a device's output (ADR 0038 §7): no Stack pin between them.
+    const through = throughCables({ instances, connections, setup: this.setup, devices: this.devices, bindings });
     // A whole box for every device (the owner's, 2026-11-01): the ones the project and the Setup use first, then the rest.
-    const split = splitBoxes(all, { bindings, cables, main });
+    const split = splitBoxes(all, { bindings, cables, through, main });
     const boxes = [...split.full, ...split.others];
     const others = [];
-    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, unstacked, main };
+    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, through, unstacked, main };
     if (!this.focused || !shown.plane.stacks.some((s) => s.name === this.focused)) this.focused = shown.plane.stacks[0]?.name ?? null;
     const focusedStack = shown.plane.stacks.find((s) => s.name === this.focused);
     if (!focusedStack?.instruments.includes(this.opened)) this.opened = focusedStack?.instruments[0] ?? null;
@@ -1037,6 +1039,7 @@ export class SignalPlane extends HTMLElement {
       }
     }
     const portAt = new Map();
+    const captureAt = new Map();
     for (const b of this.model.boxes) {
       const r = this.layout.boxes.get(b.key);
       if (!r) continue;
@@ -1070,7 +1073,10 @@ export class SignalPlane extends HTMLElement {
       for (const p of ports.outputs) {
         g.append(svg('rect', { class: 'port', x: r.x + r.w - 6 - half, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4 }));
         g.append(svg('text', { class: 'port-name', x: r.x + r.w - 24, y: r.y + p.y + 44, 'text-anchor': 'end' }, p.name));
-        if (!p.rest) for (const pin of p.pins) g.append(svg('circle', { class: 'jack', cx: r.x + r.w, cy: r.y + pin.y, r: 8 }));
+        for (const pin of p.pins) captureAt.set(`${b.key} ${pin.channel}`, { x: r.x + r.w, y: r.y + pin.y });
+        const on = (pin) => this.model.through.some((t) => t.from.device === b.key && t.from.channel === pin.channel);
+        // A row of many channels draws only the jacks a cable uses.
+        for (const pin of p.pins) if (!p.rest || on(pin)) g.append(svg('circle', { class: `jack${on(pin) ? ' bound' : ''}`, cx: r.x + r.w, cy: r.y + pin.y, r: 8 }));
         // A capture jack starts a cable (ADR 0038 §7): its input played on a device's output.
         if (b.present && !p.rest) for (const pin of p.pins) this.hits.captures.push({ box: b.key, port: { ...p, channels: [pin.channel] }, x: r.x + r.w, y: r.y + pin.y });
       }
@@ -1107,6 +1113,14 @@ export class SignalPlane extends HTMLElement {
       this.hits.ends.push({ cable: c, x: b.x, y: b.y, from: a });
       const path = svg('path', { class: `cable${c.dashed ? ' dashed' : ''}`, d: cablePath(a, b, i) });
       path.append(svg('title', {}, `${c.pin} → ${c.port} (${c.endpoint}) → channel ${c.channel}`));
+      groups.cables.append(path);
+    });
+    this.model.through.forEach((c, i) => {
+      const a = captureAt.get(`${c.from.device} ${c.from.channel}`);
+      const b = portAt.get(`${c.to.device} ${c.to.channel}`);
+      if (!a || !b) return;
+      const path = svg('path', { class: `cable${c.dashed ? ' dashed' : ''}`, d: cablePath(a, b, this.model.cables.length + i) });
+      path.append(svg('title', {}, c.label));
       groups.cables.append(path);
     });
     if (this.layout.tray) {

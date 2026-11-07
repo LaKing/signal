@@ -176,6 +176,8 @@ impl Host {
             "rtPolicy": self.setup.rt_policy.name(),
             // ADR 0038 (M4.1, additive): every role the Setup binds.
             "play": crate::devices::play_json(&self.setup),
+            // ADR 0038 §7 (additive): every capture role the Setup binds.
+            "capture": crate::devices::capture_json(&self.setup),
         })
     }
 
