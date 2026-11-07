@@ -32,4 +32,5 @@ transport = "7f20f2bbed23372b"
 [interfaces]
 deck = "c8fa72b11d0b70d4"
 instrument = "07b3870f5381b455"
+poly_voice = "bdc391924b112a10"
 voice = "2dc66859dd2f5871"

@@ -195,7 +195,12 @@ fn core_graph_and_engine_name_no_musical_concept() {
 /// slots, a composite's resolved exports in the flattener, atomic loads), so
 /// the check names the project format's spellings of the two concepts
 /// instead (ADR 0037, note of 2026-10-23).
-const PROJECT_WORDS: [&str; 9] = [
+///
+/// ADR 0044 §5: a polyphonic slot is resolved the same way, so its
+/// allocator's type, the generated definition's prefix and the resolution's
+/// type names are project words too. The plain word `voices` is the
+/// engine's own generic word (its tasks), as `slot` is.
+const PROJECT_WORDS: [&str; 13] = [
     "project",
     "projects",
     "include",
@@ -205,7 +210,14 @@ const PROJECT_WORDS: [&str; 9] = [
     "SlotResolution",
     "SlotResolutions",
     "InterfaceFile",
+    "voice_alloc",
+    "VoiceAlloc",
+    "SlotVoices",
+    "VoicesSpec",
 ];
+
+/// ADR 0044 §5: the generated definition's prefix, as a part of a line.
+const PROJECT_PARTS: [&str; 1] = ["\"poly:"];
 
 /// Core, graph and engine name no project or slot concept in a code line.
 #[test]
@@ -225,6 +237,9 @@ fn core_graph_and_engine_name_no_project_or_slot() {
                 }
                 for word in PROJECT_WORDS.iter().filter(|w| has_word(code, w)) {
                     found.push(format!("{}:{}: `{word}` in {code}", file.display(), n + 1));
+                }
+                for part in PROJECT_PARTS.iter().filter(|p| code.contains(*p)) {
+                    found.push(format!("{}:{}: `{part}` in {code}", file.display(), n + 1));
                 }
             }
         }

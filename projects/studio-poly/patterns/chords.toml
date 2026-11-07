@@ -1,0 +1,27 @@
+# The pad: one four-note chord per bar under the studio's line, Am – Am – F –
+# G/E (ADR 0044's demo, decision 3). Each chord is held for most of its bar,
+# so the voices' releases overlap the next chord's attack; a passing note on
+# the last beat of bars 2 and 4 needs a fifth voice while the chord rings.
+schema_version = 1
+kind = "notes"
+length = 16
+notes = [
+  { key = 57, start = 0, length = 3.5, velocity = 0.8 },
+  { key = 60, start = 0, length = 3.5, velocity = 0.7 },
+  { key = 64, start = 0, length = 3.5, velocity = 0.7 },
+  { key = 69, start = 0, length = 3.5, velocity = 0.6 },
+  { key = 57, start = 4, length = 3.5, velocity = 0.8 },
+  { key = 60, start = 4, length = 3.5, velocity = 0.7 },
+  { key = 64, start = 4, length = 3.5, velocity = 0.7 },
+  { key = 67, start = 4, length = 3.5, velocity = 0.6 },
+  { key = 72, start = 7, length = 0.9, velocity = 0.5 },
+  { key = 53, start = 8, length = 3.5, velocity = 0.8 },
+  { key = 57, start = 8, length = 3.5, velocity = 0.7 },
+  { key = 60, start = 8, length = 3.5, velocity = 0.7 },
+  { key = 65, start = 8, length = 3.5, velocity = 0.6 },
+  { key = 52, start = 12, length = 3.5, velocity = 0.8 },
+  { key = 55, start = 12, length = 3.5, velocity = 0.7 },
+  { key = 59, start = 12, length = 3.5, velocity = 0.7 },
+  { key = 62, start = 12, length = 3.5, velocity = 0.6 },
+  { key = 71, start = 15, length = 0.9, velocity = 0.5 },
+]

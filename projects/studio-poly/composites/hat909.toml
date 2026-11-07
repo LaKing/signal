@@ -1,0 +1,84 @@
+# The closed and open hi-hat: one metallic source, six square oscillators at
+# inharmonic frequencies plus a little noise through a state-variable
+# high-pass (`tone`), shaped by two envelopes.
+#
+#   squares ×6 + noise ─► metal ─► hp ─┬─► × closed_env × closed velocity ─┐
+#                                      └─► × open_env × open velocity ──── sum ─► level
+#
+# The closed hat chokes the open one: an open hit counts up `choke`, a closed
+# hit resets it to 0. The open envelope is an ADSR gated by `count > 0` (and
+# retriggered by each open hit), so a closed hit drops its gate and the open
+# hat releases within about 12 ms.
+schema_version = 1
+
+[composite]
+name = "hat909"
+
+[instances]
+sq1 = { module = "std.osc", shape = 2, freq = 205.3 }
+sq2 = { module = "std.osc", shape = 2, freq = 304.4 }
+sq3 = { module = "std.osc", shape = 2, freq = 369.6 }
+sq4 = { module = "std.osc", shape = 2, freq = 522.7 }
+sq5 = { module = "std.osc", shape = 2, freq = 540 }
+sq6 = { module = "std.osc", shape = 2, freq = 800 }
+noise = { module = "std.noise" }
+metal_a = { module = "std.mix", gain_a = 0.25, gain_b = 0.25, gain_c = 0.25, gain_d = 0.25 }
+metal = { module = "std.mix", gain_a = 1, gain_b = 0.25, gain_c = 0.25, gain_d = 0.3 }
+hp = { module = "std.svf", cutoff_hz = 7500, q = 1 }
+
+closed_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 40 }
+closed_velocity = { module = "std.const", value = 1 }
+closed_amp = { module = "std.mul" }
+closed = { module = "std.mul" }
+
+choke = { module = "std.counter" }
+choke_gate = { module = "std.compare", mode = 4 }
+open_env = { module = "std.adsr", attack_ms = 0, decay_ms = 380, sustain = 0, release_ms = 12 }
+open_velocity = { module = "std.const", value = 1 }
+open_amp = { module = "std.mul" }
+open = { module = "std.mul" }
+
+sum = { module = "std.add" }
+level = { module = "std.gain", db = 4 }
+
+[wiring]
+connections = [
+  { from = "sq1.out", to = "metal_a.a" },
+  { from = "sq2.out", to = "metal_a.b" },
+  { from = "sq3.out", to = "metal_a.c" },
+  { from = "sq4.out", to = "metal_a.d" },
+  { from = "metal_a.out", to = "metal.a" },
+  { from = "sq5.out", to = "metal.b" },
+  { from = "sq6.out", to = "metal.c" },
+  { from = "noise.out", to = "metal.d" },
+  { from = "metal.out", to = "hp.in" },
+  # Closed.
+  { from = "closed_env.out", to = "closed_amp.a" },
+  { from = "closed_velocity.out", to = "closed_amp.b" },
+  { from = "hp.hp", to = "closed.a" },
+  { from = "closed_amp.out", to = "closed.b" },
+  # Open, choked by the closed.
+  { from = "choke.count", to = "choke_gate.a" },
+  { from = "choke_gate.out", to = "open_env.gate" },
+  { from = "open_env.out", to = "open_amp.a" },
+  { from = "open_velocity.out", to = "open_amp.b" },
+  { from = "hp.hp", to = "open.a" },
+  { from = "open_amp.out", to = "open.b" },
+  { from = "closed.out", to = "sum.a" },
+  { from = "open.out", to = "sum.b" },
+  { from = "sum.out", to = "level.in" },
+]
+
+[exports]
+inputs = { closed = ["closed_env.trigger", "choke.reset"], open = ["open_env.trigger", "choke.trigger"] }
+outputs = { out = "level.out" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tone = { to = "hp.cutoff_hz", min = 2000, max = 16000 }
+closed_decay = { to = "closed_env.decay_ms", min = 5, max = 500 }
+open_decay = { to = "open_env.decay_ms", min = 20, max = 4000 }
+level = { to = "level.db", min = -120, max = 12 }
+closed_velocity = { to = "closed_velocity.value", min = 0, max = 2 }
+open_velocity = { to = "open_velocity.value", min = 0, max = 2 }

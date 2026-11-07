@@ -34,6 +34,17 @@ use crate::model::{InterfaceFile, KINDS, MapValue, ParamSpec, PortSpec, ShapeSpe
 /// The prefix of a library template reference (`lib.deck`).
 pub(crate) const LIBRARY_TEMPLATE: &str = "lib.";
 
+/// ADR 0044 §9: the most voices a slot may have, `std.voice_alloc`'s width.
+pub(crate) const MAX_VOICES: u32 = 64;
+
+/// ADR 0044 §4–5: the generated composite's allocator, unpack and sum types.
+const ALLOCATOR: &str = "std.voice_alloc";
+const UNPACK: &str = "std.unpack64";
+const ADD: &str = "std.add";
+
+/// ADR 0044 §2: the allocator's outputs an `each` input may name.
+const ALLOCATED: [&str; 3] = ["hz", "gate", "velocity"];
+
 /// What a port of an interface is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +86,43 @@ pub struct InterfacePort {
     /// effective type: the pinned ones as written, the others inferred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<Auto>,
+    /// ADR 0044 §2: its role in a slot with `voices`, as written; `None`
+    /// for the default (`shared` for an input, `sum` for an output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
+}
+
+/// A port's role in a polyphonic slot (ADR 0044 §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Voice {
+    /// An input every voice receives.
+    Shared,
+    /// A signal input fed per voice by the allocator's output of its name.
+    Each,
+    /// An output: the voices' outputs summed.
+    Sum,
+    /// The events input that feeds the slot's allocator.
+    Alloc,
+}
+
+impl Voice {
+    /// The name the field is written with.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Voice::Shared => "shared",
+            Voice::Each => "each",
+            Voice::Sum => "sum",
+            Voice::Alloc => "alloc",
+        }
+    }
+
+    /// The role of a written name.
+    pub(crate) fn named(name: &str) -> Option<Voice> {
+        [Voice::Shared, Voice::Each, Voice::Sum, Voice::Alloc]
+            .into_iter()
+            .find(|v| v.name() == name)
+    }
 }
 
 impl InterfacePort {
@@ -243,6 +291,7 @@ fn port(name: &str, role: Role, spec: &PortSpec) -> InterfacePort {
         range: spec.range,
         group: spec.group.clone(),
         auto,
+        voice: spec.voice,
     }
 }
 
@@ -257,6 +306,7 @@ fn parameter(name: &str, spec: &ParamSpec) -> InterfacePort {
         range: None,
         group: spec.group.clone(),
         auto: None,
+        voice: None,
     }
 }
 
@@ -521,6 +571,25 @@ pub struct SlotResolution {
     /// The content's outputs not in the interface: computed, heard
     /// nowhere.
     pub unheard: Vec<String>,
+    /// ADR 0044 §5: a polyphonic slot's voices; `None` for a slot without
+    /// `voices`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voices: Option<SlotVoices>,
+}
+
+/// A polyphonic slot's voices, as the side table records them (ADR 0044
+/// §5).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SlotVoices {
+    /// How many.
+    pub count: u32,
+    /// The allocator's legato.
+    pub legato: bool,
+    /// The generated definition its instance is of (`poly:project/synth`).
+    pub definition: String,
+    /// Each voice's address relative to the slot's (`v0`, `v1`, …); empty
+    /// for an empty slot.
+    pub voices: Vec<String>,
 }
 
 /// An auto port's effective type (ADR 0045 §9, `retyped`).
@@ -1007,6 +1076,8 @@ struct Resolved {
     /// is unmatched or the slot empty: an instance's wires on them are left
     /// out too, as a wire on that slot port would be.
     vanished: Vec<String>,
+    /// ADR 0044 §5: the composites its polyphonic slots generated.
+    generated: Vec<CompositeDef>,
 }
 
 /// The exports each definition lost to an unmatched or empty slot.
@@ -1036,10 +1107,15 @@ impl Project {
                 let Some(instance) = def.instances.iter().find(|i| i.name == *slot) else {
                     continue;
                 };
-                let canonical = match &content.included {
+                let mut canonical = match &content.included {
                     Some(dir) => format!("project {}", dir.display()),
                     None => format!("module {}", instance.module),
                 };
+                // ADR 0044 §8: mono ↔ poly moves the content to other
+                // addresses, so it is a Replace; a change of N is not.
+                if content.slot.as_ref().is_some_and(|s| s.voices.is_some()) {
+                    canonical.push_str(" in voices");
+                }
                 found.insert((name.to_owned(), slot.clone()), canonical);
             }
         }
@@ -1126,7 +1202,7 @@ impl Project {
     pub(crate) fn resolve_slots(
         &self,
         root: &mut CompositeDef,
-        defs: &mut [CompositeDef],
+        defs: &mut Vec<CompositeDef>,
         spans: &mut SourceMap,
         registry: &Registry,
         errors: &mut Vec<Diagnostic>,
@@ -1182,6 +1258,12 @@ impl Project {
                     *def = resolved.def.clone();
                 }
             }
+            // ADR 0044 §5: what a polyphonic slot's host is made of.
+            next.extend(
+                results
+                    .iter()
+                    .flat_map(|(_, r)| r.generated.iter().cloned()),
+            );
             let lost: Vanished = results
                 .iter()
                 .filter_map(|(index, r)| {
@@ -1200,6 +1282,7 @@ impl Project {
         }
         let mut resolutions = Vec::new();
         for (index, resolved) in last {
+            defs.extend(resolved.generated.iter().cloned());
             for (file, offset, message) in resolved.errors {
                 let diagnostic =
                     self.diagnostic(Severity::Error, Location { file, offset }, message);
@@ -1261,6 +1344,7 @@ fn resolve_def(
         errors: Vec::new(),
         warnings: Vec::new(),
         vanished: Vec::new(),
+        generated: Vec::new(),
     };
     let declared: BTreeMap<&str, &Interface> = spans
         .contents
@@ -1346,7 +1430,21 @@ fn resolve_def(
             matches: Vec::new(),
             dropped: Vec::new(),
             unheard: Vec::new(),
+            voices: None,
         };
+        let poly = slot
+            .voices
+            .as_ref()
+            .map(|(voices, span)| (*voices, span.start));
+        if let Some((voices, _)) = poly {
+            resolution.voices = Some(SlotVoices {
+                count: voices.count,
+                legato: voices.legato,
+                definition: poly_name(name, slot_name),
+                voices: Vec::new(),
+            });
+        }
+        check_roles(&mut out, file, &slot_text, interface, poly, load_at);
 
         // Values set on the slot name its interface parameters.
         if let Some(instance_spans) = instance_spans {
@@ -1387,6 +1485,16 @@ fn resolve_def(
                     ));
                     continue;
                 };
+                if poly.is_some() && declared.voice == Some(Voice::Each) {
+                    out.errors.push((
+                        file,
+                        span.start,
+                        format!(
+                            "{slot_text}: `{port}` is fed by the slot's allocator (`voice = \"each\"`, ADR 0044 §2); the host cannot wire it"
+                        ),
+                    ));
+                    continue;
+                }
                 let wrong = if side {
                     declared.role != Role::Output
                 } else {
@@ -1468,6 +1576,17 @@ fn resolve_def(
             .as_ref()
             .map_or("", |(l, _)| l.as_str())
             .to_owned();
+        if poly.is_some() && !content_is_module(content_spans_of(spans, slot_name)) {
+            out.errors.push((
+                file,
+                load_at,
+                format!(
+                    "{slot_text}: a slot with `voices` loads a module, not a project (ADR 0044 §1): its copies would draw identical streams"
+                ),
+            ));
+            renames.insert(slot_name, (false, BTreeMap::new()));
+            continue;
+        }
         let Some(content) = ports.of(module, defs).cloned() else {
             out.errors.push((
                 file,
@@ -1489,6 +1608,20 @@ fn resolve_def(
                 ));
                 continue;
             }
+            if poly.is_some()
+                && interface
+                    .port(key)
+                    .is_some_and(|p| p.voice == Some(Voice::Alloc))
+            {
+                out.errors.push((
+                    file,
+                    key_span.start,
+                    format!(
+                        "{slot_text}: `{key}` feeds the slot's allocator; it has no content port"
+                    ),
+                ));
+                continue;
+            }
             if let MapValue::Name(target) = value
                 && !content.iter().any(|c| c.name == *target)
             {
@@ -1505,6 +1638,15 @@ fn resolve_def(
         let mut matched: BTreeMap<String, String> = BTreeMap::new();
         let mut taken_inputs: BTreeMap<String, String> = BTreeMap::new();
         for port in &interface.ports {
+            if poly.is_some() && port.voice == Some(Voice::Alloc) {
+                resolution.matches.push(Match {
+                    port: port.name.clone(),
+                    role: port.role,
+                    content: None,
+                    reason: Some("it feeds the slot's allocator".to_owned()),
+                });
+                continue;
+            }
             let (candidate, at) = match map.get(port.name.as_str()) {
                 Some((MapValue::Unmatched, _)) => {
                     resolution.matches.push(Match {
@@ -1644,7 +1786,10 @@ fn resolve_def(
             // port of its direction: perhaps a `map` is missing.
             let used: Vec<&String> = matched.values().collect();
             for port in &interface.ports {
-                if matched.contains_key(&port.name) || map.contains_key(port.name.as_str()) {
+                if matched.contains_key(&port.name)
+                    || map.contains_key(port.name.as_str())
+                    || (poly.is_some() && port.voice == Some(Voice::Alloc))
+                {
                     continue;
                 }
                 let wired = spans.connections.iter().any(|c| {
@@ -1709,7 +1854,24 @@ fn resolve_def(
                 }
             }
         }
-        renames.insert(slot_name, (true, matched));
+        if let Some((voices, voices_at)) = poly {
+            let definition = poly_name(name, slot_name);
+            let generated = generate(&definition, voices, module, interface, &matched, &content);
+            for problem in generated.problems {
+                out.errors
+                    .push((file, voices_at, format!("{slot_text}: {problem}")));
+            }
+            if let Some(instance) = out.def.instances.iter_mut().find(|i| i.name == *slot_name) {
+                instance.module = definition;
+            }
+            if let Some(v) = resolution.voices.as_mut() {
+                v.voices = (0..voices.count).map(|e| format!("v{e}")).collect();
+            }
+            out.generated.push(generated.def);
+            renames.insert(slot_name, (true, generated.host));
+        } else {
+            renames.insert(slot_name, (true, matched));
+        }
         out.resolutions.push(resolution);
     }
 
@@ -2058,6 +2220,293 @@ fn exports(
 /// The content spans of the slot `name`.
 fn content_spans_of<'s>(spans: &'s DefSpans, name: &str) -> Option<&'s ContentSpans> {
     spans.contents.get(name)
+}
+
+/// ADR 0044 §5: the generated definition of the polyphonic slot `slot` of
+/// the definition `host` (`""`: the project root).
+fn poly_name(host: &str, slot: &str) -> String {
+    let host = if host.is_empty() { "project" } else { host };
+    format!("poly:{host}/{slot}")
+}
+
+/// ADR 0044 §2: a slot's `voice` fields checked, its errors at `voices`
+/// (`poly`, with its offset) and its warnings at `load_at`; without
+/// `voices`, only the warning for an `alloc` port that feeds nothing.
+fn check_roles(
+    out: &mut Resolved,
+    file: usize,
+    slot_text: &str,
+    interface: &Interface,
+    poly: Option<(crate::model::VoicesSpec, usize)>,
+    load_at: usize,
+) {
+    let Some((_, at)) = poly else {
+        for port in interface
+            .ports
+            .iter()
+            .filter(|p| p.voice == Some(Voice::Alloc))
+        {
+            out.warnings.push((
+                file,
+                load_at,
+                format!(
+                    "{slot_text}: `{}` feeds nothing: the slot has no voices",
+                    port.name
+                ),
+            ));
+        }
+        return;
+    };
+    let mut error = |message: String| {
+        out.errors
+            .push((file, at, format!("{slot_text}: {message}")))
+    };
+    let mut allocs = 0;
+    for port in &interface.ports {
+        let name = &port.name;
+        match (port.voice, port.role) {
+            (Some(Voice::Each), Role::Input) => {
+                if port.shape != PortShape::Signal {
+                    error(format!(
+                        "`{name}` is `each` and {}; an `each` input is a signal, one value per voice (a vector from the host is not yet built, ADR 0044 §2)",
+                        shape_text(port.shape)
+                    ));
+                } else if !ALLOCATED.contains(&name.as_str()) {
+                    error(format!(
+                        "`{name}` is `each`, fed by the allocator's output of its name; the allocator outputs {}",
+                        ALLOCATED.join(", ")
+                    ));
+                }
+            }
+            (Some(Voice::Each), _) => {
+                error(format!("`{name}` is `each`; only an input may be"));
+            }
+            (Some(Voice::Alloc), Role::Input) => {
+                allocs += 1;
+                if port.shape != PortShape::Events {
+                    error(format!(
+                        "`{name}` is `alloc`; the allocator's input takes note events, so it is an events input"
+                    ));
+                } else if allocs == 2 {
+                    error(format!(
+                        "`{name}` is a second `alloc` port; the slot has one allocator"
+                    ));
+                }
+            }
+            (Some(Voice::Alloc), _) => {
+                error(format!("`{name}` is `alloc`; only an events input may be"));
+            }
+            (Some(Voice::Sum), Role::Input) => {
+                error(format!("`{name}` is `sum`; only an output may be"));
+            }
+            (Some(Voice::Shared), Role::Output) => {
+                error(format!("`{name}` is `shared`; only an input may be"));
+            }
+            (_, Role::Output) if port.shape != PortShape::Signal => {
+                error(format!(
+                    "`{name}` is {}; a slot with `voices` sums signal outputs, and merging {} is not yet built (ADR 0044 §2)",
+                    shape_text(port.shape),
+                    if port.shape == PortShape::Events {
+                        "events"
+                    } else {
+                        "vectors"
+                    }
+                ));
+            }
+            _ => {}
+        }
+    }
+    let fed = interface
+        .ports
+        .iter()
+        .any(|p| matches!(p.voice, Some(Voice::Each | Voice::Alloc)));
+    if !fed {
+        out.warnings.push((
+            file,
+            load_at,
+            format!("{slot_text}: every voice gets the same inputs: the interface has no `each` and no `alloc` port"),
+        ));
+    }
+    if let Some(from @ ("lib.voice" | "lib.instrument")) = interface.from.as_deref() {
+        out.warnings.push((
+            file,
+            load_at,
+            format!(
+                "{slot_text}: a slot with `voices` from `{from}`; did you mean `lib.poly_voice`?"
+            ),
+        ));
+    }
+}
+
+/// A polyphonic slot's generated composite (ADR 0044 §5), and the names
+/// the host's wires on the slot's ports take.
+struct Generated {
+    def: CompositeDef,
+    /// Slot port → the generated definition's export.
+    host: BTreeMap<String, String>,
+    problems: Vec<String>,
+}
+
+/// The composite `name` of `voices` copies of `content`: the allocator,
+/// an unpack per matched `each` input, the voices, and an `std.add` chain
+/// per matched output. Its exports carry the content's names, so the host's
+/// values and wires on matched ports reach every voice as they reach a
+/// mono slot's content; the `alloc` port exports under its own name.
+fn generate(
+    name: &str,
+    voices: crate::model::VoicesSpec,
+    module: &str,
+    interface: &Interface,
+    matched: &BTreeMap<String, String>,
+    content: &[ModulePort],
+) -> Generated {
+    use signal_graph::{ConnectionDef, InputExport, InstanceDef, OutputExport, ParameterExport};
+    let n = voices.count;
+    let voice = |e: u32, port: &str| format!("v{e}.{port}");
+    let every = |port: &str| (0..n).map(|e| voice(e, port)).collect::<Vec<_>>();
+    let wire = |from: String, to: String| ConnectionDef {
+        from,
+        to,
+        scale: None,
+    };
+    let mut def = CompositeDef {
+        name: name.to_owned(),
+        ..CompositeDef::default()
+    };
+    let mut host = BTreeMap::new();
+    let mut problems = Vec::new();
+    def.instances.push(InstanceDef {
+        name: "alloc".to_owned(),
+        module: ALLOCATOR.to_owned(),
+        parameters: BTreeMap::from([
+            ("voices".to_owned(), f64::from(n)),
+            ("legato".to_owned(), if voices.legato { 1.0 } else { 0.0 }),
+        ]),
+        scope: None,
+    });
+    for e in 0..n {
+        def.instances.push(InstanceDef {
+            name: format!("v{e}"),
+            module: module.to_owned(),
+            ..InstanceDef::default()
+        });
+    }
+    let mut sums = Vec::new();
+    for port in &interface.ports {
+        if port.voice == Some(Voice::Alloc) {
+            host.insert(port.name.clone(), port.name.clone());
+            def.exports.inputs.push(InputExport {
+                name: port.name.clone(),
+                to: vec!["alloc.notes".to_owned()],
+            });
+            continue;
+        }
+        let Some(target) = matched.get(&port.name) else {
+            continue;
+        };
+        match (port.role, port.voice) {
+            (Role::Input, Some(Voice::Each)) => {
+                let unpack = format!("each_{}", port.name);
+                def.instances.push(InstanceDef {
+                    name: unpack.clone(),
+                    module: UNPACK.to_owned(),
+                    ..InstanceDef::default()
+                });
+                def.connections
+                    .push(wire(format!("alloc.{}", port.name), format!("{unpack}.in")));
+                for e in 0..n {
+                    def.connections
+                        .push(wire(format!("{unpack}.e{e}"), voice(e, target)));
+                }
+            }
+            (Role::Input, _) => {
+                host.insert(port.name.clone(), target.clone());
+                def.exports.inputs.push(InputExport {
+                    name: target.clone(),
+                    to: every(target),
+                });
+            }
+            (Role::Output, _) => {
+                host.insert(port.name.clone(), target.clone());
+                sums.push((port.name.clone(), target.clone()));
+            }
+            (Role::Parameter, _) => {
+                host.insert(port.name.clone(), target.clone());
+                def.exports.parameters.push(ParameterExport {
+                    name: target.clone(),
+                    to: every(target),
+                    range: None,
+                    values: None,
+                });
+            }
+        }
+    }
+    // The sums: `sum_<port>` is the last add, which the output exports;
+    // the voices enter in index order, `((v0 + v1) + v2) + …` (ADR 0054: an
+    // input takes one connection, so a chain, not a fan-in).
+    for (port, target) in sums {
+        let last = format!("sum_{port}");
+        let adds = n.saturating_sub(1).max(1);
+        for k in 1..=adds {
+            let add = if k == adds {
+                last.clone()
+            } else {
+                format!("sum_{port}_{k}")
+            };
+            def.instances.push(InstanceDef {
+                name: add.clone(),
+                module: ADD.to_owned(),
+                ..InstanceDef::default()
+            });
+            let a = if k == 1 {
+                voice(0, &target)
+            } else {
+                format!("sum_{port}_{}.out", k - 1)
+            };
+            def.connections.push(wire(a, format!("{add}.a")));
+            if n > 1 {
+                def.connections
+                    .push(wire(voice(k, &target), format!("{add}.b")));
+            }
+        }
+        def.exports.outputs.push(OutputExport {
+            name: target,
+            from: format!("{last}.out"),
+        });
+    }
+    // The content's parameters outside the interface, under their own
+    // names, so `set` and live edits reach every voice.
+    for parameter in content.iter().filter(|c| c.parameter) {
+        if matched.values().any(|t| *t == parameter.name) {
+            continue;
+        }
+        def.exports.parameters.push(ParameterExport {
+            name: parameter.name.clone(),
+            to: every(&parameter.name),
+            range: None,
+            values: None,
+        });
+    }
+    let mut names = BTreeSet::new();
+    let exported = def
+        .exports
+        .inputs
+        .iter()
+        .map(|e| &e.name)
+        .chain(def.exports.outputs.iter().map(|e| &e.name))
+        .chain(def.exports.parameters.iter().map(|e| &e.name));
+    for export in exported {
+        if !names.insert(export.clone()) {
+            problems.push(format!(
+                "`{export}` names both the allocator's input and a port or parameter of the content; rename the `alloc` port"
+            ));
+        }
+    }
+    Generated {
+        def,
+        host,
+        problems,
+    }
 }
 
 /// Whether a slot's content is a module (not a project).

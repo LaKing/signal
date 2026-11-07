@@ -1,0 +1,56 @@
+# The cymbal: a brighter metallic cluster than the hats, six squares at
+# inharmonic frequencies plus noise, through a band-pass and a high-pass
+# (`tone`), with a long decay.
+schema_version = 1
+
+[composite]
+name = "cymbal909"
+
+[instances]
+sq1 = { module = "std.osc", shape = 2, freq = 296 }
+sq2 = { module = "std.osc", shape = 2, freq = 447 }
+sq3 = { module = "std.osc", shape = 2, freq = 571 }
+sq4 = { module = "std.osc", shape = 2, freq = 727 }
+sq5 = { module = "std.osc", shape = 2, freq = 873 }
+sq6 = { module = "std.osc", shape = 2, freq = 1173 }
+noise = { module = "std.noise" }
+metal_a = { module = "std.mix", gain_a = 0.25, gain_b = 0.25, gain_c = 0.25, gain_d = 0.25 }
+metal = { module = "std.mix", gain_a = 1, gain_b = 0.25, gain_c = 0.25, gain_d = 0.4 }
+band = { module = "std.svf", cutoff_hz = 9000, q = 0.8 }
+hp = { module = "std.svf", cutoff_hz = 5500, q = 0.7 }
+env = { module = "std.exp_env", attack_ms = 1, decay_ms = 900 }
+amp = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+vel_vca = { module = "std.mul" }
+level = { module = "std.gain", db = 4 }
+
+[wiring]
+connections = [
+  { from = "sq1.out", to = "metal_a.a" },
+  { from = "sq2.out", to = "metal_a.b" },
+  { from = "sq3.out", to = "metal_a.c" },
+  { from = "sq4.out", to = "metal_a.d" },
+  { from = "metal_a.out", to = "metal.a" },
+  { from = "sq5.out", to = "metal.b" },
+  { from = "sq6.out", to = "metal.c" },
+  { from = "noise.out", to = "metal.d" },
+  { from = "metal.out", to = "band.in" },
+  { from = "band.bp", to = "hp.in" },
+  { from = "hp.hp", to = "amp.a" },
+  { from = "env.out", to = "amp.b" },
+  { from = "amp.out", to = "vel_vca.a" },
+  { from = "velocity.out", to = "vel_vca.b" },
+  { from = "vel_vca.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = "env.trigger" }
+outputs = { out = "level.out" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tone = { to = "hp.cutoff_hz", min = 1000, max = 16000 }
+decay = { to = "env.decay_ms", min = 50, max = 8000 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

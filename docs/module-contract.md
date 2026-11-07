@@ -268,6 +268,7 @@ The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Sign
 |---|---|---|---|---|
 | `lib.voice` | `hz` (frequency, Hz), `gate` (gate), `velocity` (control, 0 to 1) | `out` (audio) | — | the studios' `moog_voice`, with no `map` |
 | `lib.instrument` | as `lib.voice` | `l`, `r` (audio) | — | a mono voice through `map = { l = "out", r = "out" }` |
+| `lib.poly_voice` | `notes` (events, trigger, `voice = "alloc"`), `hz` (frequency, Hz), `gate` (gate), `velocity` (control, 0 to 1), the last three `voice = "each"` | `out` (audio, `voice = "sum"`) | — | `moog_voice` in a slot with `voices` (ADR 0044 §2), with no `map` |
 | `lib.deck` | `position` (control, beats), `jump` (events, trigger), `running` (gate), `tempo` (control, bpm) | `l`, `r` (audio) | `release` | any project, through its default sink exports `l`, `r` (ADR 0035 §2) |
 
 The conventions: a template's port names are the ones the matching modules already use (exact names, ADR 0037 §4), a stereo pair is `l` and `r`, and a kind is given where it says what a port carries (a mismatch is only a warning). Others (`lib.effect`, …) wait until a project needs them.

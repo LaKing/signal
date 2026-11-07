@@ -1,0 +1,19 @@
+# A polyphonic voice (ADR 0044 §2): note events in, which the slot's
+# allocator distributes among its voices; each voice takes a pitch, a gate
+# and a velocity of its own, and the voices' outputs are summed. A slot from
+# it has `voices = N`. `moog_voice` of the studio projects matches it
+# exactly.
+schema_version = 1
+
+[interface]
+name = "poly_voice"
+description = "A polyphonic voice: `notes` (note events) are spread over the slot's voices, each playing its `hz` while its `gate` is high, at its `velocity`; the voices' `out` summed."
+
+[inputs]
+notes = { shape = "events", kind = "trigger", voice = "alloc", group = "note" }
+hz = { kind = "frequency", unit = "Hz", voice = "each", group = "note" }
+gate = { kind = "gate", voice = "each", group = "note" }
+velocity = { kind = "control", range = [0, 1], voice = "each", group = "note" }
+
+[outputs]
+out = { kind = "audio", voice = "sum" }

@@ -1,0 +1,110 @@
+# The studio with a polyphonic pad (ADR 0044, phase 1): the M2.11 studio demo
+# (a piano-roll melody playing a three-oscillator ladder-filter voice through
+# a tape echo, over a step-sequenced drum machine whose voices are all
+# synthesised, at 120 bpm), plus chords on eight voices of the same voice.
+#
+# Signal flow:
+#
+#   transport.tick ─► melody (note_seq, patterns/melody.toml) ─ hz, gate, velocity ─► synth ─► echo ─► bus.c
+#   transport.tick ─► chords (note_seq, patterns/chords.toml) ─ notes ─► pad (8 voices of moog_voice) ─► bus.d
+#   transport.tick ─► drums (step_seq8, patterns/drums.toml) ─ t1 … t8 ─► kick, snare, clap, hats, tom, rim, cymbal
+#   kick, snare, clap, hats ─► drum_a ─► bus.a        tom, rim, cymbal ─► drum_b ─► bus.b
+#   bus ─► dc (DC blocker) ─► limiter (tanh) ─► out (gain 0.25) ─► l, r
+#
+# Each drum lane goes to its voice's trigger and to its `velocity` parameter:
+# the lane's Set(level) sets the velocity (an accent multiplies it by
+# accent_level), and the Trigger that follows is a logged discard there
+# (docs/module-contract.md, "The tick clock and the sequencers").
+#
+# The pad is a slot from `lib.poly_voice` with `voices = 8`: the chords'
+# `notes` events feed its allocator, which gives each note a voice of its own
+# (`/pad/v0` … `/pad/v7`); the voices' outputs are summed, raw (no scaling by
+# the count, decision 6), so the pad's `volume` is set low for four-note
+# chords. Its other settings make a soft pad: slow attack and release, a
+# darker filter, no glide.
+#
+# Safe gain: the limiter is a tanh, whose output never exceeds 1, and the
+# output gain is 0.25, so at these settings the project never plays above
+# 0.25 (−12 dBFS) whatever the voices do.
+schema_version = 1
+
+[project]
+name = "studio-poly"
+sample_rate = 48000
+seed = 17
+
+[instances]
+# The tempo; ticks at 96 per beat for the sequencers.
+transport = { module = "std.transport", bpm = 120, ppq = 96 }
+melody = { module = "std.note_seq", pattern = "melody", ppq = 96 }
+drums = { module = "std.step_seq8", pattern = "drums", ppq = 96, accent_level = 1.5 }
+
+chords = { module = "std.note_seq", pattern = "chords", ppq = 96 }
+
+synth = { module = "moog_voice" }
+pad = { slot = "lib.poly_voice", load = "moog_voice", voices = 8, set = { volume = -8, glide = 0, cutoff = 900, env_amount = 600, a_attack = 250, a_decay = 400, a_sustain = 0.8, a_release = 900, f_attack = 300, f_release = 900 } }
+echo = { module = "tape_delay" }
+
+kick = { module = "kick909" }
+snare = { module = "snare909" }
+clap = { module = "clap909" }
+hats = { module = "hat909" }
+tom = { module = "tom909" }
+rim = { module = "rim909" }
+cymbal = { module = "cymbal909" }
+
+drum_a = { module = "std.mix" }
+drum_b = { module = "std.mix" }
+# Drums on a and b, the echoed voice on c, the pad on d, levelled so that the limiter
+# only rounds off the loudest hits.
+bus = { module = "std.mix", gain_a = 0.45, gain_b = 0.45, gain_c = 0.55, gain_d = 0.5 }
+dc = { module = "std.dc_block" }
+limiter = { module = "std.tanh_shaper", drive = 1 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "transport.tick", to = "melody.tick" },
+  { from = "transport.tick", to = "drums.tick" },
+  { from = "transport.tick", to = "chords.tick" },
+  # The pad: the chords' notes to the allocator, the summed voices to the bus.
+  { from = "chords.notes", to = "pad.notes" },
+  { from = "pad.out", to = "bus.d" },
+  # The voice, through the echo.
+  { from = "melody.hz", to = "synth.hz" },
+  { from = "melody.gate", to = "synth.gate" },
+  { from = "melody.velocity", to = "synth.velocity" },
+  { from = "synth.out", to = "echo.in" },
+  { from = "echo.out", to = "bus.c" },
+  # The drums: each lane triggers its voice and sets its velocity.
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "clap.trigger" },
+  { from = "drums.t3", to = "clap.velocity" },
+  { from = "drums.t4", to = "hats.closed" },
+  { from = "drums.t4", to = "hats.closed_velocity" },
+  { from = "drums.t5", to = "hats.open" },
+  { from = "drums.t5", to = "hats.open_velocity" },
+  { from = "drums.t6", to = "tom.trigger" },
+  { from = "drums.t6", to = "tom.velocity" },
+  { from = "drums.t7", to = "rim.trigger" },
+  { from = "drums.t7", to = "rim.velocity" },
+  { from = "drums.t8", to = "cymbal.trigger" },
+  { from = "drums.t8", to = "cymbal.velocity" },
+  { from = "kick.out", to = "drum_a.a" },
+  { from = "snare.out", to = "drum_a.b" },
+  { from = "clap.out", to = "drum_a.c" },
+  { from = "hats.out", to = "drum_a.d" },
+  { from = "tom.out", to = "drum_b.a" },
+  { from = "rim.out", to = "drum_b.b" },
+  { from = "cymbal.out", to = "drum_b.c" },
+  { from = "drum_a.out", to = "bus.a" },
+  { from = "drum_b.out", to = "bus.b" },
+  # The master bus.
+  { from = "bus.out", to = "dc.in" },
+  { from = "dc.out", to = "limiter.in" },
+  { from = "limiter.out", to = "out.l" },
+  { from = "limiter.out", to = "out.r" },
+]

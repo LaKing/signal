@@ -74,6 +74,8 @@ pub(crate) struct SlotSpans {
     pub(crate) load: Option<(String, Span)>,
     /// `map`: each key and its span, its value and its span.
     pub(crate) map: Vec<(String, Span, crate::model::MapValue, Span)>,
+    /// ADR 0044 §1: `voices` and its span.
+    pub(crate) voices: Option<(crate::model::VoicesSpec, Span)>,
 }
 
 /// The instance name a synthetic root gives the composite `name`: the name

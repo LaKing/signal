@@ -934,8 +934,8 @@ fn pinned_fields_are_checked_as_before() {
     assert!(!has(&warnings, &["`side`"]), "{warnings:#?}");
 }
 
-/// Test 3: `auto = false`, `auto` on a parameter, a `voice` field (ADR
-/// 0044, not built: an unknown field) and a range of one number are errors
+/// Test 3: `auto = false`, `auto` on a parameter, a `voice` field on an
+/// auto port (ADR 0045 §6) and a range of one number are errors
 /// at the key. (An auto port in a library template is refused in
 /// `patch/slot_tests.rs`, `only_project_templates_may_hold_auto_ports`, and
 /// `crates/signal-lib/tests/library.rs`.)
@@ -952,7 +952,7 @@ fn auto_is_refused_where_it_means_nothing() {
         ),
         (
             "fx = { slot = { inputs = { in = { auto = true, voice = \"each\" } } } }",
-            "unknown field `voice`",
+            "a port with `voice` is typed, not auto",
         ),
         (
             "fx = { slot = { inputs = { in = { range = [1] } } } }",

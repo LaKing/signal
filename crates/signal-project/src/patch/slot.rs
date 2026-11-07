@@ -671,8 +671,11 @@ pub(crate) fn port_text(port: &InterfacePort) -> String {
     if let Some(auto) = port.auto.as_ref().filter(|a| !a.inferred.is_empty()) {
         return auto_text(port, auto);
     }
-    let plain =
-        port.unit.is_none() && port.range.is_none() && port.group.is_none() && port.rate == 1;
+    let plain = port.unit.is_none()
+        && port.range.is_none()
+        && port.group.is_none()
+        && port.voice.is_none()
+        && port.rate == 1;
     let kind = crate::slot::kind_name(port.kind);
     match port.shape {
         signal_core::PortShape::Signal if plain => return format!("\"{kind}\""),
@@ -703,6 +706,9 @@ pub(crate) fn port_text(port: &InterfacePort) -> String {
         range.push(crate::write::number(min));
         range.push(crate::write::number(max));
         table.insert("range", Value::Array(range));
+    }
+    if let Some(voice) = port.voice {
+        table.insert("voice", Value::from(voice.name()));
     }
     if let Some(group) = &port.group {
         table.insert("group", Value::from(group.as_str()));
@@ -847,6 +853,7 @@ fn interface_port(
         },
         group: keep(&port.group, base.map(|b| &b.group)),
         auto: auto_of(port, base, role)?,
+        voice: base.and_then(|b| b.voice),
     })
 }
 

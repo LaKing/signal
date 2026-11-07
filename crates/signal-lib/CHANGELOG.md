@@ -35,6 +35,8 @@ project's text.
 
 The library of Signal 0.4.0. No composite changed its output from 0.3.
 
+- `lib.poly_voice` (interface template, ADR 0044 §2): a polyphonic voice, inputs `notes` (events, trigger, `voice = "alloc"`), `hz` (frequency, Hz), `gate` (gate) and `velocity` (control, 0 to 1), the last three `voice = "each"`, output `out` (audio, `voice = "sum"`); text hash `bdc391924b112a10`
+
 ## 0.3
 
 The library of Signal 0.3.0. No composite changed its output from 0.2.

@@ -86,7 +86,7 @@ static COMPOSITES: [LibraryFile; 22] = library![
 /// hash (`tests/pinned.toml`, `[interfaces]`), since a template has no
 /// render, and never changed incompatibly: a changed port set or type is a
 /// new name.
-static INTERFACES: [LibraryFile; 3] = [
+static INTERFACES: [LibraryFile; 4] = [
     LibraryFile {
         name: "deck",
         text: include_str!("../interfaces/deck.toml"),
@@ -94,6 +94,10 @@ static INTERFACES: [LibraryFile; 3] = [
     LibraryFile {
         name: "instrument",
         text: include_str!("../interfaces/instrument.toml"),
+    },
+    LibraryFile {
+        name: "poly_voice",
+        text: include_str!("../interfaces/poly_voice.toml"),
     },
     LibraryFile {
         name: "voice",
@@ -222,7 +226,7 @@ mod tests {
         assert!(get("lib.tape_echo").is_none());
         assert_eq!(get("tape_echo").unwrap().hash().len(), 16);
         let names: Vec<&str> = interfaces().iter().map(|f| f.name).collect();
-        assert_eq!(names, ["deck", "instrument", "voice"]);
+        assert_eq!(names, ["deck", "instrument", "poly_voice", "voice"]);
         assert_eq!(interface("voice").map(|f| f.name), Some("voice"));
         // A template's namespace is the `slot` key's own, and no composite
         // shares a template's name, so `lib.<name>` names one thing in the

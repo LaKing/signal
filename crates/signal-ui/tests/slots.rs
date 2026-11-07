@@ -150,7 +150,10 @@ fn graph_gives_slot_boxes_and_templates(transport: Transport) {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(templates, ["lib.deck", "lib.instrument", "lib.voice"]);
+    assert_eq!(
+        templates,
+        ["lib.deck", "lib.instrument", "lib.poly_voice", "lib.voice"]
+    );
     // `describe`: the slot's interface parameter is a control, under its own name.
     let d = rig.request(&mut ws, 2, json!({"type": "describe"}), "describe");
     let volume = d["controls"]

@@ -1,0 +1,28 @@
+# One bar of 16ths, four on the floor: the kick on every beat (accented on 1
+# and 3), clap and snare on 2 and 4, open hats on the off-beats, each choked
+# by the closed hat two 16ths later, a tom and rim fill, a cymbal on 1. In
+# output order: t1 kick … t8 cymbal.
+schema_version = 1
+kind = "steps"
+steps = 16
+step = 0.25
+
+[lanes]
+kick = "X...x...X...x..."
+snare = "....x.......x.x."
+clap = "....X.......X..."
+chh = "xx..Xx..xx..Xx.."
+ohh = "..x...x...x...X."
+ltom = ".............x.."
+rim = "...x.......x...."
+cym = "X..............."
+
+[levels]
+kick = 0.9
+snare = 0.55
+clap = 0.75
+chh = 0.5
+ohh = 0.55
+ltom = 0.7
+rim = 0.5
+cym = 0.4

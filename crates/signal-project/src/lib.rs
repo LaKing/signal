@@ -77,8 +77,9 @@ pub use pattern::{
 pub use schema::schema;
 pub use slot::{
     Auto, AutoEnd, AutoFrom, ContentNames, ContentPort, Field, Interface, InterfacePort,
-    LibraryInterface, Match, PortType, Retyped, Role, SlotResolution, content_names,
-    interface_templates, library_interfaces, library_template, project_content, retyped,
+    LibraryInterface, Match, PortType, Retyped, Role, SlotResolution, SlotVoices, Voice,
+    content_names, interface_templates, library_interfaces, library_template, project_content,
+    retyped,
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{
@@ -2022,6 +2023,29 @@ fn definition(
                     interface,
                     load: entry.load.as_ref().map(|l| (l.get_ref().clone(), l.span())),
                     map,
+                    voices: entry.voices.as_ref().and_then(|v| {
+                        let spec = match *v.get_ref() {
+                            model::VoicesKey::Table(spec) => spec,
+                            model::VoicesKey::Count(n) => match model::voice_count(n) {
+                                Ok(count) => model::VoicesSpec {
+                                    count,
+                                    legato: false,
+                                },
+                                Err(message) => {
+                                    problems.push((v.span().start, format!("{instance}: {message}")));
+                                    return None;
+                                }
+                            },
+                            model::VoicesKey::Number(x) => {
+                                problems.push((
+                                    v.span().start,
+                                    format!("{instance}: `voices` is a whole count from 1 to {}; {x} is not", slot::MAX_VOICES),
+                                ));
+                                return None;
+                            }
+                        };
+                        Some((spec, v.span()))
+                    }),
                 }
             });
             let seed = entry.seed.as_ref().map(|s| (*s.get_ref(), s.span()));

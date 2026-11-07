@@ -102,6 +102,8 @@ pub(crate) struct PortSpec {
     pub(crate) group: Option<String>,
     /// ADR 0045 §1: whether it is an auto port.
     pub(crate) auto: bool,
+    /// ADR 0044 §2: its role in a slot with `voices`.
+    pub(crate) voice: Option<crate::slot::Voice>,
     /// Which of its fields are written (pinned, in an auto port).
     pub(crate) written: Written,
 }
@@ -157,7 +159,7 @@ impl<'de> Deserialize<'de> for PortSpec {
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(
-                    "a kind (`\"audio\"`), `\"events\"`, or a table `{ auto, shape, rate, kind, unit, range, group }`",
+                    "a kind (`\"audio\"`), `\"events\"`, or a table `{ auto, shape, rate, kind, unit, range, group, voice }`",
                 )
             }
 
@@ -175,6 +177,7 @@ impl<'de> Deserialize<'de> for PortSpec {
                     range: None,
                     group: None,
                     auto: false,
+                    voice: None,
                     written: Written::default(),
                 })
             }
@@ -188,6 +191,7 @@ impl<'de> Deserialize<'de> for PortSpec {
                     range: None,
                     group: None,
                     auto: false,
+                    voice: None,
                     written: Written::default(),
                 };
                 let mut keys = 0;
@@ -236,13 +240,30 @@ impl<'de> Deserialize<'de> for PortSpec {
                             port.written.range = true;
                         }
                         "group" => port.group = Some(map.next_value::<String>()?),
+                        "voice" => {
+                            let name = map.next_value::<String>()?;
+                            port.voice = Some(crate::slot::Voice::named(&name).ok_or_else(|| {
+                                de::Error::custom(format!(
+                                    "unknown voice role `{name}`; roles: shared, each, sum, alloc (ADR 0044 §2)"
+                                ))
+                            })?);
+                        }
                         other => {
                             return Err(de::Error::unknown_field(
                                 other,
-                                &["auto", "shape", "rate", "kind", "unit", "range", "group"],
+                                &[
+                                    "auto", "shape", "rate", "kind", "unit", "range", "group",
+                                    "voice",
+                                ],
                             ));
                         }
                     }
+                }
+                // ADR 0045 §6: a port with a role is typed.
+                if port.auto && port.voice.is_some() {
+                    return Err(de::Error::custom(
+                        "a port with `voice` is typed, not auto (ADR 0045 §6): write its fields without `auto`",
+                    ));
                 }
                 // ADR 0045 §1: the empty table is an auto port.
                 if keys == 0 {
@@ -335,7 +356,11 @@ impl JsonSchema for PortSpec {
                                 { "type": "array", "maxItems": 0 }
                             ]
                         },
-                        "group": { "type": "string" }
+                        "group": { "type": "string" },
+                        "voice": {
+                            "description": "ADR 0044 §2: the port's role in a slot with `voices` (shared, each, sum, alloc); only on a typed port.",
+                            "enum": ["shared", "each", "sum", "alloc"]
+                        }
                     },
                     "additionalProperties": false
                 }
@@ -633,6 +658,8 @@ pub(crate) struct InstanceEntry {
     pub(crate) load: Option<Spanned<String>>,
     /// ADR 0037 §4: overrides of the match, by slot port or parameter.
     pub(crate) map: Option<Spanned<MapEntries>>,
+    /// ADR 0044 §1: a polyphonic slot's voices.
+    pub(crate) voices: Option<Spanned<VoicesKey>>,
     /// ADR 0035 §1: an included project's seed scope.
     pub(crate) seed: Option<Spanned<u64>>,
     /// ADR 0035 §1: overrides of the content's own parameters.
@@ -647,6 +674,110 @@ pub(crate) struct InstanceEntry {
     /// parameter name (only in `project.toml`).
     pub(crate) snapshot_exclude: Option<Spanned<Vec<Spanned<String>>>>,
     pub(crate) parameters: BTreeMap<Spanned<String>, Spanned<f64>>,
+}
+
+/// ADR 0044 §1: `voices = N` or `voices = { count, assign, steal, legato }`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VoicesSpec {
+    /// From 1 to [`crate::slot::MAX_VOICES`].
+    pub(crate) count: u32,
+    /// The allocator's legato.
+    pub(crate) legato: bool,
+}
+
+/// The `voices` key as written: on a slot, its voices (a bare count is
+/// checked where it is located, `count`); on a module instance, a number is
+/// the value of its parameter `voices` (`std.voice_alloc`'s).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum VoicesKey {
+    Count(i64),
+    Number(f64),
+    Table(VoicesSpec),
+}
+
+/// A count of voices, checked.
+pub(crate) fn voice_count(value: i64) -> Result<u32, String> {
+    u32::try_from(value)
+        .ok()
+        .filter(|n| (1..=crate::slot::MAX_VOICES).contains(n))
+        .ok_or_else(|| {
+            format!(
+                "`voices` is a count from 1 to {}; {value} is outside it",
+                crate::slot::MAX_VOICES
+            )
+        })
+}
+
+impl<'de> Deserialize<'de> for VoicesKey {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct VoicesVisitor;
+
+        fn count<E: de::Error>(value: i64) -> Result<u32, E> {
+            voice_count(value).map_err(E::custom)
+        }
+
+        impl<'de> Visitor<'de> for VoicesVisitor {
+            type Value = VoicesKey;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a count from 1 to 64, or a table `{ count, assign, steal, legato }`")
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<VoicesKey, E> {
+                Ok(VoicesKey::Count(value))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<VoicesKey, E> {
+                self.visit_i64(i64::try_from(value).unwrap_or(i64::MAX))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<VoicesKey, E> {
+                Ok(VoicesKey::Number(value))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<VoicesKey, A::Error> {
+                let mut found = None;
+                let mut legato = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "count" => found = Some(count(map.next_value::<i64>()?)?),
+                        "assign" => {
+                            let value = map.next_value::<String>()?;
+                            if value != "rotate" {
+                                return Err(de::Error::custom(format!(
+                                    "`assign = \"{value}\"`: only `\"rotate\"` is built (ADR 0044 §10)"
+                                )));
+                            }
+                        }
+                        "steal" => {
+                            let value = map.next_value::<String>()?;
+                            if value != "oldest" {
+                                return Err(de::Error::custom(format!(
+                                    "`steal = \"{value}\"`: only `\"oldest\"` is built (ADR 0044 §10)"
+                                )));
+                            }
+                        }
+                        "legato" => legato = map.next_value::<bool>()?,
+                        "sleep" => {
+                            return Err(de::Error::custom(
+                                "`sleep` is not yet built (ADR 0044 §11, phase 5)",
+                            ));
+                        }
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &["count", "assign", "steal", "legato"],
+                            ));
+                        }
+                    }
+                }
+                let count = found.ok_or_else(|| de::Error::missing_field("count"))?;
+                Ok(VoicesKey::Table(VoicesSpec { count, legato }))
+            }
+        }
+
+        deserializer.deserialize_any(VoicesVisitor)
+    }
 }
 
 /// A slot's `map` table: slot port or parameter → content name or `false`.
@@ -677,6 +808,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     render: None,
                     load: None,
                     map: None,
+                    voices: None,
                     seed: None,
                     set: None,
                     gpu: None,
@@ -684,6 +816,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     snapshot_exclude: None,
                     parameters: BTreeMap::new(),
                 };
+                let mut voices_key = None;
                 while let Some(key) = map.next_key::<Spanned<String>>()? {
                     match key.get_ref().as_str() {
                         "module" => entry.module = Some(map.next_value()?),
@@ -693,6 +826,10 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         "render" => entry.render = Some(map.next_value()?),
                         "load" => entry.load = Some(map.next_value()?),
                         "map" => entry.map = Some(map.next_value()?),
+                        "voices" => {
+                            voices_key = Some(key.span());
+                            entry.voices = Some(map.next_value()?);
+                        }
                         "seed" => entry.seed = Some(map.next_value()?),
                         "set" => entry.set = Some(map.next_value()?),
                         "gpu" => entry.gpu = Some(map.next_value()?),
@@ -721,15 +858,37 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     }
                 }
                 if entry.slot.is_none() {
-                    for (key, given) in
-                        [("load", entry.load.is_some()), ("map", entry.map.is_some())]
-                    {
+                    for (key, given) in [
+                        ("load", entry.load.is_some()),
+                        ("map", entry.map.is_some()),
+                        ("voices", entry.voices.is_some() && entry.module.is_none()),
+                    ] {
                         if given {
                             return Err(de::Error::custom(format!(
                                 "`{key}` is a slot's key (`slot = …`, ADR 0037)"
                             )));
                         }
                     }
+                }
+                // ADR 0044 §1: on a module instance a number is a parameter
+                // value (`std.voice_alloc`'s `voices`); the table is a slot's.
+                if entry.module.is_some()
+                    && let Some(voices) = entry.voices.take()
+                {
+                    let span = voices.span();
+                    let value = match *voices.get_ref() {
+                        VoicesKey::Count(n) => n as f64,
+                        VoicesKey::Number(x) => x,
+                        VoicesKey::Table(_) => {
+                            return Err(de::Error::custom(
+                                "a `voices` table is a slot's key (`slot = …`, ADR 0044 §1)",
+                            ));
+                        }
+                    };
+                    entry.parameters.insert(
+                        Spanned::new(voices_key.unwrap_or(span.clone()), "voices".to_owned()),
+                        Spanned::new(span, value),
+                    );
                 }
                 if entry.device.is_none() && entry.render.is_some() {
                     return Err(de::Error::custom(
@@ -780,6 +939,23 @@ impl JsonSchema for InstanceEntry {
                 "map": {
                     "type": "object",
                     "additionalProperties": { "anyOf": [{ "type": "string" }, { "const": false }] }
+                },
+                "voices": {
+                    "description": "ADR 0044 §1: a slot's voices, a count from 1 to 64 or a table { count, assign = \"rotate\", steal = \"oldest\", legato }.",
+                    "anyOf": [
+                        { "type": "integer", "minimum": 1, "maximum": 64 },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "count": { "type": "integer", "minimum": 1, "maximum": 64 },
+                                "assign": { "const": "rotate" },
+                                "steal": { "const": "oldest" },
+                                "legato": { "type": "boolean" }
+                            },
+                            "required": ["count"],
+                            "additionalProperties": false
+                        }
+                    ]
                 },
                 "seed": { "type": "integer", "minimum": 0 },
                 "set": { "type": "object", "additionalProperties": { "type": "number" } },
