@@ -72,6 +72,11 @@ pub struct RunInput {
     /// One block of interleaved frames.
     scratch: Vec<f32>,
     record: Option<Producer<f32>>,
+    /// The record stopped at its first overflow: it holds every word from
+    /// frame 0 up to there and nothing after, so what it holds stays at its
+    /// frames (a block left out in the middle would move every later one
+    /// earlier in a replay).
+    record_stopped: bool,
     counts: Arc<InputCounts>,
 }
 
@@ -118,6 +123,7 @@ impl RunInput {
             id: None,
             scratch: vec![0.0; max_frames.max(1) * width.max(1)],
             record,
+            record_stopped: false,
             counts,
         };
         (input, reader)
@@ -181,13 +187,22 @@ impl RunInput {
                 }
             }
             if let Some(record) = self.record.as_mut() {
-                if let Ok(mut chunk) = record.write_chunk(buffer.len()) {
-                    let (first, second) = chunk.as_mut_slices();
-                    let (x, y) = buffer.split_at(first.len());
-                    first.copy_from_slice(x);
-                    second.copy_from_slice(y);
-                    chunk.commit_all();
-                } else {
+                let written = !self.record_stopped
+                    && match record.write_chunk(buffer.len()) {
+                        Ok(mut chunk) => {
+                            let (first, second) = chunk.as_mut_slices();
+                            let (x, y) = buffer.split_at(first.len());
+                            first.copy_from_slice(x);
+                            second.copy_from_slice(y);
+                            chunk.commit_all();
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                if !written {
+                    // From the first overflow on, nothing more is recorded:
+                    // the record is the run's first frames, whole.
+                    self.record_stopped = true;
                     self.counts
                         .record_overflows
                         .fetch_add(buffer.len() as u64, Ordering::Relaxed);

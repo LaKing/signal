@@ -163,7 +163,7 @@ impl InputHistory {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let reason = if overflows > 0 {
                     Some(format!(
-                        "the recorder fell behind: {overflows} samples were lost (a full ring)"
+                        "the recorder fell behind: the record stops at frame {recorded}, the {overflows} samples after it were not recorded (a full ring)"
                     ))
                 } else if recorded != frames {
                     Some(format!(

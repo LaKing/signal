@@ -65,6 +65,9 @@ fn captured() -> Vec<f32> {
 enum Capture {
     /// A record ring of `ring` frames, drained at every poll (`with_inputs`).
     Recorded { ring: usize },
+    /// A ring of 1 024 frames, not drained for callbacks 8 to 15 (the
+    /// recorder falls behind and the ring fills), drained again after.
+    Stalled,
     /// The mic plays but the recorder is not given its record.
     NotGiven,
     /// Nothing captured (as the null driver): `with_inputs` with no record.
@@ -86,8 +89,10 @@ fn record(name: &str, capture: Capture) -> (PathBuf, Vec<f32>) {
     let mut live = LiveRecorder::new(recorder, registry.clone());
     let ring = match capture {
         Capture::Recorded { ring } => Some(ring),
+        Capture::Stalled => Some(1_024),
         _ => None,
     };
+    let stalled = matches!(capture, Capture::Stalled);
     if !matches!(capture, Capture::Nothing) {
         let (input, record) = RunInput::new(
             "/mic".parse().unwrap(),
@@ -109,9 +114,11 @@ fn record(name: &str, capture: Capture) -> (PathBuf, Vec<f32>) {
     }
     let mut driver = NullDriver::new(RATE, 2, 3);
     driver.start(runner).unwrap();
-    for _ in 0..FRAMES / 256 {
+    for n in 0..FRAMES / 256 {
         driver.run(256, || {}).unwrap();
-        controller.poll(&mut live);
+        if !(stalled && (8..16).contains(&n)) {
+            controller.poll(&mut live);
+        }
     }
     let runner = driver.stop().unwrap().unwrap();
     controller.poll(&mut live);
@@ -244,4 +251,44 @@ fn a_changed_input_file_fails_to_load() {
     fs::write(&path, &bytes).unwrap();
     let error = Session::load(&dir, &registry).err().unwrap();
     assert!(format!("{error:?}").contains("bytes, not"), "{error:?}");
+}
+
+/// The recorder falls behind mid-run and catches up: the record stops at
+/// its first overflow, so it holds the run's first frames whole and nothing
+/// after (a block left out would move every later one earlier). Replayed
+/// with `allow_incomplete`, those frames are what was played, bit for bit,
+/// and the input reads 0 after them.
+#[test]
+fn an_overflow_mid_run_keeps_the_records_frames_in_place() {
+    let registry = registry();
+    let (dir, played) = record("stalled", Capture::Stalled);
+    let session = Session::load(&dir, &registry).unwrap();
+    let input = &session.inputs[0];
+    assert!(!input.complete, "{input:?}");
+    // Callbacks 0..8 drained, then the ring's 1 024 frames: 3 072 at most.
+    assert!(
+        input.frames >= 8 * 256 && input.frames <= 8 * 256 + 1_024,
+        "{}",
+        input.frames
+    );
+    assert_eq!(
+        input.words.as_deref(),
+        Some(&captured()[..input.frames as usize * 2])
+    );
+    let options = ReplayOptions {
+        allow_incomplete: true,
+        threads: 1,
+        ..ReplayOptions::default()
+    };
+    let replayed = replay_with(&session, &registry, options).unwrap();
+    let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
+    let kept = input.frames as usize * 2;
+    assert_eq!(
+        &samples[..kept],
+        &played[..kept],
+        "the recorded frames in place"
+    );
+    // After them the mic reads 0: its right channel is silent.
+    assert!(samples[kept..].chunks(2).all(|f| f[1] == 0.0));
+    assert!(played[kept..].chunks(2).any(|f| f[1] != 0.0));
 }
