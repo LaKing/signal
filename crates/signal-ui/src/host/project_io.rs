@@ -86,11 +86,25 @@ fn folder_look(dir: &Path) -> Look {
 
 /// Packs `dir` with project id `id` into `file`, again while its files
 /// change under the packing (at most [`FOLDER_SAVE_TRIES`] times); the
-/// outcome and the look the bytes were packed at. Its own thread.
-fn pack_folder(dir: &Path, file: &Path, id: &str) -> (Result<(), String>, Look) {
+/// outcome and the look the bytes were packed at. Its own thread, so it may
+/// wait for the project's writer lock (ADR 0040): Signal's own writers never
+/// commit half of a transaction under the pack (review of c24cf1e, P3), and
+/// the looks still catch an editor outside Signal.
+fn pack_folder(ctx: &WriteCtx, dir: &Path, file: &Path, id: &str) -> (Result<(), String>, Look) {
     let mut last = folder_look(dir);
     for _ in 0..FOLDER_SAVE_TRIES {
-        let packed = archive::pack_identified(dir, Some(id));
+        let packed = match ctx.lock() {
+            Ok(_lock) => archive::pack_identified(dir, Some(id)),
+            Err(error) => {
+                return (
+                    Err(format!(
+                        "{} was not saved: the project's writer lock: {error}",
+                        file.display()
+                    )),
+                    last,
+                );
+            }
+        };
         let now = folder_look(dir);
         if now == last {
             let saved = packed
@@ -337,12 +351,13 @@ impl Host {
     fn start_folder_save(&mut self, file: PathBuf, id: String, done: SaveDone) {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = self.opening.dir.clone();
+        let ctx = self.write_ctx();
         let target = file.clone();
         let key = id.clone();
         let spawned = std::thread::Builder::new()
             .name("signal-save-as".to_owned())
             .spawn(move || {
-                let _ = tx.send(pack_folder(&dir, &target, &key));
+                let _ = tx.send(pack_folder(&ctx, &dir, &target, &key));
             });
         if let Err(error) = spawned {
             return done(Err(format!("{} was not saved: {error}", file.display())));
