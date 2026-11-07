@@ -96,44 +96,39 @@ impl Resampler {
     /// Appends interleaved frames (a partial last frame is ignored).
     /// Real-time safe.
     pub fn write(&mut self, interleaved: &[f32]) {
-        let channels = self.channels;
-        for frame in interleaved.chunks_exact(channels) {
-            let at = (self.written & self.mask) as usize;
-            for (plane, &sample) in self.history.chunks_exact_mut(2 * self.capacity).zip(frame) {
-                if let Some(slot) = plane.get_mut(at) {
-                    *slot = sample;
-                }
-                if let Some(slot) = plane.get_mut(at + self.capacity) {
-                    *slot = sample;
-                }
-            }
-            self.written = self.written.wrapping_add(1);
-        }
+        let whole = interleaved.len() / self.channels * self.channels;
+        self.write_split(interleaved.get(..whole).unwrap_or_default(), &[]);
     }
 
     /// Appends interleaved samples that may arrive in two slices split
     /// anywhere (a ring's two halves); `channels` must divide their total.
-    /// Real-time safe.
+    /// One channel at a time, so each plane is written in order: frame by
+    /// frame, every frame touches all the planes, which at 64 channels
+    /// costs about ten times as much. Real-time safe.
     pub fn write_split(&mut self, first: &[f32], second: &[f32]) {
         let channels = self.channels;
         let capacity = self.capacity;
-        let mut channel = 0usize;
-        let mut at = (self.written & self.mask) as usize;
-        for &sample in first.iter().chain(second) {
-            let base = channel * 2 * capacity + at;
-            if let Some(slot) = self.history.get_mut(base) {
-                *slot = sample;
-            }
-            if let Some(slot) = self.history.get_mut(base + capacity) {
-                *slot = sample;
-            }
-            channel += 1;
-            if channel == channels {
-                channel = 0;
-                self.written = self.written.wrapping_add(1);
-                at = (self.written & self.mask) as usize;
+        let frames = (first.len() + second.len()) / channels;
+        let start = self.written;
+        let mask = self.mask;
+        for (channel, plane) in self.history.chunks_exact_mut(2 * capacity).enumerate() {
+            let (low, high) = plane.split_at_mut(capacity);
+            for n in 0..frames {
+                let i = n * channels + channel;
+                let sample = match first.get(i) {
+                    Some(&x) => x,
+                    None => second.get(i - first.len()).copied().unwrap_or(0.0),
+                };
+                let at = (start.wrapping_add(n as u32) & mask) as usize;
+                if let Some(slot) = low.get_mut(at) {
+                    *slot = sample;
+                }
+                if let Some(slot) = high.get_mut(at) {
+                    *slot = sample;
+                }
             }
         }
+        self.written = start.wrapping_add(frames as u32);
     }
 
     /// The first frame index after the last one a read at `position` needs
@@ -157,29 +152,23 @@ impl Resampler {
         (room_fixed as u64).div_ceil(step)
     }
 
-    /// The normalised correlation of the `len` stored frames from index `a`
-    /// with those from index `b`, every channel summed: Σ a·b / √(Σa²·Σb²),
-    /// 0 when either is silent. `len` must not exceed the capacity.
-    /// Real-time safe: `2 × len × channels` multiply-adds.
-    pub fn correlation(&self, a: u32, b: u32, len: usize) -> f64 {
-        let len = len.min(self.capacity);
-        let (sa, sb) = ((a & self.mask) as usize, (b & self.mask) as usize);
-        let (mut ab, mut aa, mut bb) = (0.0f32, 0.0f32, 0.0f32);
-        for plane in self.history.chunks_exact(2 * self.capacity) {
-            let (Some(x), Some(y)) = (plane.get(sa..sa + len), plane.get(sb..sb + len)) else {
+    /// Writes into `out` the mix of the stored frames from index `from`
+    /// (`out.len()` of them, at most the capacity): the sum of at most
+    /// `most` channels, evenly spaced, so its cost does not grow with the
+    /// channel count. A splice's alignment reference. Real-time safe:
+    /// `out.len() × min(channels, most)` adds.
+    pub fn mix_into(&self, from: u32, most: usize, out: &mut [f32]) {
+        out.fill(0.0);
+        let len = out.len().min(self.capacity);
+        let start = (from & self.mask) as usize;
+        let stride = self.channels.div_ceil(most.max(1));
+        for plane in self.history.chunks_exact(2 * self.capacity).step_by(stride) {
+            let Some(x) = plane.get(start..start + len) else {
                 continue;
             };
-            for (&p, &q) in x.iter().zip(y) {
-                ab += p * q;
-                aa += p * p;
-                bb += q * q;
+            for (o, &v) in out.iter_mut().zip(x) {
+                *o += v;
             }
-        }
-        let norm = f64::from(aa) * f64::from(bb);
-        if norm > 0.0 {
-            f64::from(ab) / norm.sqrt()
-        } else {
-            0.0
         }
     }
 

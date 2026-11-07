@@ -1143,7 +1143,16 @@ A 440 Hz sine at 128/128 periods, splatter (energy above 2 kHz in a Hann-windowe
 ### Allocation and cost (verification 6)
 
 - `adapter_no_allocation.rs`: no heap call in `push` or `pull` on any path (startup, steady, repeats, skips, an empty ring and its refill, a full ring dropping frames, pulls longer than a piece; at 48/48, 48 → 44.1 and 44.1 → 48 kHz, stereo; and on two threads). The adapter's sources name no lock, sleep, park, clock or print.
-- **Worst case per pull piece** (`worst_case_multiply_adds`): two heads × `max_pull` × taps × (1 + channels), plus an alignment's (splice + 1) × 2 × splice × channels. At 2 channels, 128 frames and 160 taps one head is 61 440 (the ADR's 41 000 left out the coefficient interpolation); an alignment at 48 kHz (240 frames) is 231 360.
+- **Worst case per pull piece** (`worst_case_multiply_adds`): two heads × `max_pull` × taps × (1 + channels), plus an alignment (`align_multiply_adds`). At 2 channels, 128 frames and 160 taps one head is 61 440 (the ADR's 41 000 left out the coefficient interpolation). The alignment was (splice + 1) × 2 × splice × channels, 231 360 at 48 kHz and stereo and 118 million at 192 kHz and 64 channels; since 2026-11-07 it mixes at most 8 channels and searches coarse then fine (ADR 0052, phase 1 change 5), at most 110 976 at 192 kHz whatever the channels (`adapter_repair_cost.rs` checks the bound).
+- **Repairs at 192 kHz** (`repair_cost_at_192_khz`, a timing on the M5 Max, release, 128-frame callbacks, deadline 0.667 ms; the median pull of a 4 000-pull run and the slowest from the repair on, in ms):
+
+  | Channels | Median | Repeat | Skip | Restart |
+  |---:|---:|---:|---:|---:|
+  | 2 | 0.009 | 0.028 | 0.023 | 0.023 |
+  | 16 | 0.036 | 0.081 | 0.096 | 0.078 |
+  | 64 | 0.150 | 0.304 | 0.390 | 0.308 |
+
+  Before (the review's measurement, 2026-11-06): 4.84 ms at 16 channels, 19.19 ms at 64. With the bounded alignment alone a skip at 64 channels still took 1.41 ms: it moves the 13 periods it jumps over into the history, frame by frame across 64 planes (about 9 ns a sample). Written a channel at a time, 1 700 frames of 64 channels take 0.09–0.12 ms instead of 0.93, and the ordinary pull went from 0.217 to 0.150 ms.
 - **Cost** (a timing, under load 14): 47.9 ns per stereo output frame at 96 taps (6.1 µs per 128-frame callback, 12.3 µs during a crossfade), 103.6 ns at 160 taps (13.3 and 26.5 µs). An earlier run under less load measured 53.2 and 112.6 ns. The ADR estimated "tens of microseconds per callback".
 
 ### ADR 0052's numbers: assumption or measurement

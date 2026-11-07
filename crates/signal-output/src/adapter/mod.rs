@@ -55,8 +55,8 @@
 //! `max_pull` frames per piece (a longer buffer runs in pieces), each frame
 //! from at most two read heads (one, but two during a crossfade), each head
 //! `taps` multiply-adds for its coefficients plus `taps × channels` for the
-//! channels; a splice's alignment at most `splice + 1` correlations of
-//! `2 × splice × channels`; a restart clears the history once
+//! channels; a splice's alignment a mix of at most [`ALIGN_CHANNELS`]
+//! searched within [`ALIGN_COARSE_BUDGET`]; a restart clears the history once
 //! (`channels × 2 × capacity` stores).
 //! [`AdapterOutput::worst_case_multiply_adds`] gives the bound.
 
@@ -129,6 +129,16 @@ pub const SUSPECT_SECONDS: f64 = 10.0;
 /// clamp only now and then, slipping every few seconds instead. A device
 /// within reach never slips once locked, nor while it locks.
 pub const SUSPECT_SLIPS: usize = 3;
+
+/// The most channels a splice's alignment mixes into its reference: the
+/// search's cost does not grow with the channel count.
+pub const ALIGN_CHANNELS: usize = 8;
+
+/// The multiply-adds a splice's coarse search may spend: it tries every
+/// `s`-th lag on every `s`-th frame, `s` the least that keeps it within,
+/// then every lag within `s` of the best on every frame. So the search is
+/// bounded whatever the rate (its lags and frames grow with it).
+pub const ALIGN_COARSE_BUDGET: usize = 8_192;
 
 /// What a clock adapter carries and between which clocks.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -377,6 +387,10 @@ pub struct AdapterOutput {
     /// cos(π/2 · x) over the crossfade, `splice_frames + 1` values.
     fall: Vec<f32>,
     splice_frames: usize,
+    /// A splice's alignment: the old head's mix (`splice_frames`) and the
+    /// candidates' (`2 × splice_frames + 1`).
+    align_a: Vec<f32>,
+    align_b: Vec<f32>,
     /// The furthest a repeat may jump back: the history the heads of a
     /// piece leave.
     most_back: f64,
@@ -499,6 +513,8 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         crossfade: None,
         fall,
         splice_frames,
+        align_a: vec![0.0; splice_frames],
+        align_b: vec![0.0; 2 * splice_frames + 1],
         most_back,
         fade: Fade::default(),
         fade_wait: 0,
@@ -524,6 +540,34 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         suspects: 0,
     };
     Ok((input, output))
+}
+
+/// The coarse search's stride for `len` frames and `search + 1` lags: the
+/// least `s` with `(search / s + 1) × ⌈len / s⌉` within
+/// [`ALIGN_COARSE_BUDGET`].
+fn coarse_step(len: usize, search: usize) -> usize {
+    let mut s = 1;
+    while (search / s + 1) * len.div_ceil(s) > ALIGN_COARSE_BUDGET {
+        s += 1;
+    }
+    s
+}
+
+/// The normalised correlation of `x` and `y` on every `stride`-th frame:
+/// Σ x·y / √(Σx²·Σy²), 0 when either is silent.
+fn normalised(x: &[f32], y: &[f32], stride: usize) -> f64 {
+    let (mut xy, mut xx, mut yy) = (0.0f32, 0.0f32, 0.0f32);
+    for (&p, &q) in x.iter().step_by(stride).zip(y.iter().step_by(stride)) {
+        xy += p * q;
+        xx += p * p;
+        yy += q * q;
+    }
+    let norm = f64::from(xx) * f64::from(yy);
+    if norm > 0.0 {
+        f64::from(xy) / norm.sqrt()
+    } else {
+        0.0
+    }
 }
 
 /// A step in 32.32 fixed point.
@@ -575,12 +619,24 @@ impl AdapterOutput {
 
     /// The most multiply-adds one pull piece can take: two heads (a
     /// crossfade) over `max_pull` frames, each `taps × (1 + channels)`,
-    /// plus a splice's alignment, `(splice + 1) × 2 × splice × channels`.
+    /// plus a splice's alignment ([`align_multiply_adds`](AdapterOutput::align_multiply_adds)).
     pub fn worst_case_multiply_adds(&self) -> usize {
         let channels = self.config.channels;
-        let splice = self.splice_frames;
         2 * self.config.max_pull * self.converter.taps() * (1 + channels)
-            + (splice + 1) * 2 * splice * channels
+            + self.align_multiply_adds()
+    }
+
+    /// The most a splice's alignment takes: the mixes (`3 × splice` frames
+    /// of at most [`ALIGN_CHANNELS`]), the coarse search
+    /// ([`ALIGN_COARSE_BUDGET`], counted as three per product) and the
+    /// fine one (`2s − 1` lags of `3 × splice`).
+    pub fn align_multiply_adds(&self) -> usize {
+        let splice = self.splice_frames;
+        let s = coarse_step(splice, splice);
+        3 * splice * self.config.channels.min(ALIGN_CHANNELS)
+            + 3 * ALIGN_COARSE_BUDGET
+            + 3 * (2 * s - 1) * splice
+            + 3 * splice
     }
 
     /// The counters and the loop's state.
@@ -759,8 +815,8 @@ impl AdapterOutput {
     /// one whose frames best match (normalised correlation) the frames the
     /// old head still plays over the crossfade, so a short crossfade joins
     /// like material (WSOLA's rule). Returns the jump and its correlation.
-    /// Bounded: at most `splice + 1` lags of `2 × len × channels`
-    /// multiply-adds, `len` at most 5 ms.
+    /// Bounded by [`best_lag`](AdapterOutput::best_lag), `len` at most
+    /// 5 ms.
     fn align_back(&mut self, old: u64, back: f64, serves: u64) -> (f64, f64) {
         let len = (serves as usize).min(self.splice_frames);
         let room = (self.most_back - back).max(0.0) as usize;
@@ -776,14 +832,7 @@ impl AdapterOutput {
         );
         let len = len.min(frames_between(self.converter.written(), a).max(0) as usize);
         let base = back as u32;
-        let mut best = (0usize, f64::MIN);
-        for d in 0..=search {
-            let b = a.wrapping_sub(base).wrapping_sub(d as u32);
-            let score = self.converter.correlation(a, b, len);
-            if score > best.1 {
-                best = (d, score);
-            }
-        }
+        let best = self.best_lag(a, a.wrapping_sub(base), search, len);
         (back + best.0 as f64, best.1)
     }
 
@@ -804,15 +853,54 @@ impl AdapterOutput {
         );
         let len =
             len.min(frames_between(self.converter.written(), a.wrapping_add(jump)).max(0) as usize);
+        let best = self.best_lag(a, a.wrapping_add(jump), search, len);
+        (ahead - best.0 as f64, best.1)
+    }
+
+    /// Of the candidates `top − d` for `d` in `0..=search`, the one whose
+    /// `len` frames best match (normalised correlation) the `len` frames
+    /// from `a`, on a mix of at most [`ALIGN_CHANNELS`] channels, coarse
+    /// then fine ([`ALIGN_COARSE_BUDGET`]): `(d, correlation)`. Bounded by
+    /// [`align_multiply_adds`](AdapterOutput::align_multiply_adds), whatever
+    /// the channels and the rate.
+    fn best_lag(&mut self, a: u32, top: u32, search: usize, len: usize) -> (usize, f64) {
+        let len = len.min(self.align_a.len());
+        let search = search.min(self.align_b.len().saturating_sub(len + 1));
+        if len == 0 {
+            return (0, 0.0);
+        }
+        let (Some(x), Some(y)) = (
+            self.align_a.get_mut(..len),
+            self.align_b.get_mut(..search + len),
+        ) else {
+            return (0, 0.0);
+        };
+        self.converter.mix_into(a, ALIGN_CHANNELS, x);
+        self.converter
+            .mix_into(top.wrapping_sub(search as u32), ALIGN_CHANNELS, y);
+        let (x, y) = (&*x, &*y);
+        // Candidate d is y from search − d.
+        let score = |d: usize, stride: usize| {
+            y.get(search - d..search - d + len)
+                .map_or(0.0, |y| normalised(x, y, stride))
+        };
+        let s = coarse_step(len, search);
         let mut best = (0usize, f64::MIN);
-        for d in 0..=search {
-            let b = a.wrapping_add(jump).wrapping_sub(d as u32);
-            let score = self.converter.correlation(a, b, len);
-            if score > best.1 {
-                best = (d, score);
+        for d in (0..=search).step_by(s) {
+            let c = score(d, s);
+            if c > best.1 {
+                best = (d, c);
             }
         }
-        (ahead - best.0 as f64, best.1)
+        let (lo, hi) = (best.0.saturating_sub(s - 1), (best.0 + s - 1).min(search));
+        let mut fine = (best.0, f64::MIN);
+        for d in lo..=hi {
+            let c = score(d, 1);
+            if c > fine.1 {
+                fine = (d, c);
+            }
+        }
+        fine
     }
 
     /// Whether the producer has missed [`STOP_PERIODS`] source periods
