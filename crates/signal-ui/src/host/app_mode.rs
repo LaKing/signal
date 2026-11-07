@@ -269,6 +269,7 @@ impl Host {
             &project,
             plan,
             width,
+            self.recording,
             &mut notes,
         );
         if let Some(mode) = self.app.as_mut() {
@@ -302,7 +303,9 @@ impl Host {
             output: started.output,
             input,
             controller: started.controller,
-            live: LiveRecorder::new(self.history(started.recorder), self.registry.clone()),
+            // ADR 0038 §9: a recording run records what its sources read.
+            live: LiveRecorder::new(self.history(started.recorder), self.registry.clone())
+                .with_inputs(started.inputs),
             current: project,
             watcher,
             watched: Instant::now(),

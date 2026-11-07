@@ -49,6 +49,11 @@ pub(crate) struct ReplayArgs {
     /// the manifest says `trust_provenance`.
     #[arg(long, conflicts_with = "ideal")]
     pub(crate) trust_provenance: bool,
+    /// Replay exactly although a recorded input is incomplete (its recorder
+    /// fell behind): where its record is missing the source reads 0, and the
+    /// output says which inputs (ADR 0038 §9).
+    #[arg(long)]
+    pub(crate) allow_incomplete: bool,
 }
 
 pub(crate) fn run(
@@ -113,12 +118,15 @@ pub(crate) fn replay_session(
         trust_provenance: args.trust_provenance,
         here,
         vectors: Vec::new(),
+        allow_incomplete: args.allow_incomplete,
     };
     let mut replayed = replay_with(&session, gpu.registry(), options).map_err(|e| match e {
         ReplayError::IncompleteBoundaries { .. }
         | ReplayError::Unreproduced { .. }
         | ReplayError::BeyondRecordedEnd { .. }
-        | ReplayError::ProvenanceMismatch { .. } => Failure::Replay(e.to_string()),
+        | ReplayError::ProvenanceMismatch { .. }
+        | ReplayError::InputNotRecorded { .. }
+        | ReplayError::IncompleteInput { .. } => Failure::Replay(e.to_string()),
         ReplayError::ReplayMismatch { .. } => Failure::Mismatch(e.to_string()),
         e => Failure::Internal(e.to_string()),
     })?;
@@ -169,6 +177,11 @@ pub(crate) fn replay_session(
         "ideal": replayed.boundaries.ideal(),
         "unverified": replayed.unverified,
         "trust_provenance": replayed.trusted_provenance,
+        "incomplete_inputs": replayed
+            .incomplete_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
         "clipped": rendered.clipped(),
         "boundaries": match replayed.boundaries {
             BoundaryReplay::NotLatent => "not-latent",
@@ -223,6 +236,18 @@ fn boundary_warnings(replayed: &Replay, latent: bool) -> Vec<String> {
             replayed.unverified
         ));
     }
+    // ADR 0038 §9: inputs read as 0 where their record is missing.
+    if !replayed.incomplete_inputs.is_empty() {
+        let names: Vec<String> = replayed
+            .incomplete_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        warnings.push(format!(
+            "the input of {} was not recorded in full: it reads 0 where its record is missing, so this is not exactly what was played",
+            names.join(", ")
+        ));
+    }
     if replayed.trusted_provenance {
         warnings.push(
             "--trust-provenance: the session was recorded by another build or on another machine; its recomputed results matched their recorded hashes, and the manifest says trust_provenance".to_owned(),
@@ -260,6 +285,7 @@ mod tests {
             unverified: 0,
             trusted_provenance: false,
             vectors: Vec::new(),
+            incomplete_inputs: Vec::new(),
         };
         assert!(boundary_warnings(&replayed, true).is_empty());
         replayed.unverified = 3;

@@ -24,11 +24,18 @@ use signal_engine::{
     InputDiscards, Outcome, Provenance, Report, RunnerStatus, Scripted, SentCommand,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::inputs::InputRecord;
 use signal_output::{
     Conversion, Render, RenderError, VectorTap, VectorTrack, render_blocks_tapped_main,
 };
 
+use crate::session_inputs::{InputToml, input_bytes, load_inputs, replay_input};
 use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
+
+pub use crate::session_inputs::{
+    INPUTS_DIR, InputDevice, InputHistory, SessionInput, input_file, plan_sources, slot_name,
+    sources_of,
+};
 
 /// The session format version this build reads and writes.
 pub const FORMAT_VERSION: i64 = 1;
@@ -459,6 +466,8 @@ struct SessionOut<'a> {
     machine: &'a Machine,
     #[serde(skip_serializing_if = "Option::is_none")]
     boundaries: Option<BoundariesToml>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inputs: Vec<InputToml>,
     versions: Vec<VersionOut>,
 }
 
@@ -486,6 +495,8 @@ struct SessionIn {
     machine: Option<Machine>,
     #[serde(default)]
     boundaries: Option<toml::Spanned<BoundariesToml>>,
+    #[serde(default)]
+    inputs: Vec<toml::Spanned<InputToml>>,
     versions: Vec<toml::Spanned<VersionIn>>,
 }
 
@@ -886,6 +897,8 @@ pub struct SessionRecorder {
     end: Option<u64>,
     /// The boundary records ([`set_boundaries`](SessionRecorder::set_boundaries)).
     boundaries: Option<Boundaries>,
+    /// The capture sides' records ([`set_inputs`](SessionRecorder::set_inputs)).
+    inputs: Vec<SessionInput>,
 }
 
 impl SessionRecorder {
@@ -932,6 +945,7 @@ impl SessionRecorder {
             last_swap: None,
             end: None,
             boundaries: None,
+            inputs: Vec::new(),
         })
     }
 
@@ -1171,6 +1185,19 @@ impl SessionRecorder {
         self.boundaries.as_ref()
     }
 
+    /// Records the capture sides' records (ADR 0038 §9): one per source of
+    /// the plans, written as `[[inputs]]` and `inputs/<slot>.f32`.
+    /// [`LiveRecorder::finish`] sets them for a run given its records
+    /// ([`LiveRecorder::with_inputs`]).
+    pub fn set_inputs(&mut self, inputs: Vec<SessionInput>) {
+        self.inputs = inputs;
+    }
+
+    /// The capture sides' records.
+    pub fn inputs(&self) -> &[SessionInput] {
+        &self.inputs
+    }
+
     /// Records the compute devices the run used (M2.7-8): the GPU adapters
     /// of its latent modules, which the driver knows and the engine does
     /// not. The CPU architecture is recorded without asking.
@@ -1269,6 +1296,7 @@ impl SessionRecorder {
                 reason: b.reason.clone(),
                 data_fnv1a64: data.as_ref().map(|d| hex(fnv1a64(d))),
             }),
+            inputs: self.inputs.iter().map(InputToml::of).collect(),
             versions: self
                 .versions
                 .iter()
@@ -1313,6 +1341,15 @@ impl SessionRecorder {
         if let Some(data) = data {
             let path = dir.join(BOUNDARY_DATA_FILE);
             fs::write(&path, data).map_err(io(&path))?;
+        }
+        for input in &self.inputs {
+            if let Some(words) = &input.words {
+                let path = dir.join(input_file(&input.address));
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(io(parent))?;
+                }
+                fs::write(&path, input_bytes(words)).map_err(io(&path))?;
+            }
         }
         Ok(())
     }
@@ -1362,6 +1399,8 @@ pub struct LiveRecorder {
     record_data: bool,
     /// The newest runner status received.
     status: Option<RunnerStatus>,
+    /// The capture sides' records being drained (ADR 0038 §9), when given.
+    inputs: Option<InputHistory>,
 }
 
 impl LiveRecorder {
@@ -1378,6 +1417,28 @@ impl LiveRecorder {
             data_lost: 0,
             record_data: false,
             status: None,
+            inputs: None,
+        }
+    }
+
+    /// Records the run's inputs (ADR 0038 §9): `records` are the capture
+    /// sides' record rings the driver made, each with the device it reads.
+    /// They are drained at every [`status`](ControlSink::status) and at
+    /// [`finish`](LiveRecorder::finish), which records one input per source
+    /// of version 0's plan, a source without a record as read 0 (the run
+    /// captured nothing for it). Without it, a session of a plan with
+    /// sources records no input and replays only ideally.
+    /// A recorder without history keeps none: the records are dropped.
+    pub fn with_inputs(mut self, records: Vec<(InputRecord, Option<InputDevice>)>) -> LiveRecorder {
+        self.set_inputs(records);
+        self
+    }
+
+    /// [`with_inputs`](LiveRecorder::with_inputs) on a recorder held by
+    /// reference, before the run's first status.
+    pub fn set_inputs(&mut self, records: Vec<(InputRecord, Option<InputDevice>)>) {
+        if self.recorder.keeps_history() {
+            self.inputs = Some(InputHistory::new(records));
         }
     }
 
@@ -1459,6 +1520,13 @@ impl LiveRecorder {
         if self.recorder.latent() {
             let boundaries = self.boundaries(next_frame);
             self.recorder.set_boundaries(boundaries);
+        }
+        if let Some(history) = self.inputs.take()
+            && let Some((_, plan)) = self.recorder.versions.first()
+        {
+            let sources = plan_sources(plan);
+            self.recorder
+                .set_inputs(history.finish(&sources, next_frame.0));
         }
         self.recorder.set_end(next_frame.0)
     }
@@ -1589,6 +1657,9 @@ impl ControlSink for LiveRecorder {
     }
 
     fn status(&mut self, status: &RunnerStatus) {
+        if let Some(history) = self.inputs.as_mut() {
+            history.drain();
+        }
         if self
             .status
             .is_none_or(|known| status.next_frame >= known.next_frame)
@@ -1668,6 +1739,9 @@ pub struct Session {
     /// The latent modules' due-block outcomes (M2.7-4); `None` for a session
     /// without (written before them, or of a project without latent modules).
     pub boundaries: Option<Boundaries>,
+    /// The capture sides' records (ADR 0038 §9); empty for a session
+    /// without sources, or written before inputs were recorded.
+    pub inputs: Vec<SessionInput>,
 }
 
 impl Session {
@@ -1899,6 +1973,8 @@ impl Session {
             }
         };
 
+        let inputs = load_inputs(&file.inputs, |name| read(name), at)?;
+
         Ok(Session {
             sample_rate: *file.sample_rate.get_ref(),
             seed: file.seed,
@@ -1911,6 +1987,7 @@ impl Session {
             plans,
             edits: edits.into_iter().map(|(_, e)| e).collect(),
             boundaries,
+            inputs,
         })
     }
 
@@ -2227,6 +2304,10 @@ pub struct Replay {
     /// tap: the visual streams the replay reproduces, as the real-time
     /// vector adapter takes them.
     pub vectors: Vec<VectorTrack>,
+    /// ADR 0038 §9: the inputs whose records are incomplete, read as 0
+    /// where missing ([`ReplayOptions::allow_incomplete`], or an ideal
+    /// render); empty when every input was replayed as recorded.
+    pub incomplete_inputs: Vec<InstanceAddress>,
 }
 
 /// How a replay treated the latent modules' due results
@@ -2275,6 +2356,10 @@ pub struct ReplayOptions {
     /// M2.8-7: vector outputs to snapshot during the replay
     /// ([`Replay::vectors`]); they only read, the render is unchanged.
     pub vectors: Vec<VectorTap>,
+    /// Replay exactly although an input's record is incomplete (`signal
+    /// replay --allow-incomplete`, ADR 0038 §9): where it is missing the
+    /// source reads 0, and [`Replay::incomplete_inputs`] says so.
+    pub allow_incomplete: bool,
 }
 
 /// Why a validated session could not be replayed. Validation rules these out,
@@ -2330,6 +2415,19 @@ pub enum ReplayError {
         /// Due blocks without an outcome plus outcomes without a due block.
         mismatches: u64,
     },
+    /// A source of the session's plans has no recorded input (ADR 0038
+    /// §9): what it read is unknown, so it cannot be replayed exactly.
+    InputNotRecorded {
+        /// The source instance.
+        address: InstanceAddress,
+    },
+    /// An input's record is incomplete (ADR 0038 §9).
+    IncompleteInput {
+        /// The source instance.
+        address: InstanceAddress,
+        /// Why, as recorded.
+        reason: String,
+    },
     /// Input had no effect, or a queue or the log overflowed.
     Discarded {
         /// Input the engine discarded.
@@ -2368,6 +2466,14 @@ impl fmt::Display for ReplayError {
                 f,
                 "replay: the session's results of latent modules must be recomputed, but this is not the build and machine that recorded it ({}): an exact replay is refused; `signal replay --ideal` renders it with every result awaited, `--trust-provenance` replays exactly anyway (each result still checked against its recorded hash, and the manifest says so), and a session recorded with `signal play --record-boundary-data` replays exactly anywhere",
                 differences.join("; ")
+            ),
+            ReplayError::InputNotRecorded { address } => write!(
+                f,
+                "replay: the session did not record what {address} captured (its input record is missing): it cannot be replayed exactly; `signal replay --ideal` renders it with that input as silence"
+            ),
+            ReplayError::IncompleteInput { address, reason } => write!(
+                f,
+                "replay: the input record of {address} is incomplete ({reason}): `signal replay --allow-incomplete` replays it with silence where the record is missing"
             ),
             ReplayError::BoundaryMismatch { mismatches } => write!(
                 f,
@@ -2459,6 +2565,47 @@ pub fn replay_with(
         (None, false) if session.latent() => BoundaryReplay::NotRecorded,
         (None, false) => BoundaryReplay::NotLatent,
     };
+    // ADR 0038 §9: every source reads its recorded input. Exactly: each
+    // must be recorded and complete (or `allow_incomplete`), and no frame
+    // past the recorded end; ideally, what was recorded, 0 elsewhere.
+    let sources = sources_of(&session.plans);
+    let mut incomplete_inputs = Vec::new();
+    let mut inputs = Vec::new();
+    for (address, channels) in &sources {
+        let input = session
+            .inputs
+            .iter()
+            .find(|i| i.address == *address && i.channels == *channels);
+        match input {
+            None if !options.ideal => {
+                return Err(ReplayError::InputNotRecorded {
+                    address: address.clone(),
+                });
+            }
+            None => incomplete_inputs.push(address.clone()),
+            Some(input) => {
+                if !input.complete {
+                    if !options.ideal && !options.allow_incomplete {
+                        return Err(ReplayError::IncompleteInput {
+                            address: address.clone(),
+                            reason: input
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| "frames are missing".to_owned()),
+                        });
+                    }
+                    incomplete_inputs.push(address.clone());
+                }
+                inputs.push(replay_input(input, EngineConfig::DEFAULT_BLOCK_CAPACITY));
+            }
+        }
+    }
+    if !sources.is_empty()
+        && !options.ideal
+        && let Some(end) = session.frames.filter(|&end| frames > end)
+    {
+        return Err(ReplayError::BeyondRecordedEnd { frames, end });
+    }
     let script: &[BoundaryRecord] = match (&session.boundaries, mode) {
         (Some(b), BoundaryReplay::Exact) => &b.records,
         _ => &[],
@@ -2627,6 +2774,7 @@ pub fn replay_with(
         // The engine runs plan version v as its version v (checked below).
         &session.plans,
         main.as_ref(),
+        inputs,
     );
     // The first result that differs from the performance's is the cause of
     // whatever else went wrong after it (M2.7-8): it is reported first.
@@ -2676,6 +2824,7 @@ pub fn replay_with(
         unverified,
         trusted_provenance: trusted,
         vectors,
+        incomplete_inputs,
     })
 }
 

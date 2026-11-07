@@ -46,6 +46,7 @@ pub mod provenance;
 mod schema;
 pub mod schematic;
 pub mod session;
+mod session_inputs;
 mod slot;
 pub mod snapshot;
 mod structure;

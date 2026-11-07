@@ -2870,6 +2870,7 @@ fn replay(context: &Context, arguments: &Value) -> Outcome {
         threads: 0,
         ideal: false,
         trust_provenance: false,
+        allow_incomplete: false,
     };
     let replayed =
         replay_session(&args, context.registry, context.setup).map_err(|f| refused(f.message()))?;

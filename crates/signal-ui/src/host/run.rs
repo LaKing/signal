@@ -544,13 +544,17 @@ impl Host {
         };
         // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
         let captures = signal_project::device::capture_sides(&project, &plan);
-        output.set_captures(crate::player::capture_specs(
+        let specs = crate::player::capture_specs(
             &self.backend,
             &self.devices,
             &self.setup,
             &captures,
             &mut notes,
-        ));
+        );
+        output.set_captures(
+            specs.clone(),
+            crate::player::input_record_frames(rate, self.recording),
+        );
         // ADR 0036: the period the device runs at (its own while in use).
         let buffer = output.period().unwrap_or(buffer);
         let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
@@ -591,6 +595,11 @@ impl Host {
         };
         let device = device_name(&output);
         output.start(runner).map_err(|e| e.to_string())?;
+        // ADR 0038 §9: a recording run records what its sources read.
+        let live = live.with_inputs(crate::player::input_records(
+            output.take_input_records(),
+            &specs,
+        ));
         let input = if first {
             None
         } else {

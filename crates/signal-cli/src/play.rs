@@ -870,6 +870,9 @@ fn play_null(
     driver
         .start(runner)
         .map_err(|e| Failure::Internal(e.to_string()))?;
+    // ADR 0038 §9: the null driver captures nothing; a recorded session
+    // says its sources read 0.
+    control.live.set_inputs(Vec::new());
     eprintln!(
         "signal: playing {} at {rate} Hz with the null driver; press Enter to stop",
         args.project.display()
@@ -1053,7 +1056,10 @@ fn play_device(
     }
     .map_err(|e| device(&e))?
     .with_secondaries(secondaries)
-    .with_captures(captures, None);
+    .with_captures(
+        captures.clone(),
+        signal_ui::player::input_record_frames(rate, args.record_session.is_some()),
+    );
     let map = driver.map();
     if !map.dropped().is_empty() {
         eprintln!(
@@ -1064,6 +1070,11 @@ fn play_device(
         );
     }
     driver.start(runner).map_err(|e| device(&e))?;
+    // ADR 0038 §9: a recorded session records what the sources read.
+    control.live.set_inputs(signal_ui::player::input_records(
+        driver.take_input_records(),
+        &captures,
+    ));
     let shared = driver.joined().is_some_and(|j| j.shared);
     eprintln!(
         "signal: playing {} at {rate} Hz on '{}' (buffer {} frames{}); press Enter to stop",

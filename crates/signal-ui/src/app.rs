@@ -10,8 +10,9 @@ use signal_audio::{DeviceInfo, Scheduling, rt_thread};
 use signal_core::Registry;
 use signal_engine::{Provenance, RealtimeConfig};
 use signal_graph::ExecutionPlan;
+use signal_output::inputs::InputRecord;
 use signal_output::{Controller, realtime_routed};
-use signal_project::session::{SessionRecorder, sink_of};
+use signal_project::session::{InputDevice, SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, located};
 
 use crate::player::{Backend, Input, Output, live_rate, open_input, open_output, open_routed};
@@ -156,6 +157,10 @@ pub struct Started {
     pub controller: Controller,
     /// The session recorder from frame 0.
     pub recorder: SessionRecorder,
+    /// The capture sides' input records (ADR 0038 §9), when the start was
+    /// asked to record them; for
+    /// [`LiveRecorder::with_inputs`](signal_project::session::LiveRecorder::with_inputs).
+    pub inputs: Vec<(InputRecord, Option<InputDevice>)>,
     /// The Setup's input, metered, and its channels.
     pub input: Option<(Input, usize)>,
     /// The rate the run plays at: the output's (ADR 0036), which the
@@ -182,6 +187,7 @@ pub fn start(
     project: &Project,
     mut plan: ExecutionPlan,
     width: usize,
+    record_inputs: bool,
     notes: &mut Vec<String>,
 ) -> Result<Started, String> {
     // ADR 0036 (the owner's decision of 2026-10-23): the device's clock is
@@ -202,9 +208,11 @@ pub fn start(
     };
     // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
     let captures = signal_project::device::capture_sides(project, &plan);
-    output.set_captures(crate::player::capture_specs(
-        backend, devices, setup, &captures, notes,
-    ));
+    let specs = crate::player::capture_specs(backend, devices, setup, &captures, notes);
+    output.set_captures(
+        specs.clone(),
+        crate::player::input_record_frames(rate, record_inputs),
+    );
     // ADR 0036: the engine is sized for the period the device runs at (its
     // own while it runs for another app).
     let buffer = output.period().unwrap_or(setup.buffer);
@@ -222,6 +230,7 @@ pub fn start(
         .map_err(|error| error.to_string())?;
     let workers = runner.workers();
     output.start(runner).map_err(|error| error.to_string())?;
+    let inputs = crate::player::input_records(output.take_input_records(), &specs);
     let scheduling = output
         .scheduling()
         .cloned()
@@ -231,6 +240,7 @@ pub fn start(
         output,
         controller,
         recorder,
+        inputs,
         input,
         rate,
         buffer,

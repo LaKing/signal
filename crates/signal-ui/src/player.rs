@@ -10,7 +10,9 @@ use signal_audio::{
     Resolution, Scheduling, SecondarySpec, SecondaryStatus, StatsSnapshot, choose_input,
     choose_output, labels, rate_moved, rate_notice, resolve,
 };
+use signal_output::inputs::InputRecord;
 use signal_output::{Driver, DriverError, NullDriver, Runner};
+use signal_project::session::InputDevice;
 
 use crate::setup::{DeviceEntry, Setup};
 
@@ -172,11 +174,22 @@ impl Output {
         }
     }
 
-    /// Captures `specs` from the next start (ADR 0038 §7–8); the null
-    /// driver captures nothing (its sources read 0).
-    pub fn set_captures(&mut self, specs: Vec<CaptureSpec>) {
+    /// Captures `specs` from the next start (ADR 0038 §7–8), each capture
+    /// side recorded into a ring of `record_frames` when given (a run that
+    /// records a session, ADR 0038 §9: [`take_input_records`](Output::take_input_records));
+    /// the null driver captures nothing (its sources read 0).
+    pub fn set_captures(&mut self, specs: Vec<CaptureSpec>, record_frames: Option<usize>) {
         if let Output::Device(driver) = self {
-            driver.set_captures(specs, None);
+            driver.set_captures(specs, record_frames);
+        }
+    }
+
+    /// The last start's input records (ADR 0038 §9), once; none for the
+    /// null driver.
+    pub fn take_input_records(&mut self) -> Vec<InputRecord> {
+        match self {
+            Output::Device(driver) => driver.take_input_records(),
+            Output::Null(..) => Vec::new(),
         }
     }
 
@@ -517,6 +530,44 @@ pub fn open_routed(
     opened
         .map(|output| (output, routing))
         .map_err(|error| error.to_string())
+}
+
+/// How many seconds of input a capture side's record ring holds (ADR 0038
+/// §9): the control thread drains it at every status poll, far more often.
+pub const INPUT_RECORD_SECONDS: usize = 10;
+
+/// The record ring of a run at `rate` that records a session
+/// ([`INPUT_RECORD_SECONDS`]), else none.
+pub fn input_record_frames(rate: u32, recording: bool) -> Option<usize> {
+    recording.then(|| (rate as usize).saturating_mul(INPUT_RECORD_SECONDS))
+}
+
+/// The input records of a start, each with the device and channels it
+/// captured from in `specs`, as a session records them
+/// ([`LiveRecorder::with_inputs`](signal_project::session::LiveRecorder::with_inputs)).
+pub fn input_records(
+    records: Vec<InputRecord>,
+    specs: &[CaptureSpec],
+) -> Vec<(InputRecord, Option<InputDevice>)> {
+    records
+        .into_iter()
+        .map(|record| {
+            let device = specs.iter().find_map(|spec| {
+                spec.sides
+                    .iter()
+                    .find(|side| side.address == record.address)
+                    .map(|side| InputDevice {
+                        name: spec.name.clone(),
+                        channels: side
+                            .channels
+                            .iter()
+                            .map(|c| c.and_then(|c| u16::try_from(c + 1).ok()).unwrap_or(0))
+                            .collect(),
+                    })
+            });
+            (record, device)
+        })
+        .collect()
 }
 
 /// The input devices a run of `project`'s `plan` captures from (ADR 0038

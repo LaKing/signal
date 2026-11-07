@@ -15,6 +15,7 @@ use signal_engine::{
 use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Conversion, RenderError, to_device};
+use crate::inputs::RunInput;
 use crate::vectors::{VectorTap, VectorTaps, VectorTrack};
 
 /// The result of [`render`]: the audio and the log, in memory.
@@ -120,7 +121,7 @@ pub fn render_blocks_tapped(
     taps: &[VectorTap],
     plans: &[ExecutionPlan],
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
-    render_inner(engine, frames, block, before, taps, plans, None)
+    render_inner(engine, frames, block, before, taps, plans, None, Vec::new())
         .map(|(render, tracks, _)| (render, tracks))
 }
 
@@ -188,6 +189,7 @@ pub fn render_sides(
         &[],
         &[],
         Some((main, others)),
+        Vec::new(),
     )
     .map(|(render, _, sides)| (render, sides))
 }
@@ -195,7 +197,9 @@ pub fn render_sides(
 /// [`render_blocks_tapped`] of a plan of several play sides (ADR 0038):
 /// `audio.wav` records the sink at `main` (a session's replay records the
 /// main side, as the live run's session did); the others are not recorded.
-/// `None` is [`render_blocks_tapped`] exactly.
+/// `None` is [`render_blocks_tapped`] exactly. `inputs` feed the sources
+/// (a replay's recorded inputs, ADR 0038 §9); a source none serves reads 0.
+#[allow(clippy::too_many_arguments)]
 pub fn render_blocks_tapped_main(
     engine: &mut Engine,
     frames: u64,
@@ -204,9 +208,10 @@ pub fn render_blocks_tapped_main(
     taps: &[VectorTap],
     plans: &[ExecutionPlan],
     main: Option<&InstanceAddress>,
+    inputs: Vec<RunInput>,
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
     let sides = main.map(|m| (m, &[][..]));
-    render_inner(engine, frames, block, before, taps, plans, sides)
+    render_inner(engine, frames, block, before, taps, plans, sides, inputs)
         .map(|(render, tracks, _)| (render, tracks))
 }
 
@@ -215,6 +220,7 @@ type Sides<'a> = Option<(&'a InstanceAddress, &'a [InstanceAddress])>;
 
 /// The renders' one body: the plan's one audio sink, or `sides` (the main
 /// sink and the others).
+#[allow(clippy::too_many_arguments)]
 fn render_inner(
     engine: &mut Engine,
     frames: u64,
@@ -223,6 +229,7 @@ fn render_inner(
     taps: &[VectorTap],
     plans: &[ExecutionPlan],
     sides: Sides<'_>,
+    inputs: Vec<RunInput>,
 ) -> Result<(Render, Vec<VectorTrack>, Vec<SideRender>), RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
@@ -249,6 +256,7 @@ fn render_inner(
         changed: None,
         taps: VectorTaps::new(taps, plans),
         at: 0,
+        inputs,
     };
     let run = match run_offline(engine, frames, block, before, &mut file) {
         Ok(run) => run,
@@ -304,11 +312,17 @@ struct File {
     taps: VectorTaps,
     /// Frames rendered so far.
     at: u64,
+    /// ADR 0038 §9: the sources' recorded inputs (a replay's), bound by
+    /// address at each swap.
+    inputs: Vec<RunInput>,
 }
 
 impl SinkOutput for File {
     fn bind(&mut self, engine: &Engine) -> bool {
         self.taps.bind(engine);
+        for input in &mut self.inputs {
+            input.bind(engine);
+        }
         if !self.started {
             // Chosen by `render_blocks` from this plan.
             self.started = true;
@@ -329,6 +343,12 @@ impl SinkOutput for File {
                 self.changed = Some(error);
                 false
             }
+        }
+    }
+
+    fn sources(&mut self, engine: &mut Engine, frames: usize) {
+        for input in &mut self.inputs {
+            input.fill(engine, frames, 0);
         }
     }
 

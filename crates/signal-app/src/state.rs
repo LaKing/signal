@@ -734,6 +734,7 @@ impl AppState {
             &project,
             plan,
             width,
+            false,
             &mut notes,
         );
         self.notes.extend(notes);
@@ -745,6 +746,7 @@ impl AppState {
             rate,
             buffer,
             scheduling,
+            ..
         } = match started {
             Ok(started) => started,
             Err(error) => return self.refuse(error),
