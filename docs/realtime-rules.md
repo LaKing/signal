@@ -39,7 +39,7 @@ Until 2026-11-07 both scanned every event of the call at every frame, 16·*K*² 
 | 1 | 8 | 436 | 261 |
 | 16 | 8 | 6 787 | 4 474 |
 
-The cost is now linear in the events, about 90 ns per event delivered (its log record and the receiver's own work included). The worst case, 16 events on every frame into 8 receivers, still takes most of a 256-frame block's 5.3 ms at 48 kHz: a plan that dense is the project's budget, not the executor's. The output is identical to before for every partition and thread count (the block matrix of `tests/blocks.rs`, out-of-order emission included, and the oracle).
+The cost is now linear in the events for a module that emits in frame order, about 90 ns per event delivered (its log record and the receiver's own work included); one that emits out of frame order pays a shift of the kept events per insertion, *E*² moves per output per call at worst (bounded, allocation-free), as before. The worst case, 16 events on every frame into 8 receivers, still takes most of a 256-frame block's 5.3 ms at 48 kHz: a plan that dense is the project's budget, not the executor's. The output is identical to before for every partition and thread count (the block matrix of `tests/blocks.rs`, out-of-order emission included, and the oracle).
 
 ## How it is enforced
 

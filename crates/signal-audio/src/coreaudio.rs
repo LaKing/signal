@@ -415,6 +415,8 @@ struct Capture {
     /// The system's device list when it last failed: a change opens it
     /// again before its wait is over.
     listed: Option<Vec<u32>>,
+    /// Its sources' clear, refused by a full queue, still to be sent.
+    unclear: bool,
 }
 
 /// What an opened input device gives the run.
@@ -1148,6 +1150,7 @@ impl CoreAudioDriver {
             retry_at: None,
             backoff: SECONDARY_RETRY,
             listed: None,
+            unclear: false,
         };
         let mut inputs = Vec::new();
         let mut records = Vec::new();
@@ -1233,11 +1236,13 @@ impl CoreAudioDriver {
                 continue;
             }
             capture.slots.iter_mut().for_each(SourceSlot::collect);
+            // A clear the full queue refused at the last poll, again.
+            if capture.unclear && capture.stream.is_none() {
+                capture.unclear = !capture.slots.iter_mut().all(|slot| slot.set(None));
+            }
             if capture.stream.is_some() && capture.stats.is_gone() {
                 capture.stream = None;
-                for slot in &mut capture.slots {
-                    slot.set(None);
-                }
+                capture.unclear = !capture.slots.iter_mut().all(|slot| slot.set(None));
                 capture.reason = Some("the device went away or its stream failed".to_owned());
                 capture.listed = rt_thread::device_ids().ok();
                 capture.retry_at = Some(now + SECONDARY_RETRY);

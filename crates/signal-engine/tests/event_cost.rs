@@ -26,8 +26,9 @@ use signal_engine::{Engine, EngineConfig};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 use signal_output::render_blocks;
 
-/// `count` `set(1)` events on every frame, in frame order.
-struct Flood;
+/// `count` set events on every frame, values 1, 2, … within each frame, in
+/// frame order; reversed (`Flood(true)`), the last frame's first.
+struct Flood(bool);
 
 const FLOOD: ModuleDescriptor = ModuleDescriptor {
     type_name: "test.flood_set",
@@ -71,7 +72,12 @@ impl DirectPrimitive for Flood {
     fn reset(&mut self) {}
     fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
         let counts = inputs.parameter(0);
-        for f in 0..inputs.frames() {
+        let frames: Vec<usize> = if self.0 {
+            (0..inputs.frames()).rev().collect()
+        } else {
+            (0..inputs.frames()).collect()
+        };
+        for f in frames {
             let count = counts.get(f).copied().unwrap_or(0.0) as usize;
             for n in 0..count {
                 if let Some(sink) = outputs.events(0) {
@@ -90,10 +96,52 @@ fn types() -> Registry {
     registry
         .register(ModuleType {
             descriptor: FLOOD,
-            create: || Primitive::Direct(Box::new(Flood)),
+            create: || Primitive::Direct(Box::new(Flood(false))),
         })
         .unwrap();
     registry
+        .register(ModuleType {
+            descriptor: ModuleDescriptor {
+                type_name: "test.flood_set_reverse",
+                ..FLOOD
+            },
+            create: || Primitive::Direct(Box::new(Flood(true))),
+        })
+        .unwrap();
+    registry
+}
+
+/// Emitted out of frame order, each frame's events still reach an
+/// order-sensitive receiver in emission order: blocks of any size render
+/// as frame by frame (where a call is one frame, so emission is in order).
+#[test]
+fn out_of_order_emission_keeps_each_frames_order() {
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst_with("flood", "test.flood_set_reverse", &[("count", 3.0)]),
+            inst("r0", "test.sequence"),
+            inst("sink", "test.recorder"),
+        ],
+        connections: vec![conn("flood.out", "r0.in"), conn("r0.out", "sink.zeta")],
+        exports: Exports::default(),
+    };
+    let plan = build_plan(&root, &[], &types(), 1).unwrap();
+    let frame_by_frame = render(&plan, 300, 1);
+    // 1, 2, 3 in emission order read as 123 on every frame.
+    assert!(
+        frame_by_frame
+            .0
+            .iter()
+            .step_by(2)
+            .skip(1)
+            .all(|&x| x == 123.0),
+        "{:?}",
+        &frame_by_frame.0[..8]
+    );
+    for block in [2, 7, 64, 256] {
+        assert_eq!(render(&plan, 300, block), frame_by_frame, "block {block}");
+    }
 }
 
 /// The source at `count` events per frame into `fanout` order-sensitive

@@ -1828,7 +1828,7 @@ pub fn render_paths(text: &str) -> Vec<String> {
             && path
                 .split('/')
                 .all(|part| !part.is_empty() && part != "." && part != "..");
-        if safe && entry.contains_key("device") {
+        if safe && path.to_ascii_lowercase().ends_with(".wav") && entry.contains_key("device") {
             paths.insert(path.to_owned());
         }
     }
