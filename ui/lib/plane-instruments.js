@@ -214,7 +214,8 @@ export function roleEndpoints(instances = []) {
   const out = [];
   for (const i of instances) {
     const role = roleOf(i);
-    if (!role) continue;
+    // A capture slot plays nothing: no endpoint (it showed as "0 ch, not heard", the owner's, 2026-11-07).
+    if (!role || (i.device && !i.device.play)) continue;
     const ports = (i.ports ?? []).filter((p) => p.direction === 'in' && (p.shape ?? 'signal') === 'signal').map((p) => p.address);
     const layout = i.device?.play ?? (ports.length === 2 ? 'stereo' : ports.length === 1 ? 'mono' : `${ports.length} ch`);
     out.push({ name: i.name, role, layout, ports });

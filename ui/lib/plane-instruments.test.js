@@ -44,6 +44,10 @@ test('the studio’s instruments: each card takes what its controls bind, the re
     '-': ['out'],
   });
   assert.deepEqual(roleEndpoints(STUDIO.top.instances), [{ name: 'out', role: 'main', layout: 'stereo', ports: ['/out.l', '/out.r'] }]);
+  // A capture slot plays nothing: no endpoint.
+  const input = { name: 'input', device: { capture: 'mono', role: 'input' }, ports: [{ address: '/input.m', direction: 'out' }] };
+  const cue = { name: 'cue', device: { play: 'stereo', role: 'cue' }, ports: [{ address: '/cue.l', direction: 'in' }, { address: '/cue.r', direction: 'in' }] };
+  assert.deepEqual(roleEndpoints([input, cue]).map((e) => e.role), ['cue']);
 });
 
 test('the primary Stack’s boundary: one edge pin, master’s out, joined to the role endpoint’s two channels', () => {

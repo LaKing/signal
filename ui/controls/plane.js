@@ -1093,14 +1093,16 @@ export class SignalPlane extends HTMLElement {
       groups.boxes.append(g);
     }
     if (this.layout.others) groups.boxes.append(this.drawOthers(this.layout.others));
-    // A role not heard on this machine: a hollow endpoint beside the Stack (ADR 0051 §3).
+    // A role not heard on this machine: a hollow endpoint under the Stack (ADR 0051 §3).
     const primary = this.model.plane.stacks[0];
     const primaryRect = primary ? this.layout.stacks.get(primary.name) : null;
     let unheard = 0;
     for (const b of this.model.bindings) {
       if (b.device || !primaryRect) continue;
-      const x = primaryRect.x + primaryRect.w + 120;
-      const y = primaryRect.y + primaryRect.h - 240 + unheard++ * 120;
+      // Under the Stack, clear of the device boxes beside it (the owner's, 2026-11-07), its cable into its right end.
+      const x = primaryRect.x + primaryRect.w - 680;
+      const y = primaryRect.y + primaryRect.h + 80 + unheard++ * 136;
+      const end = { x: x + 640, y: y + 56 };
       groups.boxes.append(svg('rect', { class: 'endpoint', x, y, width: 640, height: 112, rx: 56 }));
       groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 40, y: y + 48 }, fitText(`${endpointLabel(b)} (${b.endpoint})`, capChars(TEXT.port, 560))));
       groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 40, y: y + 92 }, b.note));
@@ -1109,10 +1111,12 @@ export class SignalPlane extends HTMLElement {
           if (pin.side !== 'out' || !b.ports.some((p) => pin.outside.includes(p))) continue;
           const a = pinAt.get(`${stack.name} out ${pin.address}`);
           if (!a) continue;
-          groups.cables.append(svg('path', { class: 'cable dashed', d: cablePath(a, { x, y: y + 56 }) }));
+          // Out of the pin to the right, round and back into the endpoint's right end.
+          const r = (n) => Math.round(n * 100) / 100;
+          groups.cables.append(svg('path', { class: 'cable dashed', d: `M${r(a.x)} ${r(a.y)} C${r(a.x + 320)} ${r(a.y)} ${r(end.x + 320)} ${r(end.y)} ${r(end.x)} ${r(end.y)}` }));
           // Its end dragged onto a device port binds the role there ("Play on …").
           const port = b.ports.find((q) => pin.outside.includes(q));
-          this.hits.ends.push({ cable: { stack: stack.name, pin: pin.address, endpoint: b.endpoint, port, device: null, channel: null }, x, y: y + 56, from: a });
+          this.hits.ends.push({ cable: { stack: stack.name, pin: pin.address, endpoint: b.endpoint, port, device: null, channel: null }, x: end.x, y: end.y, from: a });
         }
       }
     }
