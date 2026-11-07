@@ -673,6 +673,10 @@ test('no rule of the host roots’ own reaches an element of the slot dialogs (A
     htmlClasses(d.dialog, seen);
     d.openInterface({ slotName: 'fx', slot: FX, focus: { add: 'out' }, apply: ok, saveTemplate() {}, detach() {} });
     htmlClasses(d.dialog, seen);
+    // ADR 0045 §8: Advanced unfolded shows the fields and their pins.
+    const find = (node) => (String(node.className ?? '').split(' ').includes('advanced-fold') ? node : node.children?.map(find).find(Boolean));
+    for (const listener of find(d.dialog)?.listeners?.click ?? []) listener();
+    htmlClasses(d.dialog, seen);
     d.openMap({ slotName: 'fx', load: 'std.gain', rows: [{ port: 'x', role: 'input', value: 'in', options: ['in'] }, { port: 'v', role: 'output', value: false, options: ['out'] }], apply: ok });
     htmlClasses(d.dialog, seen);
     d.openMap({ slotName: 'fx', load: null, rows: [], apply: ok });
@@ -681,7 +685,7 @@ test('no rule of the host roots’ own reaches an element of the slot dialogs (A
     htmlClasses(d.dialog, seen);
   }
   const all = new Set([...seen.values()].flatMap((e) => e.classes));
-  for (const c of ['slot-dialog', 'dialog-head', 'dialog-note', 'dialog-foot', 'dialog-buttons', 'why', 'field', 'slot-name', 'port-name', 'small', 'unit', 'optional', 'adds', 'check', 'primary']) assert.ok(all.has(c), `the walk saw .${c}`);
+  for (const c of ['slot-dialog', 'dialog-head', 'dialog-note', 'dialog-foot', 'dialog-buttons', 'why', 'field', 'slot-name', 'port-name', 'small', 'unit', 'optional', 'adds', 'check', 'primary', 'summary', 'advanced-fold', 'field-pin', 'pins', 'inferred']) assert.ok(all.has(c), `the walk saw .${c}`);
   // The plane hosts the Add module browser only, no slot dialog.
   for (const [host, text] of Object.entries(hostCss()).filter(([host]) => host !== 'plane')) assert.deepEqual(reaching(seen, text, SLOT_DIALOG_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of a slot dialog`);
 }));

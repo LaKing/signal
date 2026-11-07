@@ -136,9 +136,62 @@ export function interfaceRows(slot) {
   });
 }
 
-/** A new row of the interface editor for `role`, named `name`. */
+/** The fields of a port's type an auto port may infer (ADR 0045 §1), in order. */
+export const TYPE_FIELDS = ['shape', 'rate', 'kind', 'unit', 'range'];
+
+/**
+ * A new row of the interface editor for `role`, named `name`: an input or
+ * output is auto (ADR 0045 phase 3: typed by its connections, every field
+ * inferred, written `{}`); a parameter has no type to infer.
+ */
 export function newRow(role, name) {
-  return { original: null, name, role, shape: 'signal', width: null, rate: 1, kind: role === 'parameter' ? 'generic' : 'audio', unit: '', range: null, group: '' };
+  const auto = role === 'parameter' ? null : { inferred: [...TYPE_FIELDS], from: null };
+  return { original: null, name, role, shape: 'signal', width: null, rate: 1, kind: 'generic', unit: '', range: null, group: '', auto };
+}
+
+/** Whether `row`'s `field` is pinned: every field of a typed port, a field an auto port does not infer. */
+export function isPinned(row, field) {
+  return !row.auto || !row.auto.inferred.includes(field);
+}
+
+/**
+ * Pins (`on`) or unpins `field` of `row`, in place (ADR 0045 §8): pinning
+ * starts from the value it shows (the inferred one); unpinning a field of
+ * a typed port makes the row auto with only that field inferred, every
+ * other pinned at its value. A parameter has no pins.
+ */
+export function setPin(row, field, on) {
+  if (row.role === 'parameter' || !TYPE_FIELDS.includes(field)) return row;
+  if (on) {
+    if (row.auto) row.auto = { ...row.auto, inferred: row.auto.inferred.filter((f) => f !== field) };
+  } else if (!row.auto) {
+    row.auto = { inferred: [field], from: null };
+  } else if (!row.auto.inferred.includes(field)) {
+    row.auto = { ...row.auto, inferred: TYPE_FIELDS.filter((f) => f === field || row.auto.inferred.includes(f)) };
+  }
+  return row;
+}
+
+/** Pins every field of `row` at the value it shows ("Pin all"), or unpins every one ("Unpin all": `{}`, or its group alone). */
+export function setAllPins(row, on) {
+  if (row.role === 'parameter') return row;
+  row.auto = on ? (row.auto ? { ...row.auto, inferred: [] } : null) : { inferred: [...TYPE_FIELDS], from: row.auto?.from ?? null };
+  return row;
+}
+
+/**
+ * The greyed summary of a row's effective type (ADR 0045 §8): an auto
+ * port "auto: signal · rate 1 · from /osc.out" (or "from the content's
+ * notes", "nothing connected"); a typed one "audio · signal · rate 1".
+ */
+export function typeSummary(row) {
+  if (row.role === 'parameter') return [row.unit, row.group].filter(Boolean).join(' · ') || 'parameter';
+  const shape = row.shape === 'vector' ? `vector ${row.width ?? '?'}` : row.shape;
+  const fields = [row.kind && row.kind !== 'generic' ? row.kind : null, shape, `rate ${row.rate ?? 1}`].filter(Boolean);
+  if (!row.auto) return fields.join(' · ');
+  const from = row.auto.from;
+  const source = !from || from.end === 'default' ? 'nothing connected' : from.end === 'content' ? `from the content's ${from.port}` : `from ${from.port}`;
+  return from && from.end !== 'default' ? `auto: ${fields.join(' · ')} · ${source}` : `auto: ${source} (${fields.join(' · ')})`;
 }
 
 /** A free name for a new port, `prefix` then the lowest free number (`in_1`, `in_2`). */
@@ -148,8 +201,14 @@ export function freeName(rows, prefix) {
   for (let n = 2; ; n++) if (!taken.has(`${prefix}_${n}`)) return `${prefix}_${n}`;
 }
 
-/** A row as `slot.interface` names a port (`PortJson`): its role and only the fields that differ from the defaults. */
+/** A row as `slot.interface` names a port (`PortJson`): its role and only the fields that differ from the defaults; an auto row (ADR 0045) `auto: true` and its pinned fields only. */
 export function portJson(row) {
+  if (row.auto && row.role !== 'parameter') {
+    const json = { name: row.name, role: row.role, auto: true };
+    Object.assign(json, pinnedFields(row));
+    if (row.group) json.group = row.group;
+    return json;
+  }
   const json = { name: row.name, role: row.role };
   if (row.role !== 'parameter') {
     if (row.shape === 'events') json.shape = 'events';
@@ -161,6 +220,18 @@ export function portJson(row) {
   }
   if (row.unit) json.unit = row.unit;
   if (row.group) json.group = row.group;
+  return json;
+}
+
+/** The values of `row`'s pinned type fields, as `slot.interface` gives them (a pinned "none" as `unit: ""`, a missing range left out). */
+function pinnedFields(row) {
+  const json = {};
+  const pinned = (f) => isPinned(row, f);
+  if (pinned('shape')) json.shape = row.shape === 'vector' ? { vector: Math.max(1, Math.round(Number(row.width) || 1)) } : row.shape || 'signal';
+  if (pinned('rate')) json.rate = Math.round(Number(row.rate) || 1);
+  if (pinned('kind')) json.kind = row.kind || 'generic';
+  if (pinned('unit')) json.unit = row.unit || '';
+  if (pinned('range') && Array.isArray(row.range) && row.range.every(Number.isFinite)) json.range = [row.range[0], row.range[1]];
   return json;
 }
 
@@ -176,18 +247,32 @@ function sameDeclaration(a, b) {
  */
 export function autoRetype(was, row) {
   const json = { name: row.name };
-  const now = portJson(row);
-  const then = portJson(was);
+  const shapeOfRow = (r) => (r.shape === 'vector' ? { vector: Math.max(1, Math.round(Number(r.width) || 1)) } : r.shape || 'signal');
+  const value = {
+    shape: shapeOfRow,
+    rate: (r) => Math.round(Number(r.rate) || 1),
+    kind: (r) => r.kind || 'generic',
+    unit: (r) => r.unit || '',
+    range: (r) => (Array.isArray(r.range) && r.range.every(Number.isFinite) ? [r.range[0], r.range[1]] : null),
+  };
   if (row.role !== was.role) json.role = row.role;
+  const unpin = [];
   if (row.role !== 'parameter') {
-    const shapeOfRow = (r) => (r.shape === 'vector' ? `v${Math.round(Number(r.width) || 1)}` : r.shape);
-    if (shapeOfRow(row) !== shapeOfRow(was)) json.shape = now.shape ?? 'signal';
-    if (Math.round(Number(row.rate) || 1) !== Math.round(Number(was.rate) || 1)) json.rate = now.rate ?? 1;
-    if ((row.kind || 'generic') !== (was.kind || 'generic')) json.kind = row.kind || 'generic';
-    if (JSON.stringify(now.range ?? null) !== JSON.stringify(then.range ?? null) && now.range) json.range = now.range;
-  }
-  if ((row.unit || '') !== (was.unit || '') && row.unit) json.unit = row.unit;
+    for (const field of TYPE_FIELDS) {
+      const now = isPinned(row, field);
+      const then = isPinned(was, field);
+      const changed = JSON.stringify(value[field](row)) !== JSON.stringify(value[field](was));
+      // A value the person changed is pinned at it; a field unpinned and
+      // unchanged becomes inferred; one pinned now that was inferred is
+      // pinned at the value it shows.
+      if (changed || (now && !then)) {
+        const v = value[field](row);
+        if (v !== null) json[field] = v;
+      } else if (!now && then) unpin.push(field);
+    }
+  } else if ((row.unit || '') !== (was.unit || '') && row.unit) json.unit = row.unit;
   if ((row.group || '') !== (was.group || '') && row.group) json.group = row.group;
+  if (unpin.length) json.unpin = unpin;
   return Object.keys(json).length > 1 ? json : null;
 }
 
@@ -226,8 +311,8 @@ export function interfaceOp(slotName, before, after, { removeWires = false } = {
     }
     const was = before.find((r) => r.original === row.original);
     if (row.name !== row.original) rename[row.original] = row.name;
-    if (was?.auto) {
-      const changed = autoRetype(was, row);
+    if (was?.auto || row.auto) {
+      const changed = autoRetype(was ?? row, row);
       if (changed) retype.push(changed);
     } else if (was && !sameDeclaration(was, row)) retype.push({ ...portJson(row), name: row.name });
   }
@@ -282,7 +367,8 @@ export function contentMatch(entry, slot) {
 
 /** The content's unmatched entries as `slot.interface` adds them (`PortJson`). */
 export function addedPorts(unmatched) {
-  return unmatched.map((c) => portJson({ name: c.name, role: c.role, shape: c.shape, width: null, rate: c.rate ?? 1, kind: c.kind ?? 'generic', unit: '', range: null, group: '' }));
+  // ADR 0045 §8: added auto, so they infer the content's types and a later Replace retypes them.
+  return unmatched.map((c) => (c.role === 'parameter' ? portJson({ name: c.name, role: c.role, unit: '', group: '' }) : { name: c.name, role: c.role, auto: true }));
 }
 
 /**
@@ -487,6 +573,8 @@ export function slotCard(description, name) {
     matched: reasonOf(p.name) === null,
     reason: reasonOf(p.name),
     address: `/${name}.${p.name}`,
+    // ADR 0045 §8: an auto port's kind read "(auto)", and where it comes from.
+    auto: p.auto ? typeSummary({ ...p, shape: shapeOf(p.shape).shape, width: shapeOf(p.shape).width, kind: p.kind ?? 'generic', rate: p.rate ?? 1 }) : null,
   }));
   return {
     name,

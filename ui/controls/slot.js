@@ -449,7 +449,8 @@ ${BROWSER_CSS}`;
     this.$('.ports').replaceChildren(
       ...card.ports.map((p) => {
         const li = document.createElement('li');
-        li.title = p.matched ? `${p.address}: ${p.kind}` : `${p.address}: unmatched, ${p.reason}`;
+        const kind = p.auto ? `${p.kind} (auto)` : p.kind;
+        li.title = p.matched ? `${p.address}: ${kind}${p.auto ? ` — ${p.auto}` : ''}` : `${p.address}: unmatched, ${p.reason}`;
         const dot = document.createElement('span');
         dot.className = ['dot', p.shape, p.matched ? '' : 'unmatched'].filter(Boolean).join(' ');
         const name = document.createElement('span');

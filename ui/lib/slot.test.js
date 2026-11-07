@@ -19,6 +19,11 @@ import {
   mapOp,
   mapRows,
   newRow,
+  addedPorts,
+  isPinned,
+  setPin,
+  setAllPins,
+  typeSummary,
   portJson,
   portNameError,
   projectEntries,
@@ -114,7 +119,7 @@ test('the interface editor: add, remove, rename and retype make one slot.interfa
     slot: 'fx',
     remove: ['side'],
     rename: { x: 'input' },
-    add: [{ name: 'out', role: 'output', kind: 'audio' }],
+    add: [{ name: 'out', role: 'output', auto: true }],
     retype: [{ name: 'y', role: 'output', kind: 'control' }],
     removeWires: true,
   });
@@ -151,7 +156,7 @@ test('a content’s match by name and role, its unmatched ports, and the Load op
   assert.equal(plain.matched, 0);
   assert.deepEqual(plain.unmatched.map((c) => c.name), ['in', 'out', 'db']);
   assert.deepEqual(loadOps('spare', 'std.gain', { add: plain.unmatched.slice(0, 1) }), [
-    { op: 'slot.interface', slot: 'spare', add: [{ name: 'in', role: 'input', kind: 'audio' }] },
+    { op: 'slot.interface', slot: 'spare', add: [{ name: 'in', role: 'input', auto: true }] },
     { op: 'slot.load', slot: 'spare', load: 'std.gain' },
   ]);
   assert.deepEqual(loadOps('fx', '../studio'), [{ op: 'slot.load', slot: 'fx', load: '../studio' }]);
@@ -309,4 +314,36 @@ test('a template keeps an auto port auto: {} or its pinned fields; a typed gener
       '',
     ].join('\n'),
   );
+});
+
+test('pins and the summary (ADR 0045 phase 3): new ports auto, unpin a typed field, pin all, unpin all', () => {
+  const fresh = newRow('input', 'in');
+  assert.deepEqual(fresh.auto.inferred, ['shape', 'rate', 'kind', 'unit', 'range']);
+  assert.deepEqual(portJson(fresh), { name: 'in', role: 'input', auto: true });
+  assert.equal(newRow('parameter', 'p').auto, null);
+  const before = interfaceRows(AUTO);
+  // The typed `z`: unpinning its kind makes it auto with the rest pinned (server side), only `kind` named.
+  const rows = before.map((r) => ({ ...r }));
+  setPin(rows[2], 'kind', false);
+  assert.equal(isPinned(rows[2], 'kind'), false);
+  assert.equal(isPinned(rows[2], 'shape'), true);
+  assert.deepEqual(interfaceOp('fx', before, rows).op.retype, [{ name: 'z', unpin: ['kind'] }]);
+  // The auto `x`: pinning its kind sends the value it shows.
+  const pinned = before.map((r) => ({ ...r }));
+  setPin(pinned[0], 'kind', true);
+  assert.deepEqual(interfaceOp('fx', before, pinned).op.retype, [{ name: 'x', kind: 'audio' }]);
+  // Unpin all on `y` (shape pinned): shape unpinned.
+  const loose = before.map((r) => ({ ...r }));
+  setAllPins(loose[1], false);
+  assert.deepEqual(interfaceOp('fx', before, loose).op.retype, [{ name: 'y', unpin: ['shape'] }]);
+  // Pin all on `x`: every inferred value pinned.
+  const all = before.map((r) => ({ ...r }));
+  setAllPins(all[0], true);
+  assert.deepEqual(interfaceOp('fx', before, all).op.retype, [{ name: 'x', shape: 'signal', rate: 1, kind: 'audio', unit: '', range: [-1, 1] }]);
+  assert.equal(typeSummary(before[0]), 'auto: audio · signal · rate 1 · from /osc.out');
+  assert.equal(typeSummary(before[1]), "auto: trigger · events · rate 1 · from the content's rise");
+  assert.equal(typeSummary(before[2]), 'audio · signal · rate 1');
+  assert.equal(typeSummary(fresh), 'auto: nothing connected (signal · rate 1)');
+  // The Load dialog's unmatched ports: added auto.
+  assert.deepEqual(addedPorts([{ name: 'gain', role: 'input', shape: 'signal', kind: 'audio' }]), [{ name: 'gain', role: 'input', auto: true }]);
 });

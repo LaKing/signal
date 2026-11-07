@@ -9,7 +9,7 @@
 // browser's are (⌘ and Ctrl chords but undo and redo go on to the page).
 
 import { passesToPage } from '../lib/module-browser.js';
-import { KINDS, ROLES, freeName, interfaceOp, interfaceRows, mapOp, newRow, portNameError, templateNameError } from '../lib/slot.js';
+import { KINDS, ROLES, freeName, interfaceOp, interfaceRows, isPinned, mapOp, newRow, portNameError, setAllPins, setPin, templateNameError, typeSummary } from '../lib/slot.js';
 
 /** The dialogs' look, in <signal-schematic>'s shadow root: theme tokens only, fitting a small window. */
 export const SLOT_DIALOG_CSS = `
@@ -42,6 +42,13 @@ dialog.slot-dialog::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 
 .slot-dialog button.primary { border-color: var(--signal-focus, #5aa9ff); }
 .slot-dialog .adds { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .slot-dialog label.check { display: flex; gap: 6px; align-items: center; }
+/* ADR 0045 §8: an auto port's summary and an inferred (unpinned) field, greyed. */
+.slot-dialog td.summary { color: var(--signal-fg, #d6dbe4); }
+.slot-dialog td.summary.auto, .slot-dialog .inferred { color: var(--signal-muted, #8a93a3); }
+.slot-dialog .inferred { opacity: 0.7; }
+.slot-dialog input.field-pin { margin: 0 4px 0 0; vertical-align: middle; }
+.slot-dialog .pins { display: inline-flex; gap: 4px; margin-right: 6px; }
+.slot-dialog button.advanced-fold { background: none; border: none; color: var(--signal-muted, #8a93a3); padding: 2px 0; cursor: pointer; }
 @media (max-width: 720px) {
   .slot-dialog td input.port-name { width: 7rem; }
   .slot-dialog th.optional, .slot-dialog td.optional { display: none; }
@@ -199,8 +206,29 @@ export class SlotDialogs {
     const table = html('table');
     const removeWires = html('input', { type: 'checkbox' });
     let firstFocus = null;
+    // ADR 0045 §8: the fields and their pins under Advanced, folded by default (view state).
+    let advanced = false;
+    const fold = html('button', { type: 'button', className: 'advanced-fold' });
+    fold.addEventListener('click', () => {
+      advanced = !advanced;
+      render();
+    });
+    /** A field's pin (Advanced): pinned, the field is edited; unpinned, it shows the inferred value, greyed. */
+    const pin = (row, field, control) => {
+      if (row.role === 'parameter') return [control];
+      const box = html('input', { type: 'checkbox', className: 'field-pin', checked: isPinned(row, field), title: `Pin ${field}: written in the file; unpinned, it follows the connections` });
+      box.setAttribute('aria-label', `Pin the ${field} of ${row.name}`);
+      box.addEventListener('change', () => {
+        setPin(row, field, box.checked);
+        render();
+      });
+      if (!isPinned(row, field)) control.classList.add('inferred');
+      return [box, control];
+    };
     const render = () => {
-      const head = html('tr', {}, ['Name', 'Role', 'Kind', 'Shape', 'Rate', 'Unit', 'Group', ''].map((t, i) => html('th', { textContent: t, className: i >= 4 && i <= 6 ? 'optional' : '' })));
+      fold.textContent = advanced ? 'Advanced ▾' : 'Advanced ▸';
+      const titles = advanced ? ['Name', 'Role', 'Kind', 'Shape', 'Rate', 'Unit', 'Group', ''] : ['Name', 'Role', 'Type', ''];
+      const head = html('tr', {}, titles.map((t, i) => html('th', { textContent: t, className: advanced && i >= 4 && i <= 6 ? 'optional' : '' })));
       const body = rows.map((row, index) => {
         const name = html('input', { type: 'text', className: 'port-name', value: row.name, spellcheck: false, autocomplete: 'off' });
         name.setAttribute('aria-label', `Name of ${row.original ?? 'the new port'}`);
@@ -242,20 +270,39 @@ export class SlotDialogs {
           rows.splice(index, 1);
           render();
         });
-        const tr = html('tr', { className: row.name === focusName ? 'focus' : '' }, [
-          html('td', {}, [name]),
-          html('td', {}, [role]),
-          html('td', {}, [kind]),
-          html('td', {}, [shape, width]),
-          html('td', { className: 'optional' }, [rate]),
-          html('td', { className: 'optional' }, [unit]),
-          html('td', { className: 'optional' }, [group]),
-          html('td', {}, [remove]),
-        ]);
+        // Editing an inferred field pins it at the value typed (`autoRetype`).
+        const summary = html('td', { className: `summary${row.auto ? ' auto' : ''}`, textContent: typeSummary(row) });
+        const pins = html('span', { className: 'pins' });
+        if (!parameter) {
+          const all = html('button', { type: 'button', textContent: 'Pin all', title: 'Every field written at the value it shows' });
+          all.addEventListener('click', () => {
+            setAllPins(row, true);
+            render();
+          });
+          const none = html('button', { type: 'button', textContent: 'Unpin all', title: 'Typed by its connections: written {}' });
+          none.addEventListener('click', () => {
+            setAllPins(row, false);
+            render();
+          });
+          pins.append(all, none);
+        }
+        const cells = advanced
+          ? [
+              html('td', {}, [name]),
+              html('td', {}, [role]),
+              html('td', {}, pin(row, 'kind', kind)),
+              html('td', {}, [...pin(row, 'shape', shape), width]),
+              html('td', { className: 'optional' }, pin(row, 'rate', rate)),
+              html('td', { className: 'optional' }, pin(row, 'unit', unit)),
+              html('td', { className: 'optional' }, [group]),
+              html('td', {}, [pins, remove]),
+            ]
+          : [html('td', {}, [name]), html('td', {}, [role]), summary, html('td', {}, [remove])];
+        const tr = html('tr', { className: row.name === focusName ? 'focus' : '' }, cells);
         if (row.name === focusName && !firstFocus) firstFocus = name;
         return tr;
       });
-      table.replaceChildren(html('thead', {}, [head]), html('tbody', {}, body.length ? body : [html('tr', {}, [html('td', { colSpan: 8, textContent: 'No ports yet: add an input, an output or a parameter.' })])]));
+      table.replaceChildren(html('thead', {}, [head]), html('tbody', {}, body.length ? body : [html('tr', {}, [html('td', { colSpan: titles.length, textContent: 'No ports yet: add an input, an output or a parameter.' })])]));
     };
     render();
     const adds = html('div', { className: 'adds' }, ['input', 'output', 'parameter'].map((role) => {
@@ -281,7 +328,7 @@ export class SlotDialogs {
       note: template
         ? `From ${template}: removing one of its ports names it in remove; a rename rewrites the wires, map keys and panel bindings on it.`
         : 'Its own interface: a rename rewrites the wires, map keys and panel bindings on the port.',
-      body: [table, adds],
+      body: [table, adds, fold],
       primary: button,
       extra,
     });
