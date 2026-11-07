@@ -350,7 +350,7 @@ The bar at the top left names where the view is ("Signal Project › Stack prima
 - a cable's device end (or a hollow endpoint's) onto another port: only the role's binding (`device.route`), on the clock device or, on another device's port, that device (`main` moved there moves the clock);
 - a cable's device end dropped on the empty plane: its connection removed.
 
-Shift held when letting go writes the binding for this project only (`devices.local.toml`), else for every project (the Setup); a cable from a device's input binds its capture role the same way (`[capture.<role>]`). A line under the plane says what was written, or why not.
+Each device box shows its clock (ADR 0052 phase 4): `clock` on the clock device, `adapted · <drift> · <latency>` on another output a role plays on (pulsing while it locks, `suspect` in the warning colour), `adapted in · <drift>` on an input; another output's context menu offers Make it the clock device, which restarts the run on it. Shift held when letting go writes the binding for this project only (`devices.local.toml`), else for every project (the Setup); a cable from a device's input binds its capture role the same way (`[capture.<role>]`). A line under the plane says what was written, or why not.
 
 ## Schematic
 

@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, absentInputBoxes, captureBinding, keepOrder, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, absentInputBoxes, captureBinding, clockBadge, keepOrder, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes, throughCables } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -441,4 +441,28 @@ test('a capture role bound for this project only: devices.local.toml’s capture
   // Only in devices.local.toml.
   const only = captureBinding({ setup: {}, local: { capture: { voice: { channels: [1], device: { name: 'MacBook Pro Microphone', id: 'coreaudio:BuiltInMicrophoneDevice' } } } } }, devices, 'voice', 1);
   assert.equal(only.key, 'id:coreaudio:BuiltInMicrophoneDevice');
+});
+
+test('clock badges: the clock device, an adapted output by its state, an adapted input (ADR 0052 phase 4)', () => {
+  const main = { key: 'id:ssl', present: true };
+  const ssl = { key: 'id:ssl', name: 'SSL 2+', present: true, inputs: [{}], outputs: [{}] };
+  const spk = { key: 'id:spk', name: 'Mac Studio Speakers', present: true, inputs: [{}], outputs: [] };
+  const mic = { key: 'id:mic', name: 'AT2020USB+', present: true, inputs: [], outputs: [{}] };
+  const micOut = { key: 'id:mic-out', name: 'AT2020USB+', present: true, inputs: [{}], outputs: [] };
+  const other = { key: 'id:x', name: 'Other', present: true, inputs: [{}], outputs: [] };
+  assert.equal(clockBadge(ssl, { main }).text, 'clock');
+  const secondary = { name: 'Mac Studio Speakers', roles: ['cue'], clock: 'adapted', state: 'locked', rate: 44100, clock_rate: 48000, drift_ppm: 37.24, latency_ms: 7.31, slips: 0, reason: null };
+  const devices = { secondaries: [secondary], captures: [{ name: 'AT2020USB+', roles: ['voice'], clock: 'adapted', state: 'locked', drift_ppm: -74.7 }] };
+  const locked = clockBadge(spk, { main, devices });
+  assert.deepEqual([locked.text, locked.state], ['adapted · +37.2 ppm · 7.3 ms · 48 → 44.1 kHz', 'locked']);
+  assert.match(locked.title, /Plays cue through a clock adapter/);
+  const locking = clockBadge(spk, { main, devices: { secondaries: [{ ...secondary, state: 'locking', rate: 48000 }] } });
+  assert.deepEqual([locking.text, locking.state], ['adapted · locking +37.2 ppm · 7.3 ms', 'locking']);
+  const suspect = clockBadge(spk, { main, devices: { secondaries: [{ ...secondary, state: 'suspect', reason: 'its clock is beyond reach' }] } });
+  assert.equal(suspect.state, 'suspect');
+  assert.match(suspect.title, /beyond reach/);
+  assert.equal(clockBadge(mic, { main, devices }).text, 'adapted in · −74.7 ppm');
+  assert.equal(clockBadge(other, { main, devices }), null);
+  // The same name's output box does not take the input's state.
+  assert.equal(clockBadge(micOut, { main, devices }), null);
 });

@@ -533,3 +533,41 @@ export function setupCables(pins, bindings) {
   }
   return cables;
 }
+
+/** `x` Hz as kHz, as a person reads it ("44.1", "48"). */
+const khz = (hz) => `${Math.round(hz / 100) / 10}`;
+
+/**
+ * A device box's clock badge at the Setup level (ADR 0052 phase 4):
+ * `{text, state, title}` or null. The clock device's box reads `clock`; a
+ * secondary output (`devices.secondaries`, by name) "adapted · +37 ppm ·
+ * 7.3 ms", and "44.1 → 48 kHz" when the rates differ, its `state`
+ * (`starting`, `locking`, `locked`, `suspect`, `absent`) for the drawing,
+ * its reason in the title; an adapted input (`devices.captures`) "adapted
+ * in · −74 ppm". `main`: `peripherals`' clock binding.
+ */
+export function clockBadge(box, { main = null, devices = null } = {}) {
+  if (!box) return null;
+  if (main && box.key === main.key && box.present) return { text: 'clock', state: 'clock', title: 'The clock device: the engine runs on its callbacks' };
+  const ppm = (x) => `${x >= 0 ? '+' : '−'}${Math.abs(x).toFixed(1)} ppm`;
+  const of = (status, inward) => {
+    const state = status.state ?? 'starting';
+    const parts = [inward ? 'adapted in' : 'adapted'];
+    if (state === 'suspect') parts.push('suspect');
+    else if (state === 'absent') parts.push('absent');
+    else if (state === 'locking' || state === 'starting') parts.push(state === 'locking' ? `locking ${ppm(status.drift_ppm ?? 0)}` : 'starting');
+    else parts.push(ppm(status.drift_ppm ?? 0));
+    if (!inward && Number.isFinite(status.latency_ms) && (state === 'locked' || state === 'locking')) parts.push(`${status.latency_ms.toFixed(1)} ms`);
+    if (!inward && status.rate && status.clock_rate && status.rate !== status.clock_rate) parts.push(`${khz(status.clock_rate)} → ${khz(status.rate)} kHz`);
+    const roles = (status.roles ?? []).join(', ');
+    const title = [`${inward ? 'Captures' : 'Plays'} ${roles || 'nothing'} through a clock adapter`, status.reason, Number.isFinite(status.slips) ? `${status.slips} slips` : null].filter(Boolean).join(' · ');
+    return { text: parts.join(' · '), state, title };
+  };
+  // An output's status on a box that plays (its playback ports), an input's on one that captures: a device
+  // listed in both directions under one name (the AT2020) is two boxes.
+  const secondary = (box.inputs ?? []).length ? (devices?.secondaries ?? []).find((s) => s.name === box.name) : null;
+  if (secondary) return of(secondary, false);
+  const capture = (box.outputs ?? []).length ? (devices?.captures ?? []).find((c) => c.name === box.name && c.clock === 'adapted') : null;
+  if (capture) return of(capture, true);
+  return null;
+}

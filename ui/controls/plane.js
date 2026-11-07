@@ -79,7 +79,7 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { absentInputBoxes, cableDrop, keepOrder, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, throughCables } from '../lib/plane-peripherals.js';
+import { absentInputBoxes, cableDrop, clockBadge, deviceEntry, keepOrder, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, throughCables } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, instrumentAt, levelOf, panBy, planeFades, reachesFit, scrollStack, splitDepth, toPlane, toScreen, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
@@ -248,6 +248,13 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .box-title { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-title, 34px); font-weight: 600; }
 .box-note { fill: var(--signal-clip, #ff5252); font-size: var(--t-kind, 20px); }
 .box-kind { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); letter-spacing: 0.12em; }
+/* ADR 0052 phase 4: a device's clock badge; locking pulses, suspect in the warning colour, absent in the clip colour. */
+.box-badge { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); letter-spacing: 0.04em; pointer-events: all; }
+.box-badge.clock, .box-badge.locked { fill: var(--signal-accent, #4fc3f7); }
+.box-badge.locking, .box-badge.starting { animation: badge-pulse 1.2s ease-in-out infinite; }
+.box-badge.suspect { fill: var(--signal-effective, #ffb74d); }
+.box-badge.absent { fill: var(--signal-clip, #ff5252); }
+@keyframes badge-pulse { 50% { opacity: 0.35; } }
 .port { fill: #232832; stroke: #39404c; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .port.bound { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
 .port-name { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-port, 28px); }
@@ -590,6 +597,10 @@ export class SignalPlane extends HTMLElement {
     // A saved Setup change, from any window or `signal mcp --attach` (`setup.apply`, a cable's `device.route` or
     // `device.unroute`): the host pushes `setup` with all the Setup level needs, so nothing is read again.
     on('setup', (push) => this.setupPushed(push));
+    // ADR 0052 phase 4: the adapted devices' state (locking, drift, suspect) read every two seconds while playing
+    // (`setup.devices` without `refresh`: the list the host holds, no enumeration), drawn only when it changed.
+    const poll = setInterval(() => this.pollClocks(), 2000);
+    this.stops.push(() => clearInterval(poll));
     on('reload', () => this.readPlane());
     on('describe', (description) => this.described(description));
     on('panel.written', (message) => {
@@ -723,6 +734,44 @@ export class SignalPlane extends HTMLElement {
       this.devices = devices;
       this.recompute();
     });
+  }
+
+  /** The adapted devices' state, read again while playing; the drawing follows when it changed (ADR 0052 phase 4). */
+  pollClocks() {
+    if (!this.setup?.playing || globalThis.document?.hidden || this.clockPolling) return;
+    this.clockPolling = true;
+    this.request({ type: 'setup.devices' })
+      .then((reply) => {
+        const now = JSON.stringify([reply?.secondaries ?? [], reply?.captures ?? []]);
+        const before = JSON.stringify([this.devices?.secondaries ?? [], this.devices?.captures ?? []]);
+        if (now === before || !reply) return;
+        this.devices = { ...(this.devices ?? {}), secondaries: reply.secondaries ?? [], captures: reply.captures ?? [] };
+        this.recompute();
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.clockPolling = false;
+      });
+  }
+
+  /** Make this the clock device (ADR 0052 phase 4, answered question 4): the Setup's output, which restarts the run on it. */
+  makeClock(key) {
+    const output = deviceEntry(this.devices, key, 'output');
+    if (!output) return this.say('Not changed: that device has no output here');
+    this.request({ type: 'setup.apply', output })
+      .then(() => this.say(`${output.name} is the clock device; the run plays again on it`))
+      .catch((error) => this.say(error?.message ?? String(error)));
+  }
+
+  /** The output device box at plane point `p` that could be the clock device (present, not the clock now), or null. */
+  clockCandidateAt(p) {
+    for (const b of this.model?.boxes ?? []) {
+      const r = this.layout?.boxes?.get(b.key);
+      if (!r || p.x < r.x || p.x > r.x + r.w || p.y < r.y || p.y > r.y + r.h) continue;
+      if (!b.present || !b.inputs.length || b.key === this.model.main?.key) return null;
+      return b;
+    }
+    return null;
   }
 
   /** The host's `setup` push after a saved Setup change: the Setup, the run, and the device list held with where the Setup's devices are in it. */
@@ -1064,8 +1113,15 @@ export class SignalPlane extends HTMLElement {
       g.append(svg('rect', { class: `box${b.present ? '' : ' absent'}`, x: r.x, y: r.y, width: r.w, height: r.h, rx: 10 }));
       // The texts stand where their caps (TEXT) fit: a note takes the kind's line.
       const inner = r.w - 48;
+      // ADR 0052 phase 4: the clock badge (the clock device, an adapted output or input) on the kind's line, right.
+      // In place of the kind (a note, "not present", comes first).
+      const badge = clockBadge(b, { main: this.model.main, devices: this.devices });
       if (b.note) g.append(svg('text', { class: 'box-note', x: r.x + 24, y: r.y + 42 }, fitText(b.note, capChars(TEXT.kind, inner))));
-      else g.append(svg('text', { class: 'box-kind', x: r.x + 24, y: r.y + 42 }, 'AUDIO DEVICE'));
+      else if (badge) {
+        const t = svg('text', { class: `box-badge ${badge.state}`, x: r.x + 24, y: r.y + 42 }, fitText(badge.text, capChars(TEXT.kind, inner)));
+        t.append(svg('title', {}, badge.title));
+        g.append(t);
+      } else g.append(svg('text', { class: 'box-kind', x: r.x + 24, y: r.y + 42 }, 'AUDIO DEVICE'));
       const title = svg('text', { class: 'box-title', x: r.x + 24, y: r.y + 96 }, fitText(b.name, capChars(TEXT.title, inner)));
       title.append(svg('title', {}, b.name));
       g.append(title);
@@ -2841,8 +2897,11 @@ export class SignalPlane extends HTMLElement {
     // The Deck's empty background: a new Stack there (the owner's, 2026-11-02).
     if (!name) {
       if (level !== 'setup' && level !== 'stack') return null;
-      if (!this.model || path.some((node) => node?.classList?.contains?.('box') || node?.classList?.contains?.('tray'))) return null;
       const at = toPlane(this.view, this.point(event));
+      // On another output device's box: make it the clock device (ADR 0052 phase 4).
+      const device = this.model ? this.clockCandidateAt(at) : null;
+      if (device) return { items: [{ id: 'make-clock', label: `Make ${device.name} the clock device` }], act: (id) => id === 'make-clock' && this.makeClock(device.key) };
+      if (!this.model || path.some((node) => node?.classList?.contains?.('box') || node?.classList?.contains?.('tray'))) return null;
       return { items: [{ id: 'create-stack', label: 'Create new Stack' }], act: (id) => id === 'create-stack' && this.addStack(at) };
     }
     // The instrument whose front panel holds the click (on a control of it too).
