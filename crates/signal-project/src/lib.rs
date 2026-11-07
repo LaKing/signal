@@ -1284,7 +1284,7 @@ impl Builder<'_> {
     /// composite or project may export a parameter of those names (`gpu`
     /// and `pattern` are checked with their own rules).
     fn check_reserved(&mut self, def: &DefSpans) {
-        const RESERVED: [&str; 8] = [
+        const RESERVED: [&str; 10] = [
             "module",
             "project",
             "seed",
@@ -1293,6 +1293,8 @@ impl Builder<'_> {
             "load",
             "map",
             "snapshot_exclude",
+            "device",
+            "render",
         ];
         for export in &def.exports {
             if export.kind == ExportKind::Parameter && RESERVED.contains(&export.name.as_str()) {
@@ -1694,6 +1696,7 @@ impl Builder<'_> {
 fn device_slot(
     instance: &str,
     device: &Spanned<model::DeviceSpec>,
+    render: Option<&Spanned<String>>,
     root: bool,
     problems: &mut Vec<slot::Problem>,
 ) -> Option<(device::DeviceSlot, &'static str)> {
@@ -1769,13 +1772,67 @@ fn device_slot(
             None
         }
     };
+    // ADR 0038 §3: a capture side's render file, a WAV in the folder.
+    if let Some(render) = render {
+        let path = render.get_ref();
+        let inside = !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        if spec.capture.is_none() {
+            problems.push((
+                render.span().start,
+                format!("{instance}: `render` feeds a capture side; this slot only plays"),
+            ));
+            fine = false;
+        } else if !inside || !path.to_ascii_lowercase().ends_with(".wav") {
+            problems.push((
+                render.span().start,
+                format!(
+                    "{instance}: render `{path}` is not a WAV file inside the project folder (a relative path ending in .wav)"
+                ),
+            ));
+            fine = false;
+        }
+    }
     let module = module.filter(|_| fine)?;
     let slot = device::DeviceSlot {
         role,
         play: spec.play.as_ref().map(|p| p.get_ref().clone()),
         capture: spec.capture.as_ref().map(|c| c.get_ref().clone()),
+        render: render.map(|r| r.get_ref().clone()),
     };
     Some((slot, module))
+}
+
+/// The `render` files `project.toml`'s text names (ADR 0038 §3: a capture
+/// slot's WAV, a project file), those that are safe relative paths, in
+/// order, each once. Read without loading the project, so a folder that
+/// does not load still packs them.
+pub fn render_paths(text: &str) -> Vec<String> {
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(instances) = table.get("instances").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut paths = BTreeSet::new();
+    for entry in instances.values().filter_map(toml::Value::as_table) {
+        let Some(path) = entry.get("render").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let safe = !path.starts_with('/')
+            && !path.contains('\\')
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        if safe && entry.contains_key("device") {
+            paths.insert(path.to_owned());
+        }
+    }
+    paths.into_iter().collect()
 }
 
 /// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or
@@ -1861,7 +1918,13 @@ fn definition(
             },
             (None, None, None) => match &entry.device {
                 // ADR 0038 §3: a device slot plans as its play side's sink.
-                Some(device) => match device_slot(&instance, device, root, &mut problems) {
+                Some(device) => match device_slot(
+                    &instance,
+                    device,
+                    entry.render.as_ref(),
+                    root,
+                    &mut problems,
+                ) {
                     Some((slot, module)) => {
                         spans.devices.insert(instance.clone(), slot);
                         (module.to_owned(), device.span(), true)

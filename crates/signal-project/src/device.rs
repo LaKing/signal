@@ -67,6 +67,9 @@ pub struct DeviceSlot {
     pub play: Option<String>,
     /// Its capture side's layout (`mono`, `stereo`), if it captures.
     pub capture: Option<String>,
+    /// ADR 0038 §3, §9: its capture side's WAV file, relative to the
+    /// project folder, feeding it in offline renders.
+    pub render: Option<String>,
 }
 
 /// Whether `role` is a role's name: `[a-z][a-z0-9_]*`.

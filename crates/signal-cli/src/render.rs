@@ -137,8 +137,48 @@ pub(crate) fn render_project(
     // the engine.
     let mut gpu = Gpu::new(registry, uses_gpu(plan), project.gpu_pins(plan), setup);
     // ADR 0038 §9: the capture slots `--input` feeds; the others read 0.
-    let (inputs, input_hashes) =
+    let (mut inputs, input_hashes) =
         render_inputs(&args.inputs, plan, sample_rate, args.block as usize)?;
+    // ADR 0038 §3, §9: a capture slot's own `render` file feeds it unless
+    // `--input` does; the file is a project file, hashed as one.
+    let mut fixture_hashes = std::collections::BTreeMap::new();
+    for (name, slot) in project.device_slots() {
+        let Some(file) = &slot.render else {
+            continue;
+        };
+        if input_hashes.contains_key(name) {
+            continue;
+        }
+        let address: signal_core::InstanceAddress = format!("/{name}")
+            .parse()
+            .map_err(|_| Failure::Internal(format!("`{name}` is no instance address")))?;
+        let Some((_, width)) = signal_project::session::plan_sources(plan)
+            .into_iter()
+            .find(|(a, _)| *a == address)
+        else {
+            continue;
+        };
+        let path = load_dir.join(file);
+        let invalid = |message: String| {
+            Failure::Invalid(located(dir, vec![project.instances_error(message)]))
+        };
+        let bytes = std::fs::read(&path)
+            .map_err(|e| invalid(format!("{name}: render file `{file}`: {e}")))?;
+        let words = read_wav(&path, sample_rate, width)
+            .map_err(|e| invalid(format!("{name}: render file `{file}`: {e}")))?;
+        fixture_hashes.insert(
+            file.clone(),
+            format!("{:016x}", signal_core::fnv1a64(&bytes)),
+        );
+        let (input, _) = RunInput::new(
+            address,
+            width,
+            Box::new(RecordedInput::new(words, width)),
+            args.block as usize,
+            None,
+        );
+        inputs.push(input);
+    }
     let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let sides = (!others.is_empty()).then_some((&main, &others[..]));
@@ -156,6 +196,7 @@ pub(crate) fn render_project(
     provenance.included_projects = project.included_projects();
     provenance.library_interface_hashes = project.library_interface_hashes();
     provenance.render_input_hashes = input_hashes;
+    provenance.project_file_hashes.extend(fixture_hashes);
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
     // ADR 0038 §9: the other play sides, each in its own WAV.

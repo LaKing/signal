@@ -180,3 +180,150 @@ fn a_wrong_rate_channel_count_or_slot_is_refused() {
         assert!(stderr.contains(said), "{input}: {stderr}");
     }
 }
+
+/// [`project`] with `mic`'s own render file `fixtures/voice.wav` of `take`.
+fn with_fixture(name: &str, take: &[f32]) -> PathBuf {
+    let dir = project(name);
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap().replace(
+        "mic = { device = { capture = \"mono\", role = \"voice\" } }",
+        "mic = { device = { capture = \"mono\", role = \"voice\" }, render = \"fixtures/voice.wav\" }",
+    );
+    fs::write(dir.join("project.toml"), text).unwrap();
+    fs::create_dir_all(dir.join("fixtures")).unwrap();
+    wav(&dir.join("fixtures/voice.wav"), RATE, 1, take);
+    dir
+}
+
+#[test]
+fn a_slots_render_file_feeds_it_and_is_a_project_file() {
+    let take: Vec<f32> = (0..9_000).map(|n| (n as f32 * 0.021).cos() * 0.3).collect();
+    let dir = with_fixture("fixture", &take);
+    let out = dir.join("out");
+    let run = signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--frames",
+        "12000",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let audio = samples(&out.join("audio.wav"));
+    for (n, frame) in audio.chunks(2).enumerate() {
+        let want = take.get(n).copied().unwrap_or(0.0);
+        assert_eq!(frame, [want, want], "frame {n}");
+    }
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    let bytes = fs::read(dir.join("fixtures/voice.wav")).unwrap();
+    assert_eq!(
+        manifest["provenance"]["project_file_hashes"]["fixtures/voice.wav"]
+            .as_str()
+            .unwrap(),
+        format!("{:016x}", signal_core::fnv1a64(&bytes))
+    );
+    // `--input` wins over it.
+    let other = dir.join("other.wav");
+    wav(&other, RATE, 1, &[0.25; 100]);
+    let fed = dir.join("fed");
+    let run = signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--frames",
+        "200",
+        "--out",
+        fed.to_str().unwrap(),
+        "--input",
+        &format!("mic={}", other.display()),
+    ]);
+    assert!(run.status.success());
+    let audio = samples(&fed.join("audio.wav"));
+    assert_eq!(&audio[..4], [0.25; 4]);
+    assert_eq!(&audio[200..], [0.0; 200]);
+    // Packed, the file goes with the project: the .signal renders the same.
+    let packed = dir.with_extension("signal");
+    let _ = fs::remove_file(&packed);
+    let run = signal(&["pack", dir.to_str().unwrap(), packed.to_str().unwrap()]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let from_file = dir.join("from-file");
+    let run = signal(&[
+        "render",
+        packed.to_str().unwrap(),
+        "--frames",
+        "12000",
+        "--out",
+        from_file.to_str().unwrap(),
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        samples(&from_file.join("audio.wav")),
+        samples(&out.join("audio.wav"))
+    );
+}
+
+#[test]
+fn a_render_file_missing_misplaced_or_on_a_play_side_is_refused() {
+    let dir = with_fixture("bad-fixture", &[0.0; 10]);
+    fs::remove_file(dir.join("fixtures/voice.wav")).unwrap();
+    let out = dir.join("out");
+    let render = || {
+        signal(&[
+            "render",
+            dir.to_str().unwrap(),
+            "--frames",
+            "100",
+            "--out",
+            out.to_str().unwrap(),
+        ])
+    };
+    let run = render();
+    assert!(!run.status.success());
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("fixtures/voice.wav"),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    for (bad, said) in [
+        (
+            text.replace("fixtures/voice.wav", "../voice.wav"),
+            "inside the project folder",
+        ),
+        (
+            text.replace("fixtures/voice.wav", "fixtures/voice.flac"),
+            "WAV",
+        ),
+        (
+            text.replace(
+                "out = { module = \"std.audio_out\", gain = 1 }",
+                "out = { module = \"std.audio_out\", gain = 1 }\ncue = { device = { play = \"stereo\", role = \"cue\" }, render = \"x.wav\" }",
+            ),
+            "only plays",
+        ),
+        (
+            text.replace(
+                "out = { module = \"std.audio_out\", gain = 1 }",
+                "out = { module = \"std.audio_out\", gain = 1, render = \"x.wav\" }",
+            ),
+            "capture slot's key",
+        ),
+    ] {
+        fs::write(dir.join("project.toml"), &bad).unwrap();
+        let run = render();
+        assert!(!run.status.success(), "{said}");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(stderr.contains(said), "{said}: {stderr}");
+    }
+}

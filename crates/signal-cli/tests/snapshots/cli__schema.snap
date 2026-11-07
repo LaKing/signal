@@ -229,6 +229,10 @@ expression: text
         "project": {
           "type": "string"
         },
+        "render": {
+          "description": "ADR 0038 §3: a capture slot's WAV file, relative to the project folder (a project file), feeding its outputs in offline renders.",
+          "type": "string"
+        },
         "seed": {
           "minimum": 0,
           "type": "integer"

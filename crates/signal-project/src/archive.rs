@@ -3,7 +3,7 @@
 //! own (`docs/project-format.md` §10).
 //!
 //! [`pack`] takes what a project reads (`project.toml`, `composites/*.toml`,
-//! `patterns/*.toml`, `interfaces/*.toml`, the files under `ui/`, `snapshots.toml`) and nothing else, in sorted path order, deflated,
+//! `patterns/*.toml`, `interfaces/*.toml`, the files under `ui/`, `snapshots.toml`, and the capture slots' `render` WAV files, ADR 0038 §3) and nothing else, in sorted path order, deflated,
 //! with a fixed timestamp and fixed permissions, so the same folder always
 //! gives the same bytes. [`unpack`] checks every entry before it writes one:
 //! relative paths only, regular files only, at most [`Limits::DEFAULT`]
@@ -221,6 +221,22 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
     }
     if !files.contains_key(PROJECT_FILE) {
         return Err(ArchiveError::NoProjectFile);
+    }
+    // ADR 0038 §3: a capture slot's render file is a project file wherever
+    // in the folder it lies; one missing is left out (the render says so).
+    if let Ok(text) = fs::read_to_string(dir.join(PROJECT_FILE)) {
+        for relative in crate::render_paths(&text) {
+            let path = dir.join(&relative);
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                return Err(ArchiveError::Symlink(relative));
+            }
+            if meta.is_file() {
+                files.insert(relative, path);
+            }
+        }
     }
     Ok(files)
 }

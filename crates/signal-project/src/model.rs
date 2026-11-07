@@ -6,7 +6,7 @@
 //! parameter names), so the graph checks those keys against the module;
 //! `module`, `gpu` (M2.7-2), `pattern` (ADR 0028 §3), `project`, `seed`,
 //! `set` (ADR 0035 §1), `slot`, `load` and `map` (ADR 0037 §2) and `device`
-//! (ADR 0038 §3) are reserved there.
+//! and `render` (ADR 0038 §3) are reserved there.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -626,6 +626,9 @@ pub(crate) struct InstanceEntry {
     pub(crate) slot: Option<Spanned<SlotSpec>>,
     /// ADR 0038 §3: a device slot's layout and role.
     pub(crate) device: Option<Spanned<DeviceSpec>>,
+    /// ADR 0038 §3: a capture slot's WAV file (a project file) feeding it
+    /// in offline renders.
+    pub(crate) render: Option<Spanned<String>>,
     /// ADR 0037 §2: the slot's content, a module reference or a project path.
     pub(crate) load: Option<Spanned<String>>,
     /// ADR 0037 §4: overrides of the match, by slot port or parameter.
@@ -671,6 +674,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     project: None,
                     slot: None,
                     device: None,
+                    render: None,
                     load: None,
                     map: None,
                     seed: None,
@@ -686,6 +690,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         "project" => entry.project = Some(map.next_value()?),
                         "slot" => entry.slot = Some(map.next_value()?),
                         "device" => entry.device = Some(map.next_value()?),
+                        "render" => entry.render = Some(map.next_value()?),
                         "load" => entry.load = Some(map.next_value()?),
                         "map" => entry.map = Some(map.next_value()?),
                         "seed" => entry.seed = Some(map.next_value()?),
@@ -726,6 +731,11 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         }
                     }
                 }
+                if entry.device.is_none() && entry.render.is_some() {
+                    return Err(de::Error::custom(
+                        "`render` is a capture slot's key (`device = { capture = … }`, ADR 0038 §3)",
+                    ));
+                }
                 if entry.module.is_some() || entry.device.is_some() {
                     for (key, given) in
                         [("seed", entry.seed.is_some()), ("set", entry.set.is_some())]
@@ -762,6 +772,10 @@ impl JsonSchema for InstanceEntry {
                 "project": { "type": "string" },
                 "slot": slot,
                 "device": device,
+                "render": {
+                    "description": "ADR 0038 §3: a capture slot's WAV file, relative to the project folder (a project file), feeding its outputs in offline renders.",
+                    "type": "string"
+                },
                 "load": { "type": "string" },
                 "map": {
                     "type": "object",
