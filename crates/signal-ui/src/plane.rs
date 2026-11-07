@@ -413,6 +413,52 @@ pub fn check(file: &str, text: &str, panel: &[Card], slots: &[String]) -> Vec<Fi
     found
 }
 
+/// `ui/plane.toml`'s `text` after Ungroup of slot `slot` (ADR 0046 §8,
+/// phase 2): its Stacks' entry `slot` back to the card that now holds its
+/// controls (`card:<card>`), or removed when none does. `None` when nothing
+/// changes.
+pub fn ungroup_instruments(text: &str, slot: &str, card: Option<&str>) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    let stacks = doc
+        .get_mut("stack")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)?;
+    let mut changed = false;
+    for stack in stacks.iter_mut() {
+        let Some(list) = stack
+            .get_mut("instruments")
+            .and_then(toml_edit::Item::as_array_mut)
+        else {
+            continue;
+        };
+        let mut i = 0;
+        while i < list.len() {
+            if list.get(i).and_then(toml_edit::Value::as_str) != Some(slot) {
+                i += 1;
+                continue;
+            }
+            changed = true;
+            match (card, list.get_mut(i)) {
+                (Some(card), Some(value)) => {
+                    let decor = value.decor().clone();
+                    let mut written = toml_edit::Value::from(format!("{CARD_PREFIX}{card}"));
+                    *written.decor_mut() = decor;
+                    *value = written;
+                    i += 1;
+                }
+                _ => {
+                    let removed = list.remove(i);
+                    if let (Some(prefix), Some(next)) =
+                        (removed.decor().prefix().cloned(), list.get_mut(i))
+                    {
+                        next.decor_mut().set_prefix(prefix);
+                    }
+                }
+            }
+        }
+    }
+    changed.then(|| doc.to_string())
+}
+
 /// ADR 0046 §8 with ADR 0051 §4: `ui/plane.toml`'s `text` after Group
 /// into slot `slot` renamed the main panel's cards (`renames`, old → new,
 /// [`crate::parts::Grouped::cards`]), in the same write. An entry

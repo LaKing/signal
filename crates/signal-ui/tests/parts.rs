@@ -230,6 +230,89 @@ fn grouping_moves_the_controls_and_is_undone_byte_for_byte(transport: Transport)
     rig.finish();
 }
 
+/// ADR 0046 §8 (phase 2): Ungroup is Group's reverse: the entry back to
+/// `module`, the part's controls back into the main panel in the slot
+/// card's place with absolute binds, the part removed; its undo regroups.
+fn ungrouping_puts_the_controls_back(transport: Transport) {
+    let mut rig = studio("parts-ungroup", transport);
+    let (mut ws, _) = rig.client();
+    let dir = rig.dir.clone();
+    let project_before = read(&dir, "project.toml").unwrap();
+    let main_before = read(&dir, "ui/main.html").unwrap();
+    patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([{"op": "slot.group", "instance": "synth"}]),
+    );
+    let grouped_main = read(&dir, "ui/main.html").unwrap();
+    let reply = patch(
+        &mut rig,
+        &mut ws,
+        3,
+        json!([{"op": "slot.ungroup", "slot": "synth"}]),
+    );
+    assert_eq!(read(&dir, "project.toml").unwrap(), project_before);
+    assert!(!dir.join("ui/parts/synth.html").exists());
+    let main = read(&dir, "ui/main.html").unwrap();
+    assert!(!main.contains("<signal-slot bind=\"/synth\""), "{main}");
+    assert_eq!(
+        main.matches("bind=\"/synth.").count(),
+        main_before.matches("bind=\"/synth.").count(),
+        "{main}"
+    );
+    // The synth's card held the melody's piano roll too: Group split it, and
+    // Ungroup puts the part's card back beside the rest (not merged).
+    assert!(
+        main.contains("position-bind=\"/melody.position\""),
+        "{main}"
+    );
+    let checked = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "panel.check", "file": "main.html"}),
+        "panel.check",
+    );
+    assert_eq!(checked["ok"], true, "{checked}");
+    // Undo: grouped again.
+    patch(&mut rig, &mut ws, 6, reply["inverse"].clone());
+    assert_eq!(read(&dir, "ui/main.html").unwrap(), grouped_main);
+    assert!(dir.join("ui/parts/synth.html").exists());
+
+    // A card moved whole comes back in its place, byte for byte.
+    let before_echo = read(&dir, "ui/main.html").unwrap();
+    let project_echo = read(&dir, "project.toml").unwrap();
+    let windows_echo = read(&dir, "ui/windows.toml");
+    let plane_echo = read(&dir, "ui/plane.toml");
+    patch(
+        &mut rig,
+        &mut ws,
+        8,
+        json!([{"op": "slot.group", "instance": "echo"}]),
+    );
+    patch(
+        &mut rig,
+        &mut ws,
+        10,
+        json!([{"op": "slot.ungroup", "slot": "echo"}]),
+    );
+    assert_eq!(read(&dir, "ui/main.html").unwrap(), before_echo);
+    assert_eq!(read(&dir, "project.toml").unwrap(), project_echo);
+    assert_eq!(read(&dir, "ui/windows.toml"), windows_echo);
+    assert_eq!(read(&dir, "ui/plane.toml"), plane_echo);
+    assert!(!dir.join("ui/parts/echo.html").exists());
+}
+
+#[test]
+fn ungrouping_puts_the_controls_back_tcp() {
+    ungrouping_puts_the_controls_back(Transport::Tcp);
+}
+
+#[test]
+fn ungrouping_puts_the_controls_back_local() {
+    ungrouping_puts_the_controls_back(Transport::Local);
+}
+
 #[test]
 fn grouping_moves_the_controls_and_is_undone_byte_for_byte_tcp() {
     grouping_moves_the_controls_and_is_undone_byte_for_byte(Transport::Tcp);

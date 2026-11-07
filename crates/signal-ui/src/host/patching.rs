@@ -1028,6 +1028,70 @@ impl Host {
                         set(&mut files, Some(text), &plane, Some(new));
                     }
                 }
+                Op::SlotUngroup { slot } if level.is_empty() => {
+                    // ADR 0046 §8 (phase 2): the part's controls back into the
+                    // main panel in the slot card's place, the part removed.
+                    let part_path = format!("ui/{}", crate::parts::file_of(slot));
+                    let part = now(&files, patched, &part_path);
+                    let part_content = part.as_deref().and_then(|text| {
+                        panel_content(text)
+                            .ok()
+                            .and_then(|(start, end)| text.get(start..end))
+                    });
+                    let main = format!("ui/{MAIN_PANEL}");
+                    if let Some(text) = now(&files, patched, &main) {
+                        let ungrouped = panel_content(&text).and_then(|(start, end)| {
+                            crate::parts::ungroup_content(
+                                text.get(start..end).unwrap_or(""),
+                                slot,
+                                part_content,
+                            )
+                        });
+                        match ungrouped {
+                            Ok((content, renames)) => {
+                                if let Some(new) = crate::parts::with_content(&text, &content)
+                                    && new != text
+                                {
+                                    set(&mut files, Some(text.clone()), &main, Some(new));
+                                }
+                                let windows = crate::WINDOWS_FILE;
+                                if let Some(text) = now(&files, patched, windows)
+                                    && let Some(new) =
+                                        crate::parts::ungroup_cards(&text, &renames, slot)
+                                {
+                                    set(&mut files, Some(text), windows, Some(new));
+                                }
+                                let plane = format!("ui/{}", crate::plane::PLANE_FILE);
+                                let card = renames.first().map(|(_, new)| new.as_str());
+                                if let Some(text) = now(&files, patched, &plane)
+                                    && let Some(new) =
+                                        crate::plane::ungroup_instruments(&text, slot, card)
+                                {
+                                    set(&mut files, Some(text), &plane, Some(new));
+                                }
+                            }
+                            Err(why) => {
+                                return Err(fail_with(
+                                    "bad-value",
+                                    format!(
+                                        "{main} is not one the editor writes ({why}): {slot} is not ungrouped"
+                                    ),
+                                    json!({"file": main}),
+                                ));
+                            }
+                        }
+                    } else if part.is_some() {
+                        patched.notes.push(format!(
+                            "{part_path} removed: without ui/{MAIN_PANEL} the default panel shows {slot}'s parameters"
+                        ));
+                    }
+                    if let Some(part) = part {
+                        set(&mut files, Some(part), &part_path, None);
+                    }
+                }
+                Op::SlotUngroup { slot } => patched.notes.push(format!(
+                    "{slot} is in the composite {level}: no panel changed"
+                )),
                 Op::SlotGroup { instance, .. } => patched.notes.push(format!(
                     "{instance} is in the composite {level}: no control moved (a part here would be every instance's; add one with Edit layout)"
                 )),

@@ -403,3 +403,91 @@ fn panel_restore_writes_only_the_presentation_files_it_names() {
     );
     assert!(restore("parts/rack.fx.html", Some("x"), None).is_ok());
 }
+
+/// ADR 0046 §8 (phase 2): `slot.ungroup` is `slot.group`'s reverse: the
+/// grouped text ungrouped is the host's again, byte for byte, in an inline
+/// entry and in a section, and plans the same; its undo regroups.
+#[test]
+fn ungroup_gives_the_instance_back() {
+    for (host, name) in [
+        (HOST.to_owned(), "osc"),
+        (
+            HOST.replace("amp = { module = \"std.gain\", db = -6 }\n", "")
+                + "\n[instances.amp]\n# the level\nmodule = \"std.gain\"   # gain\ndb = -6\nsnapshot_exclude = [\"db\"]\n",
+            "amp",
+        ),
+    ] {
+        let grouped = round_trip(
+            &host,
+            &[op(
+                serde_json::json!({"op": "slot.group", "instance": name}),
+            )],
+        );
+        let back = round_trip(
+            &grouped,
+            &[op(serde_json::json!({"op": "slot.ungroup", "slot": name}))],
+        );
+        assert_eq!(back, host, "{name}");
+        assert_eq!(plan_json(&back), plan_json(&host));
+    }
+}
+
+/// A module's `set` values become its parameter values.
+#[test]
+fn ungroup_writes_set_as_values() {
+    let host = HOST.replace(
+        "amp = { module = \"std.gain\", db = -6 }",
+        "amp = { slot = { inputs = { in = \"audio\" }, outputs = { out = \"audio\" } }, load = \"std.gain\", set = { db = -3 } }",
+    );
+    let back = round_trip(
+        &host,
+        &[op(serde_json::json!({"op": "slot.ungroup", "slot": "amp"}))],
+    );
+    assert!(
+        back.contains("amp = { module = \"std.gain\", db = -3 }"),
+        "{back}"
+    );
+    assert_eq!(plan_json(&back), plan_json(&host));
+}
+
+/// The refusals: not a slot, empty, a `map`, a template, `voices`, a port
+/// the content lacks.
+#[test]
+fn ungroup_is_refused_where_it_would_change_the_plan() {
+    let with = |entry: &str| HOST.replace("amp = { module = \"std.gain\", db = -6 }", entry);
+    let cases = [
+        ("amp = { module = \"std.gain\", db = -6 }", "is not a slot"),
+        (
+            "amp = { slot = { inputs = { in = \"audio\" } } }",
+            "it is empty",
+        ),
+        (
+            "amp = { slot = { inputs = { x = \"audio\" }, outputs = { out = \"audio\" } }, load = \"std.gain\", map = { x = \"in\" } }",
+            "it has a `map`",
+        ),
+        (
+            "amp = { slot = \"lib.voice\", load = \"std.gain\" }",
+            "from the template `lib.voice`",
+        ),
+        (
+            "amp = { slot = { inputs = { in = \"audio\" }, outputs = { out = \"audio\" } }, load = \"std.gain\", voices = 2 }",
+            "it has `voices`",
+        ),
+        (
+            "amp = { slot = { inputs = { in = \"audio\", side = \"audio\" }, outputs = { out = \"audio\" } }, load = \"std.gain\" }",
+            "has no input `side`",
+        ),
+    ];
+    for (entry, message) in cases {
+        let files = RefCell::new(Files::new());
+        let error = apply_with(
+            &with(entry),
+            &[op(serde_json::json!({"op": "slot.ungroup", "slot": "amp"}))],
+            &files,
+            &no_bindings,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("ungrouped: {entry}"));
+        assert!(error.to_string().contains(message), "{entry}: {error}");
+    }
+}

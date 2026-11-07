@@ -159,7 +159,8 @@ const LOADED_SLOT = { kind: 'instance', path: '', level: '', address: '/fx', nod
 
 test('ADR 0037 §7: a slot box: Load… when empty, Replace… and Unload when loaded, the map, the interface, templates', () => {
   const empty = schematicMenu(EMPTY_SLOT, { editing: true });
-  assert.deepEqual(ids(empty), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'slot-inside', 'slot-load', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-detach', 'separator', 'make-interface', 'delete']);
+  assert.deepEqual(ids(empty), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'slot-inside', 'slot-load', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-detach', 'slot-ungroup', 'separator', 'make-interface', 'delete']);
+  assert.equal(item(empty, 'slot-ungroup').title, 'The slot is empty');
   assert.equal(item(empty, 'slot-inside').title, 'An empty slot has no inside', 'an older server gives no inside');
   assert.equal(item(empty, 'slot-unload').title, 'The slot is empty');
   assert.equal(item(empty, 'slot-detach').disabled, false, 'it has a template');
@@ -169,8 +170,10 @@ test('ADR 0037 §7: a slot box: Load… when empty, Replace… and Unload when l
   assert.ok(ids(loaded).includes('slot-replace') && !ids(loaded).includes('slot-load'));
   assert.equal(item(loaded, 'slot-unload').disabled, false);
   assert.equal(item(loaded, 'slot-detach').title, 'Its interface has no template');
+  assert.equal(item(loaded, 'slot-ungroup').disabled, false);
+  assert.equal(item(schematicMenu({ ...LOADED_SLOT, node: { ...LOADED_SLOT.node, slot: { ...LOADED_SLOT.node.slot, voices: { count: 2, legato: false } } } }, { editing: true }), 'slot-ungroup').title, 'It has voices: make it mono first');
   const viewing = schematicMenu(LOADED_SLOT, { editing: false });
-  for (const id of ['slot-replace', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'make-interface']) assert.equal(item(viewing, id).title, EDIT_OFF, id);
+  for (const id of ['slot-replace', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-ungroup', 'make-interface']) assert.equal(item(viewing, id).title, EDIT_OFF, id);
 });
 
 test('ADR 0037 §7: a slot pin: rename or retype, remove (off while wired), remove with its wires', () => {

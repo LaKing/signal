@@ -689,6 +689,12 @@ export class SchematicEditor {
     return this.write(0, hit.level, [{ op: 'slot.group', instance: hit.node.name, ...(controls?.length ? { controls } : {}) }]);
   }
 
+  /** ADR 0046 §8 (phase 2): Ungroup: slot `hit` made the plain instance of what it loads again; the server refuses, saying why, where that would change the plan. */
+  ungroup(hit) {
+    if (hit?.kind !== 'instance' || !hit.node.slot) return Promise.resolve(false);
+    return this.write(0, hit.level, [{ op: 'slot.ungroup', slot: hit.node.name }]);
+  }
+
   makeInterface(hit) {
     if (!this.editing || hit?.kind !== 'instance') return;
     const instance = (this.levelGraph(hit.level)?.instances ?? []).find((i) => i.name === hit.node.name);

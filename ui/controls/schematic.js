@@ -2730,6 +2730,7 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'slot-interface') this.editor.openInterface(hit);
     else if (id === 'slot-save-template') this.editor.saveTemplate(hit);
     else if (id === 'slot-detach') this.editor.detach(hit);
+    else if (id === 'slot-ungroup') this.editor.ungroup(hit);
     else if (id === 'slot-inside') this.enter(hit);
     else if (id === 'slot-interface-inside') this.editor.openInsideInterface();
     else if (id === 'make-interface') this.editor.makeInterface(hit);

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 44] = [
+const TOOLS: [&str; 45] = [
     "project_info",
     "graph",
     "modules",
@@ -50,6 +50,7 @@ const TOOLS: [&str; 44] = [
     "slot_voices",
     "slot_interface",
     "slot_inside",
+    "slot_ungroup",
     "slot_group",
     "write_pattern",
     "write_panel",
@@ -1711,6 +1712,12 @@ fn slot_group_moves_the_controls_into_a_part_and_is_undone() {
             .contains("<signal-slot bind=\"/osc\">")
     );
     mcp.ok("patch", json!({"ops": grouped["inverse"]}));
+    assert_eq!(mcp.file("project.toml"), text);
+    assert_eq!(mcp.file("ui/main.html"), panel);
+    assert!(!dir.join("ui/parts/osc.html").exists());
+    // ADR 0046 §8 (phase 2): `slot_ungroup` is the reverse, as an edit of its own.
+    mcp.ok("slot_group", json!({"instance": "osc"}));
+    mcp.ok("slot_ungroup", json!({"slot": "osc"}));
     assert_eq!(mcp.file("project.toml"), text);
     assert_eq!(mcp.file("ui/main.html"), panel);
     assert!(!dir.join("ui/parts/osc.html").exists());

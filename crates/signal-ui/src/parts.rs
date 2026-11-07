@@ -1115,6 +1115,200 @@ pub fn group_content(
     })
 }
 
+/// `node` with every control's relative bind rooted at `root` (the
+/// inverse of [`rebound`]): what Ungroup writes back into the host panel.
+fn rooted(node: Node, root: &str) -> Node {
+    match node {
+        Node::Control { tag, attributes } => Node::Control {
+            attributes: attributes
+                .into_iter()
+                .map(|(n, v)| {
+                    if n == "bind" {
+                        let absolute = v.as_deref().and_then(|b| {
+                            bind_list(b)
+                                .iter()
+                                .map(|a| root_address(a, root).ok())
+                                .collect::<Option<Vec<String>>>()
+                        });
+                        (n, absolute.map(|r| r.join(" ")).or(v))
+                    } else {
+                        (n, v)
+                    }
+                })
+                .collect(),
+            tag,
+        },
+        Node::Container {
+            kind,
+            classes,
+            place,
+            children,
+        } => Node::Container {
+            kind,
+            classes,
+            place,
+            children: children.into_iter().map(|c| rooted(c, root)).collect(),
+        },
+        text => text,
+    }
+}
+
+/// Ungroup on the main panel's content `html` (ADR 0046 §8, phase 2): the
+/// open slot card of top-level slot `slot` replaced in its place by the
+/// cards of its part (`part`: the part's `<signal-panel>` content, `None`
+/// when it has none), every bind rooted at `/<slot>`, the first card taking
+/// the slot card's place on the plate. Without the slot card in the panel,
+/// the part's cards go at the end of the first grid. `Err`: a content the
+/// editor does not write. With the content, the card ids `ui/windows.toml`
+/// renames back: each part card's (`<slot>:<id>`) to its id in the host.
+pub type Ungrouped = (String, Vec<(String, String)>);
+
+/// [`ungroup_content`]'s work.
+pub fn ungroup_content(html: &str, slot: &str, part: Option<&str>) -> Result<Ungrouped, String> {
+    let root = format!("/{slot}");
+    let mut cards: Vec<Node> = Vec::new();
+    if let Some(part) = part {
+        for node in parse(part)? {
+            match node {
+                Node::Container {
+                    kind: Kind::Cards,
+                    children,
+                    ..
+                } => cards.extend(children.into_iter().map(|c| rooted(c, &root))),
+                other => cards.push(rooted(other, &root)),
+            }
+        }
+    }
+    let is_ours = |node: &Node| {
+        matches!(node, Node::Control { tag, .. } if tag == SLOT_ELEMENT)
+            && node.attribute("bind").map(str::trim) == Some(root.as_str())
+    };
+    let part_titles: Vec<String> = cards.iter().filter_map(card_title).collect();
+    let part_ids = card_ids(&part_titles);
+    let mut host = parse(html)?;
+    // Where the inserted cards land among the host's cards.
+    let landing = cards_of(&host).iter().position(|c| is_ours(c));
+    let mut placed = false;
+    for node in &mut host {
+        let Node::Container {
+            kind: Kind::Cards,
+            children,
+            ..
+        } = node
+        else {
+            continue;
+        };
+        let Some(at) = children.iter().position(is_ours) else {
+            continue;
+        };
+        let place = children
+            .get(at)
+            .and_then(|n| n.attribute("place"))
+            .map(str::to_owned);
+        let mut instead = cards.clone();
+        if let Some(Node::Container { place: first, .. }) = instead.first_mut()
+            && place.is_some()
+        {
+            *first = place;
+        }
+        children.splice(at..=at, instead);
+        placed = true;
+        break;
+    }
+    let landing = if placed {
+        landing
+    } else {
+        Some(cards_of(&host).len())
+    };
+    if !placed && !cards.is_empty() {
+        match host.iter_mut().find_map(|n| match n {
+            Node::Container {
+                kind: Kind::Cards,
+                children,
+                ..
+            } => Some(children),
+            _ => None,
+        }) {
+            Some(children) => children.extend(cards),
+            None => host.push(Node::Container {
+                kind: Kind::Cards,
+                classes: Vec::new(),
+                place: None,
+                children: cards,
+            }),
+        }
+    }
+    let new_ids = host_card_ids(&cards_of(&host));
+    let renames = landing
+        .map(|at| {
+            part_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(k, id)| Some((format!("{slot}:{id}"), new_ids.get(at + k)?.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((serialize(&host), renames))
+}
+
+/// `ui/windows.toml`'s `text` after Ungroup of slot `slot`: every card id
+/// of `renames` rewritten (old → new), the slot's open card (`slot.<slot>`)
+/// dropped, and a card left twice in one window kept once. `None` when
+/// nothing changes.
+pub fn ungroup_cards(text: &str, renames: &[(String, String)], slot: &str) -> Option<String> {
+    let mut doc: DocumentMut = text.parse().ok()?;
+    let header = slot_card_id(slot);
+    let mut changed = false;
+    let layouts = doc.get_mut("layout").and_then(Item::as_table_like_mut)?;
+    for (_, entry) in layouts.iter_mut() {
+        let Some(windows) = entry
+            .as_table_like_mut()
+            .and_then(|t| t.get_mut("windows"))
+            .and_then(Item::as_array_of_tables_mut)
+        else {
+            continue;
+        };
+        for window in windows.iter_mut() {
+            let Some(cards) = window.get_mut("cards").and_then(Item::as_array_mut) else {
+                continue;
+            };
+            let mut seen: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < cards.len() {
+                let Some(id) = cards.get(i).and_then(|c| c.as_str()).map(str::to_owned) else {
+                    i += 1;
+                    continue;
+                };
+                let new = renames
+                    .iter()
+                    .find(|(old, _)| *old == id)
+                    .map(|(_, new)| new.clone());
+                let now = new.clone().unwrap_or(id.clone());
+                if id == header || seen.contains(&now) {
+                    cards.remove(i);
+                    changed = true;
+                    continue;
+                }
+                if let Some(new) = new
+                    && let Some(card) = cards.get_mut(i)
+                {
+                    let decor = card.decor().clone();
+                    let mut value = Value::from(new.as_str());
+                    *value.decor_mut() = decor;
+                    *card = value;
+                    changed = true;
+                }
+                seen.push(now);
+                i += 1;
+            }
+            if changed && let Some(first) = cards.get_mut(0) {
+                first.decor_mut().set_prefix("");
+            }
+        }
+    }
+    changed.then(|| doc.to_string())
+}
+
 /// The panel file `text` with its `<signal-panel>` content replaced.
 pub fn with_content(text: &str, content: &str) -> Option<String> {
     let (start, end) = panel_content(text).ok()?;

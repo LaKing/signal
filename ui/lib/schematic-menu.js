@@ -152,8 +152,8 @@ function partMenu(hit, state) {
 /**
  * A slot box's items (ADR 0037 §7): Load… when it is empty, Replace… and
  * Unload when loaded, Edit map…, Edit interface…, Save interface as
- * template… and Detach from template (off without a template); each off
- * with `editOff`'s reason outside Edit patch.
+ * template…, Detach from template (off without a template) and Ungroup;
+ * each off with `editOff`'s reason outside Edit patch.
  */
 function slotItems(slot, editOff, closed = null) {
   const loaded = typeof slot.load === 'string' && slot.load !== '';
@@ -167,6 +167,8 @@ function slotItems(slot, editOff, closed = null) {
     unless({ id: 'slot-interface', label: 'Edit interface…' }, editOff),
     unless({ id: 'slot-save-template', label: 'Save interface as template…' }, editOff),
     unless({ id: 'slot-detach', label: 'Detach from template' }, editOff ?? (template ? null : 'Its interface has no template')),
+    // ADR 0046 §8 (phase 2): the reverse of Group into slot.
+    unless({ id: 'slot-ungroup', label: 'Ungroup', title: 'Make it the plain instance of what it loads again; its part’s controls go back into the main panel' }, editOff ?? (!loaded ? 'The slot is empty' : template ? 'Its interface is from a template: detach it first' : slot.voices ? 'It has voices: make it mono first' : null)),
   ];
 }
 

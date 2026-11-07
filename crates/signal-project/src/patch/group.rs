@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use toml_edit::{DocumentMut, Item as TomlItem};
 
-use super::slot::{Change, entry, is_slot, json_text};
+use super::slot::{Change, entry, is_slot, item_text, json_text, read_slot};
 use super::{Op, PatchError, Patching, bad, refused, valid_name};
 use crate::slot::Role;
 
@@ -241,6 +241,128 @@ impl Patching<'_> {
         let (changes, wires) = self.restore(instance, &changes, &BTreeMap::new())?;
         Ok(vec![Op::SlotRestore {
             slot: instance.to_owned(),
+            changes,
+            wires,
+        }])
+    }
+
+    /// `slot.ungroup` (ADR 0046 §8, phase 2): slot `slot` made the plain
+    /// instance of what it loads again, the reverse of `slot.group`: `slot`
+    /// and `load` replaced in place by `module` (or `project`, for a project
+    /// path), a module's `set` values written as its parameter values, the
+    /// rest kept. Refused, with the reason, where it would change the plan
+    /// or leave a wire dangling: an empty slot, its own inside, a `map`, a
+    /// template, `voices`, or an interface port the content lacks. The
+    /// host moves the part's controls back into its panel.
+    pub(super) fn slot_ungroup(&mut self, slot: &str) -> Result<Vec<Op>, PatchError> {
+        if !is_slot(&self.text, slot) {
+            return Err(bad(format!("`{slot}` is not a slot")));
+        }
+        let read = read_slot(&self.text, slot, self.ctx.templates)?;
+        let refuse = |why: String| Err(bad(format!("`{slot}` is not ungrouped: {why}")));
+        let Some(load) = read.load.clone() else {
+            return refuse("it is empty (nothing to make it an instance of)".to_owned());
+        };
+        if self.own_inside(slot, Some(&load)).is_some() {
+            return refuse(format!(
+                "it holds its own inside `{load}` (an instance of it would be a composite no slot owns)"
+            ));
+        }
+        if !read.map.is_empty() {
+            return refuse("it has a `map` (its wires would name other ports)".to_owned());
+        }
+        if let Some(from) = read.interface.from.as_deref() {
+            return refuse(format!(
+                "its interface is from the template `{from}` (detach it first)"
+            ));
+        }
+        let mut doc: DocumentMut = self
+            .text
+            .parse()
+            .map_err(|_| refused("does-not-load", "the file does not parse"))?;
+        let tab = entry(&mut doc, slot).ok_or_else(|| {
+            bad(format!(
+                "`{slot}` is not written as a table: ungroup it by hand"
+            ))
+        })?;
+        if tab.get("voices").is_some() {
+            return refuse(
+                "it has `voices` (its voices would become one instance: remove `voices` first)"
+                    .to_owned(),
+            );
+        }
+        let names = (self.ctx.content)(&load).ok_or_else(|| {
+            refused(
+                "unknown-module",
+                format!("`{load}` does not resolve: `{slot}` is not ungrouped"),
+            )
+        })?;
+        for port in &read.interface.ports {
+            if !names
+                .ports
+                .iter()
+                .any(|c| c.name == port.name && c.role == port.role)
+            {
+                return refuse(format!(
+                    "`{load}` has no {} `{}` (a wire on it would dangle)",
+                    match port.role {
+                        Role::Input => "input",
+                        Role::Output => "output",
+                        Role::Parameter => "parameter",
+                    },
+                    port.name
+                ));
+            }
+        }
+        let project = crate::is_project_path(&load);
+        let keys = tab.keys();
+        let at = keys.iter().position(|k| k == "slot").unwrap_or(0);
+        let decor = tab.decor("slot");
+        let mut set_values: Vec<(String, String)> = Vec::new();
+        if !project && let Some(set) = tab.get("set").and_then(TomlItem::as_table_like) {
+            for (key, value) in set.iter() {
+                if tab.get(key).is_some() {
+                    return refuse(format!(
+                        "`set.{key}` and a value `{key}` on the slot would be one parameter"
+                    ));
+                }
+                let text = item_text(value).unwrap_or_default();
+                set_values.push((key.to_owned(), text));
+            }
+        }
+        let unset = |key: &str| Change {
+            path: vec![key.to_owned()],
+            value: None,
+            at: None,
+            decor: None,
+            was: None,
+        };
+        let mut changes = vec![
+            unset("slot"),
+            unset("load"),
+            Change {
+                path: vec![if project { "project" } else { "module" }.to_owned()],
+                value: Some(json_text(&serde_json::json!(load))?),
+                at: Some(at),
+                decor,
+                was: None,
+            },
+        ];
+        if !set_values.is_empty() {
+            changes.push(unset("set"));
+            for (key, text) in set_values {
+                changes.push(Change {
+                    path: vec![key],
+                    value: Some(text),
+                    at: None,
+                    decor: None,
+                    was: None,
+                });
+            }
+        }
+        let (changes, wires) = self.restore(slot, &changes, &BTreeMap::new())?;
+        Ok(vec![Op::SlotRestore {
+            slot: slot.to_owned(),
             changes,
             wires,
         }])

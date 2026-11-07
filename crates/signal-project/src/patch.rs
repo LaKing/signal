@@ -307,6 +307,14 @@ pub enum Op {
         /// `instance.port` at the level.
         port: String,
     },
+    /// ADR 0046 §8 (phase 2): the slot made the plain instance of what it
+    /// loads again, the reverse of `slot.group`; its part's controls go
+    /// back into the host's panel (the host's side).
+    #[serde(rename = "slot.ungroup")]
+    SlotUngroup {
+        /// The slot.
+        slot: String,
+    },
     /// ADR 0046 §8: an instance made a slot holding what it was, with the
     /// same names: `module = "x"` becomes `slot = { … }, load = "x"`
     /// (`project = "…"` becomes `load = "…"`, `seed` and `set` kept), its
@@ -2431,6 +2439,7 @@ impl Patching<'_> {
             Op::ExportDisconnect { role, name, port } => self.export_edit(false, *role, name, port),
             Op::ExportRestore { changes } => self.export_restore(changes),
             Op::SlotGroup { instance, .. } => return self.slot_group(instance),
+            Op::SlotUngroup { slot } => return self.slot_ungroup(slot),
             Op::PanelRestore { file, text, was } => self.panel_restore(file, text, was),
         };
         one.map(|op| vec![op])

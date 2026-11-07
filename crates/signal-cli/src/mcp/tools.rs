@@ -418,6 +418,18 @@ const TOOLS: &[Tool] = &[
         run: slot_inside,
     },
     Tool {
+        name: "slot_ungroup",
+        group: Group::Patch,
+        description: "Ungroups a slot (ADR 0046 §8): the plain instance of what it loads again (`module`, or `project` for a project path), a module's `set` values written as its parameter values, its part's controls moved back into ui/main.html in the slot card's place (binds made absolute) and the part removed. Refused, with the reason, for an empty slot, its own inside, a `map`, a template, `voices`, or an interface port the content lacks.",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot"],
+            )
+        },
+        run: slot_ungroup,
+    },
+    Tool {
         name: "slot_group",
         group: Group::Patch,
         description: "Group into slot (ADR 0046): makes instance `instance` a slot that loads what it held, with the same names (`module = \"x\"` becomes `slot = { … }, load = \"x\"`; `project = \"…\"` becomes `load = \"…\"`, `seed` and `set` kept), its interface every port a wire, an export or a panel binding names (auto, `{}`) and every parameter it sets or a wire, export or binding names. The plan does not change. At the top level the main panel's controls on the instance (all, or those of `controls`, their indexes among ui/main.html's controls) move into the slot's part, ui/parts/<instance>.html, their binds made relative, and the open slot card takes their place. An instance with `pattern` or `gpu`, or a slot, is refused. The reply's `inverse` undoes it, files included.",
@@ -2183,6 +2195,10 @@ fn slot_interface(context: &Context, arguments: &Value) -> Outcome {
 
 fn slot_inside(context: &Context, arguments: &Value) -> Outcome {
     slot_op(context, arguments, json!({"op": "slot.inside"}))
+}
+
+fn slot_ungroup(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.ungroup"}))
 }
 
 fn slot_group(context: &Context, arguments: &Value) -> Outcome {
