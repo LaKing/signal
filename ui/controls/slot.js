@@ -56,6 +56,10 @@ export class SignalSlot extends SignalElement {
 .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
 .slot-voices { display: inline-flex; gap: 6px; align-items: center; font-size: 11px; color: var(--signal-muted, #8a93a3); }
 .slot-voices input[type=number] { width: 3.2em; }
+.voices-line { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.voice-row { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; margin: 4px 0; font-size: 10px; color: var(--signal-muted, #8a93a3); }
+.voice-row > i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--signal-muted, #8a93a3); box-sizing: border-box; }
+.voice-row > i.on { background: var(--signal-accent, #4fb3ff); border-color: var(--signal-accent, #4fb3ff); }
 .slot-voices label { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
 .title { flex: 1 1 12rem; min-width: 0; margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .buttons { display: flex; gap: 4px; }
@@ -107,8 +111,9 @@ ${BROWSER_CSS}`;
 
   template() {
     return `<div class="card" part="card">
-  <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
+  <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
   <div class="state" role="status"></div>
+  <div class="voices-line"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><div class="voice-row" hidden></div></div>
   <ul class="ports"></ul>
   <div class="params"></div>
   <div class="note"></div>
@@ -242,7 +247,9 @@ ${BROWSER_CSS}`;
   }
 
   streams(connection) {
-    const stops = [() => this.stopLevels(), ...(this.levels ? [this.startLevels(connection)] : [])];
+    const stops = [() => this.stopLevels(), () => this.stopVoices(), ...(this.levels ? [this.startLevels(connection)] : [])];
+    this.voiceKey = null;
+    this.syncVoices(connection);
     // ADR 0046: the part, read now and again whenever it is written.
     this.partCheck = new BindingCheck({
       request: (message) => connection.request(message),
@@ -442,6 +449,7 @@ ${BROWSER_CSS}`;
     }
     title.textContent = cardTitle(card);
     title.title = cardTitle(card);
+    this.syncVoices(this.connection);
     const voices = this.$('.slot-voices');
     voices.hidden = !card.voices;
     if (card.voices) {
@@ -583,6 +591,42 @@ ${BROWSER_CSS}`;
 
   stopLevels() {
     for (const stop of this.levelStops.splice(0)) stop?.();
+  }
+
+  // ADR 0044 §7: the voice row, one dot per voice lit while its gate is
+  // high, from the allocator's `gate` (a vector stream: one of the run's 8
+  // vector slots; without one the row says so and the rest of the card works).
+
+  syncVoices(connection) {
+    const card = this.card;
+    const count = card?.voices && !card.empty ? card.voices.count : 0;
+    const key = count && connection ? `${card.address}|${count}` : null;
+    if (key === this.voiceKey) return;
+    this.stopVoices();
+    this.voiceKey = key;
+    const row = this.$('.voice-row');
+    if (!row) return;
+    row.hidden = !count;
+    const dots = Array.from({ length: count }, (_, e) => {
+      const dot = document.createElement('i');
+      dot.title = `v${e}`;
+      return dot;
+    });
+    row.replaceChildren(...dots);
+    if (!key || !connection?.subscribe) return;
+    this.voiceStop = connection.subscribe(
+      { stream: 'vector', port: `${card.address}/alloc.gate`, rate: 30 },
+      (frame) => {
+        const values = frame.values ?? [];
+        dots.forEach((dot, e) => dot.classList.toggle('on', (values[e] ?? 0) > 0.5));
+      },
+      { onError: (error) => row.replaceChildren(...dots, Object.assign(document.createElement('span'), { textContent: error?.code === 'no-vector-slot' ? 'no slot' : `no voice row (${error?.message ?? error})` })) },
+    );
+  }
+
+  stopVoices() {
+    this.voiceStop?.();
+    this.voiceStop = null;
   }
 }
 
