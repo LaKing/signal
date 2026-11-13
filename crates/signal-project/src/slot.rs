@@ -40,7 +40,8 @@ pub(crate) const MAX_VOICES: u32 = 64;
 /// ADR 0044 §4–5: the generated composite's allocator, unpack and sum types.
 const ALLOCATOR: &str = "std.voice_alloc";
 const UNPACK: &str = "std.unpack64";
-const ADD: &str = "std.add";
+const PACK: &str = "std.pack64";
+const REDUCE: &str = "std.reduce64";
 
 /// ADR 0044 §2: the allocator's outputs an `each` input may name.
 const ALLOCATED: [&str; 3] = ["hz", "gate", "velocity"];
@@ -2389,8 +2390,8 @@ struct Generated {
 }
 
 /// The composite `name` of `voices` copies of `content`: the allocator,
-/// an unpack per matched `each` input, the voices, and an `std.add` chain
-/// per matched output. Its exports carry the content's names, so the host's
+/// an unpack per matched `each` input, the voices, and a pack and a
+/// reduce per matched output. Its exports carry the content's names, so the host's
 /// values and wires on matched ports reach every voice as they reach a
 /// mono slot's content; the `alloc` port exports under its own name.
 fn generate(
@@ -2490,33 +2491,29 @@ fn generate(
     // the voices enter in index order, `((v0 + v1) + v2) + …` (ADR 0054: an
     // input takes one connection, so a chain, not a fan-in).
     for (port, target) in sums {
-        let last = format!("sum_{port}");
-        let adds = n.saturating_sub(1).max(1);
-        for k in 1..=adds {
-            let add = if k == adds {
-                last.clone()
-            } else {
-                format!("sum_{port}_{k}")
-            };
+        // `pack_<port>` takes voice e on element e; `sum_<port>` folds the
+        // elements in order, `((v0 + v1) + …)`, the unused ones +0. Both
+        // survive every change of N: a removed voice's audio fades into
+        // them, and its element then reads 0 (a chain of adds would hold a
+        // removed add's sum of survivors during the removal fade).
+        let pack = format!("pack_{port}");
+        let sum = format!("sum_{port}");
+        for (name, module) in [(&pack, PACK), (&sum, REDUCE)] {
             def.instances.push(InstanceDef {
-                name: add.clone(),
-                module: ADD.to_owned(),
+                name: name.clone(),
+                module: module.to_owned(),
                 ..InstanceDef::default()
             });
-            let a = if k == 1 {
-                voice(0, &target)
-            } else {
-                format!("sum_{port}_{}.out", k - 1)
-            };
-            def.connections.push(wire(a, format!("{add}.a")));
-            if n > 1 {
-                def.connections
-                    .push(wire(voice(k, &target), format!("{add}.b")));
-            }
         }
+        for e in 0..n {
+            def.connections
+                .push(wire(voice(e, &target), format!("{pack}.e{e}")));
+        }
+        def.connections
+            .push(wire(format!("{pack}.out"), format!("{sum}.in")));
         def.exports.outputs.push(OutputExport {
             name: target,
-            from: format!("{last}.out"),
+            from: format!("{sum}.sum"),
         });
     }
     // The content's parameters outside the interface, under their own

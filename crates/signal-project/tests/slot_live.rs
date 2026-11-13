@@ -891,3 +891,183 @@ fn a_replace_that_retypes_an_empty_auto_output_is_still_unload_then_load() {
         assert_eq!(played.left, tone[..played.left.len()]);
     }
 }
+
+/// A host whose slot `deck` (output `out`, parameter `level`) loads
+/// `voice_g` (a 220 Hz sine through a gain whose `db` is exported as
+/// `level`) with `voices` voices; its output on the right, at gain 0.25.
+fn poly_host(voices: u32) -> Project {
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"poly\"\nsample_rate = {RATE}\nseed = 5\n\n[instances]\n\
+         deck = {{ slot = {{ outputs = {{ out = \"audio\" }}, parameters = {{ level = {{}} }} }}, load = \"voice_g\", voices = {voices} }}\n\
+         out = {{ module = \"std.audio_out\", gain = 0.25 }}\n\n[wiring]\nconnections = [\n  {{ from = \"deck.out\", to = \"out.r\" }},\n]\n"
+    );
+    Project::from_sources(vec![
+        SourceFile {
+            path: "project.toml".to_owned(),
+            text,
+        },
+        SourceFile {
+            path: "composites/voice_g.toml".to_owned(),
+            text: "schema_version = 1\n\n[composite]\nname = \"voice_g\"\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 220 }\ng = { module = \"std.gain\" }\n\n[wiring]\nconnections = [ { from = \"osc.out\", to = \"g.in\" } ]\n\n[exports]\noutputs = { out = \"g.out\" }\nparameters = { level = \"g.db\" }\n".to_owned(),
+        },
+    ])
+    .unwrap()
+}
+
+/// ADR 0044 §8, test 7: a shared parameter edited live (not saved) reaches
+/// the voices a growth of N adds, with the survivors' value; a ramp in
+/// progress too, to its target over its remaining frames; both recorded,
+/// so the session replays bit for bit.
+#[test]
+fn added_voices_take_the_survivors_live_values() {
+    use signal_core::{EventPayload, PortAddress};
+    use signal_project::live::send_edit_with_bases;
+    let registry = registry();
+    let port = |voice: u32| -> PortAddress { format!("/deck/v{voice}/g.db").parse().unwrap() };
+    // A live set of -20 dB on both voices, then growth to three.
+    let two = poly_host(2);
+    let mut run = Run::start(&two, &registry, 1, 61);
+    run.play(1_000);
+    for voice in 0..2 {
+        run.controller
+            .send_event(port(voice), EventPayload::Set(-20.0), Stamp::Default)
+            .unwrap();
+    }
+    run.play(4_000);
+    let (_, applied) = send_edit_with_bases(
+        &mut run.controller,
+        &mut run.live,
+        &mut (),
+        &two,
+        poly_host(3),
+        &registry,
+        &|p| {
+            (p.to_string().starts_with("/deck/v") && p.to_string().ends_with("/g.db"))
+                .then_some(-20.0)
+        },
+    )
+    .unwrap();
+    assert_eq!(applied.replaced, 0, "{applied}");
+    run.play(6_000);
+    let played = run.finish(&registry, "voices-live-set");
+    let sent: Vec<String> = played
+        .edits
+        .iter()
+        .map(|e| format!("{:?}", e.command))
+        .filter(|c| c.contains("/deck/v2/g.db"))
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains("Set(-20.0)"), "{sent:?}");
+    // Three voices at -20 dB (0.1 each) through gain 0.25: at most 0.075
+    // (the added voice's sine starts at its own phase, so less); at the
+    // text's 0 dB the added voice alone would reach 0.25.
+    let tail = &played.right[played.right.len() - 2_000..];
+    let peak = tail.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(peak > 0.024 && peak < 0.0751, "peak {peak}");
+
+    // A ramp in progress at the growth: the added voice ramps to its target.
+    let mut run = Run::start(&two, &registry, 1, 62);
+    run.play(1_000);
+    for voice in 0..2 {
+        run.controller
+            .send_event(
+                port(voice),
+                EventPayload::Ramp {
+                    to: -40.0,
+                    frames: 48_000,
+                    curve: signal_core::Curve::Linear,
+                },
+                Stamp::Default,
+            )
+            .unwrap();
+    }
+    // Applied (and recorded) before the growth, still in progress at it.
+    run.play(20_000);
+    send_edit_with_bases(
+        &mut run.controller,
+        &mut run.live,
+        &mut (),
+        &two,
+        poly_host(3),
+        &registry,
+        &|_| None,
+    )
+    .unwrap();
+    run.play(2_000);
+    let played = run.finish(&registry, "voices-live-ramp");
+    let ramp: Vec<String> = played
+        .edits
+        .iter()
+        .map(|e| format!("{:?}", e.command))
+        .filter(|c| c.contains("/deck/v2/g.db"))
+        .collect();
+    assert_eq!(ramp.len(), 1, "{ramp:?}");
+    assert!(
+        ramp[0].contains("Ramp") && ramp[0].contains("to: -40.0"),
+        "{ramp:?}"
+    );
+}
+
+/// ADR 0044 §8: a `legato` edit is a parameter edit of the allocator, with
+/// no swap.
+#[test]
+fn a_legato_edit_needs_no_swap() {
+    let registry = registry();
+    let two = poly_host(2);
+    let legato = {
+        let mut files = two.files.clone();
+        files[0].text = files[0]
+            .text
+            .replace("voices = 2", "voices = { count = 2, legato = true }");
+        Project::from_sources(files).unwrap()
+    };
+    let mut run = Run::start(&two, &registry, 1, 63);
+    run.play(1_000);
+    let (_, applied) =
+        send_edit(&mut run.controller, &mut run.live, &two, legato, &registry).unwrap();
+    assert_eq!((applied.swap, applied.sets), (None, 1), "{applied}");
+    run.play(1_000);
+    run.finish(&registry, "voices-legato");
+}
+
+/// ADR 0044 §8: N shrinks by the removal protocol: the removed voice fades
+/// out to +0.0 and leaves; the survivors play on; the session replays.
+#[test]
+fn shrinking_n_fades_the_removed_voices_out() {
+    let registry = registry();
+    let three = poly_host(3);
+    let mut run = Run::start(&three, &registry, 1, 64);
+    run.play(2_000);
+    let (_, applied) = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &three,
+        poly_host(2),
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(applied.replaced, 0, "{applied}");
+    assert!(applied.removed > 0, "{applied}");
+    run.play(4_000);
+    let played = run.finish(&registry, "voices-shrink");
+    let kinds: Vec<&str> = played.edits().iter().map(|e| e.0).collect();
+    // The removed voice's two instances suspended, then the swap that
+    // removes them with the allocator's `voices` set (the pack and the
+    // sum survive: review of the add chain, whose removed add held the
+    // survivors' sum through the fade).
+    assert_eq!(kinds, ["edit", "edit", "swap", "event"]);
+    // The survivors play on: no step larger than the sines' own.
+    let steps: Vec<f32> = played
+        .right
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .collect();
+    let worst = steps.iter().copied().fold(0.0f32, f32::max);
+    let at = steps.iter().position(|&d| d == worst).unwrap_or(0);
+    // Three 220 Hz sines of 0.25 move at most 2π·220/48000·0.75 a frame.
+    let bound = std::f32::consts::TAU * 220.0 / 48_000.0 * 0.75;
+    assert!(
+        worst <= bound,
+        "a step of {worst} at frame {at} (bound {bound})"
+    );
+}

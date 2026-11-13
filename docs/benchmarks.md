@@ -1235,3 +1235,13 @@ So `unsaved()` and the `app` message, recomputed every step, cost nothing worth 
 ## Polyphonic slots (ADR 0044 phase 1, §9)
 
 **Measurement** (2026-11-07, operator, Apple M5 Max, release build, offline `signal render … --seconds 16 --threads 1`, two runs each, wall time): `projects/studio` 1.53 s and 1.54 s; `projects/studio-poly` (the studio plus eight `moog_voice` voices in a `lib.poly_voice` slot, their allocator, three `std.unpack64` and seven `std.add`) 5.60 s and 5.76 s. So 16 s of audio at 48 kHz costs about 9.6 % of one core for the studio and 35 % for studio-poly: the eight voices add about 26 % of a core, **about 3.2 % of a core per voice at 48 kHz**. ADR 0044 §9 estimated 1.7 % (an assumption from instance counts); the measurement is about twice that. Every voice runs whether it sounds or not until phase 5's sleeping voices (§11). With `--threads 0` (one thread per performance core) the same render took 2.15 s of wall time: the voices are independent units the workers share (§9), though the user time (31.5 s) includes the workers' waiting. On the device in real time (phase 4): not measured yet.
+
+**Steals, measured** (ADR 0044 test 9, 2026-11-13; a measurement, not a gate: `cargo test --release -p signal-cli --test poly_steal -- --ignored --nocapture`). `moog_voice` in a `lib.poly_voice` slot plays A3 and, one beat later while it sounds, E4. The largest frame-to-frame step of the slot's output in the 10 ms after E4 starts (output units, the voice's level):
+
+| A → B velocity | E4 on a free voice | E4 steals A's voice | legato (one voice) |
+|---|---|---|---|
+| 0.8 → 0.8 | 0.098 | 0.076 | 0.026 |
+| 0.3 → 1.0 | 0.122 | 0.094 | 0.032 |
+| 1.0 → 0.3 | 0.037 | 0.028 | 0.028 |
+
+A steal's step is smaller than a fresh note's own attack in every case (the envelope attacks from its current level, and the oscillators keep their phase), and a legato change smaller still; differing velocities scale the steps as §4 says, with no extra click. The WAVs (each case at a quarter of the level) are written for listening, copied to `renders/poly-steal/`.

@@ -415,6 +415,30 @@ pub fn send_edit_observed(
     new: Project,
     registry: &Registry,
 ) -> Result<(Project, Applied), EditError> {
+    send_edit_with_bases(controller, live, observer, old, new, registry, &|_| None)
+}
+
+/// The live bases of the running plan's parameters as an observer last saw
+/// them (`ControlSink::parameter`), by port; `None` where none was seen.
+pub type Bases<'a> = &'a dyn Fn(&PortAddress) -> Option<f64>;
+
+/// [`send_edit_observed`], with `bases` giving the running parameters'
+/// live bases: a swap that adds voices to a polyphonic slot (ADR 0044 §8)
+/// also sends each added voice, stamped for the swap's frame, a `set` of
+/// every parameter whose surviving voice `v0` has another live base than
+/// the new plan's value, and a `ramp` where a ramp sent to `v0` is still in
+/// progress (to its target over its remaining frames), so the added voices
+/// match the survivors. These sends are recorded like every edit, so a
+/// replay reproduces them.
+pub fn send_edit_with_bases(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    observer: &mut impl ControlSink,
+    old: &Project,
+    new: Project,
+    registry: &Registry,
+    bases: Bases<'_>,
+) -> Result<(Project, Applied), EditError> {
     let edit = diff(old, &new, registry).map_err(EditError::Invalid)?;
     let refused = |error: signal_engine::ControlError| EditError::Refused(error.to_string());
     let mut applied = Applied::default();
@@ -444,6 +468,14 @@ pub fn send_edit_observed(
                 && replaced.is_empty()
             {
                 same_sink(old, &before, &new, &plan).map_err(EditError::Invalid)?;
+                let mut sets = sets;
+                sets.extend(voice_catch_up(
+                    &before,
+                    &plan,
+                    bases,
+                    live,
+                    controller.default_frame(),
+                ));
                 vec![Step {
                     project: new,
                     removed,
@@ -497,6 +529,110 @@ pub fn send_edit_observed(
             send_swaps(controller, live, observer, steps, &mut applied)
         }
     }
+}
+
+/// ADR 0044 §8: what brings the voices `after` adds to a polyphonic slot
+/// (an added instance under `<slot>/v<e>`, beside a `<slot>/alloc` of
+/// `std.voice_alloc`) to the live state of the surviving voice `v0`: for
+/// each parameter, a `ramp` to the target of a ramp sent to `v0` still in
+/// progress at `now`, else a `set` of `v0`'s live base where it differs
+/// from the value `after` plans.
+fn voice_catch_up(
+    before: &signal_graph::ExecutionPlan,
+    after: &signal_graph::ExecutionPlan,
+    bases: Bases<'_>,
+    live: &LiveRecorder,
+    now: Frame,
+) -> Vec<crate::ParameterChange> {
+    use signal_core::EventPayload;
+    let slots: Vec<String> = after
+        .instances
+        .iter()
+        .filter(|i| i.type_name == "std.voice_alloc")
+        .filter_map(|i| i.address.as_str().strip_suffix("/alloc").map(str::to_owned))
+        .collect();
+    if slots.is_empty() {
+        return Vec::new();
+    }
+    let survivors: std::collections::BTreeSet<&str> = before
+        .instances
+        .iter()
+        .map(|i| i.address.as_str())
+        .collect();
+    // The surviving voice an added one copies: `<slot>/v0<rest>`.
+    let reference = |address: &str| -> Option<String> {
+        slots.iter().find_map(|slot| {
+            let rest = address.strip_prefix(slot.as_str())?.strip_prefix("/v")?;
+            let digits = rest.find('/').unwrap_or(rest.len());
+            let (index, rest) = rest.split_at(digits);
+            (!index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) && index != "0")
+                .then(|| format!("{slot}/v0{rest}"))
+        })
+    };
+    let added: Vec<(&signal_graph::PlanInstance, String)> = after
+        .instances
+        .iter()
+        .filter(|i| !survivors.contains(i.address.as_str()))
+        .filter_map(|i| {
+            let r = reference(i.address.as_str())?;
+            survivors.contains(r.as_str()).then_some((i, r))
+        })
+        .collect();
+    if added.is_empty() {
+        return Vec::new();
+    }
+    let history = live.recorder().edits();
+    let mut sends = Vec::new();
+    for (instance, reference) in added {
+        let (Ok(at), Ok(from)) = (
+            instance
+                .address
+                .as_str()
+                .parse::<signal_core::InstanceAddress>(),
+            reference.parse::<signal_core::InstanceAddress>(),
+        ) else {
+            continue;
+        };
+        for (name, planned) in &instance.parameters {
+            let (Ok(port), Ok(source)) =
+                (PortAddress::new(&at, name), PortAddress::new(&from, name))
+            else {
+                continue;
+            };
+            let latest = history
+                .iter()
+                .filter_map(|e| match &e.command {
+                    crate::session::Command::Event { target, payload } if *target == source => {
+                        Some((e.frame, *payload))
+                    }
+                    _ => None,
+                })
+                .next_back();
+            if let Some((frame, EventPayload::Ramp { to, frames, curve })) = latest {
+                let end = frame.0.saturating_add(frames);
+                if end > now.0 {
+                    sends.push(crate::ParameterChange {
+                        port,
+                        payload: EventPayload::Ramp {
+                            to,
+                            frames: end - now.0,
+                            curve,
+                        },
+                    });
+                    continue;
+                }
+            }
+            if let Some(base) = bases(&source)
+                && base.to_bits() != planned.to_bits()
+            {
+                sends.push(crate::ParameterChange {
+                    port,
+                    payload: EventPayload::Set(base),
+                });
+            }
+        }
+    }
+    sends
 }
 
 /// One swap of a structural edit: the project it plays, the instances it
@@ -751,6 +887,21 @@ pub fn reload_observed(
     dir: &Path,
     registry: &Registry,
 ) -> Result<Applied, ReloadError> {
+    reload_with_bases(controller, live, observer, current, dir, registry, &|_| {
+        None
+    })
+}
+
+/// [`reload_observed`] with the live `bases` ([`send_edit_with_bases`]).
+pub fn reload_with_bases(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    observer: &mut impl ControlSink,
+    current: &mut Project,
+    dir: &Path,
+    registry: &Registry,
+    bases: Bases<'_>,
+) -> Result<Applied, ReloadError> {
     let new = match Project::load(dir) {
         Ok(new) => new,
         Err(crate::LoadError::Invalid(diagnostics)) => {
@@ -758,7 +909,7 @@ pub fn reload_observed(
         }
         Err(error) => return Err(ReloadError::Failed(error.to_string())),
     };
-    match send_edit_observed(controller, live, observer, current, new, registry) {
+    match send_edit_with_bases(controller, live, observer, current, new, registry, bases) {
         Ok((project, applied)) => {
             *current = project;
             Ok(applied)

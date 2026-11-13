@@ -127,13 +127,22 @@ fn golden_studio_poly_16_seconds() {
     );
 }
 
-/// 4 s in blocks of 1, 64 and 256 on one and four threads: one audio and
-/// one log.
+/// 4 s in blocks of 1, 64 and 256 on 1, 2, 3, 4 and 8 threads: one audio
+/// and one log (ADR 0044 test 8, offline).
 #[test]
 fn renders_identically_in_blocks_and_on_threads() {
     let frames = 4 * 48_000;
     let reference = render(&project(), frames, 256, 1, &scratch("ref"));
-    for (block, threads) in [(1, 1), (64, 1), (1, 4), (64, 4), (256, 4)] {
+    // ADR 0044 test 8: k = 1, 64, 256 × threads 1, 2, 3, 4, 8.
+    let mut matrix = Vec::new();
+    for block in [1, 64, 256] {
+        for threads in [1, 2, 3, 4, 8] {
+            if (block, threads) != (256, 1) {
+                matrix.push((block, threads));
+            }
+        }
+    }
+    for (block, threads) in matrix {
         let found = render(
             &project(),
             frames,
@@ -147,6 +156,52 @@ fn renders_identically_in_blocks_and_on_threads() {
                 "{hash} at block {block} on {threads} threads"
             );
         }
+    }
+}
+
+/// ADR 0044 test 8, real time: the null driver's run (seeded callback
+/// sizes are the realtime suite's; here the driver's own) on 1 and 4
+/// threads records the offline render's samples exactly.
+#[test]
+fn the_real_time_run_plays_the_offline_render() {
+    let offline = scratch("rt-offline");
+    render(&project(), 2 * 48_000, 256, 1, &offline);
+    let expected = samples(&offline);
+    for threads in [1, 4] {
+        let dir = scratch(&format!("rt-{threads}"));
+        fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("rt.wav");
+        let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args([
+                "--setup",
+                dir.join("none.toml").to_str().unwrap(),
+                "play",
+                project().to_str().unwrap(),
+                "--driver",
+                "null",
+                "--fast",
+                "--seconds",
+                "2",
+                "--threads",
+                &threads.to_string(),
+                "--record-audio",
+                wav.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        let played: Vec<f64> = reader
+            .samples::<f32>()
+            .map(|s| f64::from(s.unwrap()))
+            .collect();
+        assert_eq!(played.len(), expected.len(), "{threads} threads");
+        let first = played
+            .iter()
+            .zip(&expected)
+            .position(|(a, b)| a.to_bits() != b.to_bits());
+        assert_eq!(first, None, "{threads} threads: first differing sample");
     }
 }
 

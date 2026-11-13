@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use signal_project::PATTERNS;
 use signal_project::live::{
-    ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, is_presentation, reload_observed,
+    ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, is_presentation, reload_with_bases,
 };
 
 use crate::panel::Panel;
@@ -83,18 +83,26 @@ impl Host {
             .iter()
             .any(|f| f.text.contains("slot"))
             .then(|| run.current.clone());
+        // ADR 0044 §8: the live bases the added voices of a poly slot take.
+        let bases: std::collections::BTreeMap<signal_core::PortAddress, f64> = self
+            .live
+            .values
+            .iter()
+            .map(|(port, value)| (port.clone(), value.base))
+            .collect();
         let mut observed = Observed {
             values: &mut self.live.values,
             reports: &mut self.reports,
             muted: &mut self.muted,
         };
-        let result = reload_observed(
+        let result = reload_with_bases(
             &mut run.controller,
             &mut run.live,
             &mut observed,
             &mut run.current,
             &self.opening.dir,
             &self.registry,
+            &|port| bases.get(port).copied(),
         );
         // This run's, taken now: a later run must never show them.
         take_muted(&mut self.muted, run, self.plan.as_ref(), &mut self.messages);

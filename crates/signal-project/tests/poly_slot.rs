@@ -126,8 +126,8 @@ each_velocity = { module = "std.unpack64" }
 v0 = { module = "tone" }
 v1 = { module = "tone" }
 v2 = { module = "tone" }
-sum_out_1 = { module = "std.add" }
-sum_out = { module = "std.add" }
+pack_out = { module = "std.pack64" }
+sum_out = { module = "std.reduce64" }
 [wiring]
 connections = [
   { from = "alloc.hz", to = "each_hz.in" },
@@ -142,14 +142,14 @@ connections = [
   { from = "each_velocity.e0", to = "v0.velocity" },
   { from = "each_velocity.e1", to = "v1.velocity" },
   { from = "each_velocity.e2", to = "v2.velocity" },
-  { from = "v0.out", to = "sum_out_1.a" },
-  { from = "v1.out", to = "sum_out_1.b" },
-  { from = "sum_out_1.out", to = "sum_out.a" },
-  { from = "v2.out", to = "sum_out.b" },
+  { from = "v0.out", to = "pack_out.e0" },
+  { from = "v1.out", to = "pack_out.e1" },
+  { from = "v2.out", to = "pack_out.e2" },
+  { from = "pack_out.out", to = "sum_out.in" },
 ]
 [exports]
 inputs = { notes = "alloc.notes", bright = ["v0.bright", "v1.bright", "v2.bright"] }
-outputs = { out = "sum_out.out" }
+outputs = { out = "sum_out.sum" }
 parameters = { level = ["v0.level", "v1.level", "v2.level"], tone = ["v0.tone", "v1.tone", "v2.tone"] }
 "#;
 
@@ -181,7 +181,7 @@ fn a_poly_slot_plans_as_its_explicit_composite() {
     }
 }
 
-/// One voice: one add with `b` unconnected, and the allocator's legato.
+/// One voice: the pack and the reduce, and the allocator's legato.
 #[test]
 fn one_voice_with_legato() {
     let planned = planned(&poly("{ count = 1, legato = true }", ""), &[]);
@@ -440,7 +440,7 @@ connections = [
         .iter()
         .filter(|i| i.address.as_str().starts_with("/synth/sum_"))
         .count();
-    assert_eq!(adds, 1, "one add for two voices");
+    assert_eq!(adds, 1, "one sum for two outputs of one content output");
 }
 
 /// A composite's export of an `each` port is an error, as a host wire on
