@@ -613,7 +613,19 @@ export function slotCard(description, name) {
       .map((p) => ({ ...p, control: controls.find((c) => c.address === p.address) ?? null })),
     unheard: slot.unheard ?? [],
     voices: slot.voices ?? null,
+    // ADR 0044 §7: the voices a muted instance lies in (`describe.muted`).
+    faulted: slot.voices ? faultedVoices(description?.muted ?? [], name) : [],
   };
+}
+
+/** The voices of poly slot `name` with an instance the fault guard muted, from `describe.muted`'s addresses, in order. */
+export function faultedVoices(muted, name) {
+  const found = new Set();
+  for (const address of muted) {
+    const m = new RegExp(`^/${name}/v(\\d+)/`).exec(String(address));
+    if (m) found.add(Number(m[1]));
+  }
+  return [...found].sort((a, b) => a - b);
 }
 
 /** A card's header text: "DECK_A: lib.deck ◂ ../studio-transport ↗", or "… ◂ empty". */
@@ -783,6 +795,12 @@ export function insideBanner(graph, level, path = null) {
   const found = insideSlot(graph, levelData(graph, level));
   if (!found) return null;
   const { name, instance, inside } = found;
+  // ADR 0044 §7: a poly slot's generated level.
+  const generated = levelData(graph, level);
+  if (generated?.generated) {
+    const content = slotOf(instance)?.load ?? 'its content';
+    return { own: false, generated: true, text: `Read-only: ${name}${voicesBadge({ voices: generated.voices })}, generated from the slot: its allocator, its voices and their sum. Open a voice to edit ${content}, which every voice shares; change the voices on the slot.` };
+  }
   const file = inside?.name ? `composites/${inside.name}.toml` : 'a composite of its own';
   if (inside?.own) return { own: true, text: `${name}’s own inside (${file}): edits here change this slot only.` };
   const load = slotOf(instance)?.load ?? null;

@@ -301,6 +301,14 @@ impl Host {
                 control: Some((instance, parameter)),
             });
         }
+        if self.panel.is_allocator(port.instance().as_str()) {
+            return Err(fail(
+                "refused",
+                format!(
+                    "{address}: a polyphonic slot's allocator is structure, set by writing the slot's `voices` (ADR 0044 §6)"
+                ),
+            ));
+        }
         let descriptor = self.plan.as_ref().and_then(|plan| {
             plan.instances
                 .iter()

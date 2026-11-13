@@ -39,6 +39,8 @@ struct Walk<'a> {
     /// ADR 0037: what the plan build decided for each slot, by its address
     /// as [`SlotResolution::slot`] writes it (`/fx`, `<composite>/fx`).
     slots: BTreeMap<String, SlotResolution>,
+    /// ADR 0044 §5: the polyphonic slots' generated composites, by name.
+    generated: BTreeMap<String, CompositeDef>,
 }
 
 /// An entry of a level in the order its file writes them: an instance of
@@ -89,11 +91,16 @@ impl Project {
         }
         let mut walk = self.walk(registry, converters);
         // ADR 0037 §7: the slots' match tables, built only when there are slots.
-        if self.has_slots() {
-            walk.slots = self
-                .plan(registry)
-                .map(|p| p.slots)
-                .unwrap_or_default()
+        if self.has_slots()
+            && let Ok(planned) = self.plan(registry)
+        {
+            walk.generated = planned
+                .generated
+                .into_iter()
+                .map(|d| (d.name.clone(), d))
+                .collect();
+            walk.slots = planned
+                .slots
                 .into_iter()
                 .map(|r| (r.slot.clone(), r))
                 .collect();
@@ -300,6 +307,7 @@ impl Project {
             parameters,
             converters,
             slots: BTreeMap::new(),
+            generated: BTreeMap::new(),
         }
     }
 
@@ -1210,6 +1218,31 @@ impl Walk<'_> {
                     .find(|m| m.port == port)
                     .and_then(|m| m.content.clone())
             };
+            // ADR 0044 §7: inside a polyphonic slot, its generated level,
+            // read-only (it is no text): the allocator, the unpacks, the
+            // voices and the sums. A voice opens into the content, the one
+            // definition every voice shares.
+            if let Some(voices) = &resolution.voices
+                && let Some(def) = self.generated.get(&voices.definition)
+            {
+                let interface = &resolution.interface;
+                let through = |port: &str| -> Option<String> {
+                    let declared = interface.port(port)?;
+                    match declared.voice {
+                        Some(crate::slot::Voice::Alloc) => Some(port.to_owned()),
+                        Some(crate::slot::Voice::Each) => None,
+                        _ => matched(port),
+                    }
+                };
+                let mut inside = self.project.composite_level(self, def, "");
+                slot_frame(&mut inside, interface, &through, key);
+                if let Value::Object(fields) = &mut inside {
+                    fields.insert("generated".to_owned(), json!(true));
+                    fields.insert("voices".to_owned(), json!(voices));
+                }
+                previews.insert(crate::inside::preview_key(level, slot), inside);
+                continue;
+            }
             match self.inside_of(level, slot, resolution.load.as_deref()) {
                 InsideOf::Own(name) => {
                     if let Some(inside) = composites.get_mut(&name) {

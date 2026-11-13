@@ -140,6 +140,9 @@ pub struct Panel {
     /// ADR 0046 §2–3: each slot's part key (`synth`, `rack.fx`) and the
     /// roots it is rendered at (`/synth`; each instance of `rack`'s `/fx`).
     part_roots: BTreeMap<String, Vec<String>>,
+    /// ADR 0044 §6: the allocators of the polyphonic slots (`/pad/alloc`),
+    /// whose parameters are structure, set only by writing `voices`.
+    allocators: Vec<String>,
 }
 
 /// What a binding on a slot's port reaches (ADR 0037 §7).
@@ -149,6 +152,40 @@ pub enum SlotPort {
     Port(PortAddress),
     /// Nothing, and why: the binding is inactive, not an error.
     Inactive(String),
+}
+
+/// ADR 0044 §7: what the port `port` of the poly slot `name` (loading
+/// `module`, `content` its matched name) reaches in the plan: an output its
+/// sum (`/<name>/sum_<port>.sum`), the `alloc` port the allocator's input
+/// (`/<name>/alloc.notes`), any other input the first voice's port.
+fn poly_port(
+    with_content: &BTreeMap<&str, &CompositeDef>,
+    registry: &Registry,
+    name: &str,
+    module: &str,
+    port: &signal_project::InterfacePort,
+    content: Option<&str>,
+) -> SlotPort {
+    let at = |text: String| match text.parse::<PortAddress>() {
+        Ok(port) => SlotPort::Port(port),
+        Err(error) => SlotPort::Inactive(error.to_string()),
+    };
+    if port.voice == Some(signal_project::Voice::Alloc) {
+        return at(format!("/{name}/alloc.notes"));
+    }
+    let Some(content) = content else {
+        return SlotPort::Inactive("unmatched".to_owned());
+    };
+    if port.role == signal_project::Role::Output {
+        return at(format!("/{name}/sum_{}.sum", port.name));
+    }
+    let Ok(voice) = format!("/{name}/v0").parse::<InstanceAddress>() else {
+        return SlotPort::Inactive(format!("/{name} has no voice"));
+    };
+    match port_behind(with_content, registry, &voice, module, content, false, 0) {
+        Some(port) => SlotPort::Port(port),
+        None => SlotPort::Inactive(format!("`{content}` reaches no port of the plan")),
+    }
 }
 
 /// The plan port that `port` (an input, or an output when `output`) of an
@@ -399,6 +436,45 @@ impl Panel {
                 }
                 let output = port.role == signal_project::Role::Output;
                 let found = resolution.matches.iter().find(|m| m.port == port.name);
+                // ADR 0044 §7: a poly slot's ports are its generated
+                // composite's: an output its sum, the `alloc` port the
+                // allocator's input, an input the first voice's.
+                if let (Some(voices), Some(module)) = (&resolution.voices, module) {
+                    let reached = poly_port(
+                        &with_content,
+                        registry,
+                        name,
+                        module,
+                        port,
+                        found.and_then(|m| m.content.as_deref()),
+                    );
+                    slot_ports.insert(format!("/{name}.{}", port.name), reached);
+                    // Each voice's output, for the slot card's per-voice meters.
+                    if output && let Some(content) = found.and_then(|m| m.content.as_deref()) {
+                        for e in 0..voices.count {
+                            let Ok(voice) = format!("/{name}/v{e}").parse::<InstanceAddress>()
+                            else {
+                                continue;
+                            };
+                            let reached = match port_behind(
+                                &with_content,
+                                registry,
+                                &voice,
+                                module,
+                                content,
+                                true,
+                                0,
+                            ) {
+                                Some(port) => SlotPort::Port(port),
+                                None => SlotPort::Inactive(format!(
+                                    "`{content}` reaches no port of the plan"
+                                )),
+                            };
+                            slot_ports.insert(format!("/{name}/v{e}.{}", port.name), reached);
+                        }
+                    }
+                    continue;
+                }
                 let reached = match (module, found.and_then(|m| m.content.as_deref())) {
                     (None, _) => SlotPort::Inactive(format!("/{name} is empty")),
                     (Some(_), None) => SlotPort::Inactive(
@@ -428,6 +504,16 @@ impl Panel {
         }
         let mut slot_interfaces = BTreeMap::new();
         let mut part_roots = BTreeMap::new();
+        let mut allocators = Vec::new();
+        for resolution in planned.slots.iter().filter(|r| r.voices.is_some()) {
+            if let Some(name) = resolution.slot.strip_prefix('/') {
+                allocators.push(format!("/{name}/alloc"));
+            } else if let Some((composite, slot)) = resolution.slot.split_once('/') {
+                for path in project.instances_of(composite) {
+                    allocators.push(format!("{path}/{slot}/alloc"));
+                }
+            }
+        }
         for resolution in &planned.slots {
             let names: Vec<String> = resolution
                 .interface
@@ -461,7 +547,14 @@ impl Panel {
             slots: slots.keys().map(|n| (*n).to_owned()).collect(),
             slot_interfaces,
             part_roots,
+            allocators,
         }
+    }
+
+    /// ADR 0044 §6: whether `instance` is a polyphonic slot's allocator,
+    /// whose parameters no control or `set` reaches (`voices` sets them).
+    pub fn is_allocator(&self, instance: &str) -> bool {
+        self.allocators.iter().any(|a| a == instance)
     }
 
     /// ADR 0046 §3: the names of slot `slot`'s interface (`/synth`,
@@ -1203,6 +1296,36 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// ADR 0044 §7: a poly slot's ports reach its generated composite: an
+    /// output its sum, the `alloc` port the allocator, each voice's output
+    /// its own port (the card's per-voice meters).
+    #[test]
+    fn a_poly_slot_s_ports_reach_its_generated_composite() {
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/studio-poly");
+        let project = Project::load(&dir).unwrap();
+        let panel = Panel::new(&project, &registry);
+        let reach = |address: &str| match panel.slot_port(address) {
+            Some(SlotPort::Port(port)) => port.to_string(),
+            other => panic!("{address}: {other:?}"),
+        };
+        assert_eq!(reach("/pad.out"), "/pad/sum_out.sum");
+        assert_eq!(reach("/pad.notes"), "/pad/alloc.notes");
+        assert_eq!(reach("/pad/v3.out"), "/pad/v3/volume.out");
+        assert!(reach("/pad.hz").starts_with("/pad/v0/"));
+        let plan = project.plan(&registry).unwrap().plan;
+        for address in ["/pad.out", "/pad/v7.out"] {
+            let port = reach(address);
+            assert!(
+                plan.instances
+                    .iter()
+                    .any(|i| port.starts_with(&format!("{}.", i.address))),
+                "{address} → {port} is in the plan"
+            );
+        }
+    }
 
     /// ADR 0041 §10, ADR 0043: over the whole registry, a parameter is
     /// stepped exactly when it has a value set; no continuous one (a generic

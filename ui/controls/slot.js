@@ -44,6 +44,9 @@ export const LEVEL_PORTS = 4;
 /** The levels' rate: a decimated scope, enough for a lamp. */
 const LEVEL_RATE = 480;
 
+/** ADR 0044 §7: at most this many voices show a level when the voice row is opened (each takes a scope slot). */
+export const VOICE_LEVELS = 4;
+
 export class SignalSlot extends SignalElement {
   static role = 'group';
   static observedAttributes = ['bind', 'skin', 'place'];
@@ -60,6 +63,12 @@ export class SignalSlot extends SignalElement {
 .voice-row { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; margin: 4px 0; font-size: 10px; color: var(--signal-muted, #8a93a3); }
 .voice-row > i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--signal-muted, #8a93a3); box-sizing: border-box; }
 .voice-row > i.on { background: var(--signal-accent, #4fb3ff); border-color: var(--signal-accent, #4fb3ff); }
+.voice-row > i.fault { border-color: var(--signal-danger, #e5534b); box-shadow: 0 0 0 1px var(--signal-danger, #e5534b); }
+.voice-row { cursor: pointer; }
+.voice-levels { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 10px; color: var(--signal-muted, #8a93a3); }
+.voice-levels > span { display: inline-flex; gap: 4px; align-items: center; }
+.voice-levels b { display: inline-block; width: 40px; height: 4px; background: var(--signal-track, #2b3240); position: relative; }
+.voice-levels b > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--signal-accent, #4fb3ff); }
 .slot-voices label { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
 .title { flex: 1 1 12rem; min-width: 0; margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .buttons { display: flex; gap: 4px; }
@@ -113,7 +122,8 @@ ${BROWSER_CSS}`;
     return `<div class="card" part="card">
   <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
   <div class="state" role="status"></div>
-  <div class="voices-line"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><div class="voice-row" hidden></div></div>
+  <div class="voices-line"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><div class="voice-row" hidden title="The voices, lit while each sounds; click for their levels"></div></div>
+  <div class="voice-levels" hidden></div>
   <ul class="ports"></ul>
   <div class="params"></div>
   <div class="note"></div>
@@ -194,6 +204,12 @@ ${BROWSER_CSS}`;
     const writeVoices = () => this.write([voicesOp(this.slotName, this.$('.voice-count').value, this.$('.voice-legato').checked)], 'Setting the voices…');
     this.$('.voice-count').addEventListener('change', writeVoices);
     this.$('.voice-legato').addEventListener('change', writeVoices);
+    // ADR 0044 §7: the voice row opened shows the first voices' levels.
+    this.$('.voice-row').addEventListener('click', () => {
+      this.voiceLevels = !this.voiceLevels;
+      this.voiceKey = null;
+      this.syncVoices(this.connection);
+    });
     this.$('.fold').addEventListener('click', () => this.setFolded(!this.folded));
     // A module name or a project path dropped on the card (its header, not its part) loads it.
     const onCard = (event) => event.composedPath?.().includes(this.$('.card')) ?? true;
@@ -600,19 +616,33 @@ ${BROWSER_CSS}`;
   syncVoices(connection) {
     const card = this.card;
     const count = card?.voices && !card.empty ? card.voices.count : 0;
-    const key = count && connection ? `${card.address}|${count}` : null;
+    const key = count && connection ? `${card.address}|${count}|${this.voiceLevels ? 'levels' : ''}|${(card.faulted ?? []).join(',')}` : null;
     if (key === this.voiceKey) return;
     this.stopVoices();
     this.voiceKey = key;
     const row = this.$('.voice-row');
     if (!row) return;
     row.hidden = !count;
+    const faulted = new Set(card?.faulted ?? []);
     const dots = Array.from({ length: count }, (_, e) => {
       const dot = document.createElement('i');
-      dot.title = `v${e}`;
+      dot.title = faulted.has(e) ? `v${e}: an instance in it was muted by the fault guard; it goes on taking notes` : `v${e}`;
+      if (faulted.has(e)) dot.classList.add('fault');
       return dot;
     });
     row.replaceChildren(...dots);
+    const levels = this.$('.voice-levels');
+    const shown = this.voiceLevels ? Math.min(count, VOICE_LEVELS) : 0;
+    levels.hidden = !shown;
+    const fills = Array.from({ length: shown }, (_, e) => {
+      const fill = document.createElement('i');
+      const bar = document.createElement('b');
+      bar.append(fill);
+      const label = document.createElement('span');
+      label.append(`v${e}`, bar);
+      return { label, fill };
+    });
+    levels.replaceChildren(...fills.map((f) => f.label), ...(shown && shown < count ? [Object.assign(document.createElement('span'), { textContent: `(the first ${shown} of ${count})` })] : []));
     if (!key || !connection?.subscribe) return;
     this.voiceStop = connection.subscribe(
       { stream: 'vector', port: `${card.address}/alloc.gate`, rate: 30 },
@@ -622,11 +652,26 @@ ${BROWSER_CSS}`;
       },
       { onError: (error) => row.replaceChildren(...dots, Object.assign(document.createElement('span'), { textContent: error?.code === 'no-vector-slot' ? 'no slot' : `no voice row (${error?.message ?? error})` })) },
     );
+    // Each shown voice's level: a scope stream of `/<slot>/v<e>.<output>` (one of the run's scope slots each).
+    const output = card.ports.find((p) => p.role === 'output' && p.matched)?.name;
+    this.voiceLevelStops = output
+      ? fills.map(({ fill }, e) =>
+          connection.subscribe(
+            { stream: 'scope', port: `${card.address}/v${e}.${output}`, rate: LEVEL_RATE },
+            (frame) => {
+              const peak = Math.max(0, ...(frame.values ?? []).map((v) => Math.abs(v)));
+              fill.style.width = `${Math.round(Math.min(1, peak) * 100)}%`;
+            },
+            { onError: (error) => (fill.parentElement.title = `no level: ${error?.message ?? error}`) },
+          ),
+        )
+      : [];
   }
 
   stopVoices() {
     this.voiceStop?.();
     this.voiceStop = null;
+    for (const stop of (this.voiceLevelStops ?? []).splice(0)) stop?.();
   }
 }
 

@@ -1723,3 +1723,25 @@ fn slot_group_moves_the_controls_into_a_part_and_is_undone() {
     assert!(!dir.join("ui/parts/osc.html").exists());
     assert!(mcp.finish().success());
 }
+
+/// ADR 0044 §6–7, test 10: a poly slot's allocator is structure: its
+/// `voices` is no control and `set_parameter` refuses it; `slot_voices`
+/// changes the count in the file, applied live.
+#[test]
+fn a_poly_slot_s_voices_are_written_not_set() {
+    let dir = mcp_common::copy_of("studio-poly", "mcp-poly");
+    let mut mcp = Mcp::started(&dir, &[]);
+    let info = mcp.ok("project_info", json!({}));
+    assert!(!info.to_string().contains("/pad/alloc"), "{info}");
+    let refused = mcp.refused(
+        "set_parameter",
+        json!({"address": "/pad/alloc.voices", "value": 2}),
+    );
+    assert!(
+        refused.contains("set by writing the slot's `voices`"),
+        "{refused}"
+    );
+    mcp.ok("slot_voices", json!({"slot": "pad", "voices": 4}));
+    assert!(mcp.file("project.toml").contains("voices = 4"));
+    assert!(mcp.finish().success());
+}

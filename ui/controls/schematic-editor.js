@@ -193,6 +193,11 @@ export class SchematicEditor {
       this.s.say(`Not ${step < 0 ? 'undone' : step > 0 ? 'redone' : 'edited'}: ${target || 'the top level'} is around the open ${shown.path || 'level'}; ${step ? 'go out to it first' : 'edit it from there'}`);
       return Promise.resolve(false);
     }
+    // ADR 0044 §7: a poly slot's generated level is no text: it is never written; its voices open into the content.
+    if (step === 0 && this.levelGraph(level)?.generated) {
+      this.s.say('Not edited: the voices’ level is generated from the slot (its voices, allocator and sum); open a voice to edit the content every voice shares');
+      return Promise.resolve(false);
+    }
     // ADR 0037, editable insides: the first edit of a slot's read-only inside makes the slot's own copy first.
     if (step === 0 && isPreviewLevel(level)) return this.writeOwnCopy(level, ops);
     if (step === 0) ops = insideOps(this.levelGraph(level), ops);

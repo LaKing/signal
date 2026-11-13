@@ -177,6 +177,13 @@ impl Host {
                 json!(self.rate),
             ),
             "vectors": {"slots": VECTOR_SLOTS, "maxRows": VECTOR_MAX_ROWS},
+            // ADR 0044 §7 (additive): the instances the fault guard muted in
+            // this run (a poly slot's card marks the voice they lie in).
+            "muted": self
+                .run
+                .as_ref()
+                .map(|run| run.muted.iter().map(|m| m.address.clone()).collect::<Vec<_>>())
+                .unwrap_or_default(),
             "unsaved": self.unsaved_json(),
             // ADR 0035 §8, ADR 0037 §7: includes (with their rate notes)
             // and slots; null without either.

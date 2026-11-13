@@ -271,6 +271,10 @@ pub struct Planned {
     /// tables, the dropped wires, the unheard outputs), in definition then
     /// instance order. The plan carries no record of it.
     pub slots: Vec<slot::SlotResolution>,
+    /// ADR 0044 §5: the composites the polyphonic slots generated
+    /// (`poly:<definition>/<slot>`), which no file holds: what the
+    /// schematic shows, read-only, inside such a slot.
+    pub generated: Vec<CompositeDef>,
 }
 
 /// The bytes of the file at `path`, read only when it is a regular file (a
@@ -763,11 +767,17 @@ impl Project {
                     }
                     push_unique(&mut warnings, diagnostic);
                 }
+                let generated = definitions
+                    .iter()
+                    .filter(|d| d.name.starts_with("poly:"))
+                    .cloned()
+                    .collect();
                 Some(Planned {
                     plan,
                     warnings,
                     corrected,
                     slots,
+                    generated,
                 })
             }
             Err(graph_errors) => {

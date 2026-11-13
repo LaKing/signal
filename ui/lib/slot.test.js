@@ -36,6 +36,8 @@ import {
   unmatchedReason,
   voicesBadge,
   voicesOp,
+  insideBanner,
+  faultedVoices,
 } from './slot.js';
 
 /** A slot as `graph` gives it: `fx`, its own interface, std.gain loaded through a map. */
@@ -383,4 +385,21 @@ test("a polyphonic slot's alloc port reads matched on its card (ADR 0044 §2)", 
   const card = slotCard(description, 'pad');
   assert.equal(card.ports.find((p) => p.name === 'notes').matched, true);
   assert.deepEqual(card.voices, { count: 8, legato: false });
+});
+
+test("a poly slot's generated level is read-only, its banner says so (ADR 0044 §7)", () => {
+  const graph = {
+    top: { instances: [{ name: 'pad', module: 'moog_voice', slot: { load: 'moog_voice', voices: { count: 8, legato: false }, interface: { ports: [] } } }] },
+    composites: {},
+    insides: { '/pad': { slot: '/pad', generated: true, voices: { count: 8, legato: false }, instances: [] } },
+  };
+  const banner = insideBanner(graph, '/pad');
+  assert.equal(banner.generated, true);
+  assert.match(banner.text, /pad ×8, generated from the slot/);
+  assert.match(banner.text, /Open a voice to edit moog_voice/);
+});
+
+test("a poly slot's faulted voices come from describe.muted (ADR 0044 §7)", () => {
+  assert.deepEqual(faultedVoices(['/pad/v3/ladder', '/pad/v10/osc1', '/padx/v1/a', '/pad/alloc', '/pad/v3/vca'], 'pad'), [3, 10]);
+  assert.deepEqual(faultedVoices([], 'pad'), []);
 });

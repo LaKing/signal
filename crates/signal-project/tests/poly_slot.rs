@@ -490,3 +490,38 @@ r = { module = "rack" }
         .unwrap();
     assert_eq!(slot.voices.as_ref().unwrap().definition, "poly:rack/synth");
 }
+
+/// ADR 0044 §7, test 10: inside a poly slot, `graph` gives its generated
+/// level, read-only (`generated`), framed by the slot's interface: the
+/// allocator, the unpacks, the voices (each an instance of the content,
+/// which opens into its one shared definition), the pack and the sum.
+#[test]
+fn the_graph_gives_the_generated_level() {
+    let project = Project::from_sources(sources(&poly("3", ""), &[])).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let graph = project.structure(&plan, &registry());
+    let inside = &graph["insides"]["/synth"];
+    assert_eq!(inside["generated"], true, "{inside:#}");
+    assert_eq!(inside["voices"]["count"], 3);
+    let names: Vec<&str> = inside["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    for name in ["alloc", "each_hz", "v0", "v1", "v2", "pack_out", "sum_out"] {
+        assert!(names.contains(&name), "{name}: {names:?}");
+    }
+    let v1 = inside["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "v1")
+        .unwrap();
+    assert_eq!(v1["module"], "tone");
+    assert!(
+        graph["composites"]["tone"].is_object(),
+        "a voice opens into the content"
+    );
+    assert_eq!(inside["slot"], "/synth");
+}
