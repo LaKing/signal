@@ -1245,3 +1245,7 @@ So `unsaved()` and the `app` message, recomputed every step, cost nothing worth 
 | 1.0 → 0.3 | 0.037 | 0.028 | 0.028 |
 
 A steal's step is smaller than a fresh note's own attack in every case (the envelope attacks from its current level, and the oscillators keep their phase), and a legato change smaller still; differing velocities scale the steps as §4 says, with no extra click. The WAVs (each case at a quarter of the level) are written for listening, copied to `renders/poly-steal/`.
+
+**On the device** (ADR 0044 test 11, 2026-11-13, operator; SSL 2+ Mk II at 48 kHz, 128-frame buffer as the device ran, a silent copy of studio-poly with `gain = 0`, Signal.app playing alongside):
+- **10 minutes at 16 voices, live edits every 30 s** (`signal play --watch --seconds 600`, threads 12, workgroup): N 16 ↔ 8 every 30 s and a Replace (`moog_voice` ↔ a copy differing in one value) every 2 minutes, 19 edits in all, each applied (`applied a swap…`, `replaced 1 slot content…`): **0 xruns**, 0 stream errors, worst callback 0.543 of its period (p99 0.42, median 0.23), 0 late commands, 0 queue overflows.
+- **CPU per voice in real time** (15 s each, one thread): the whole studio-poly at 8 voices takes a median 0.39 of the period, at 16 voices 0.52 (worst 0.556 and 0.717), so a voice costs about **1.6 % of a core** at 48 kHz on the device, half the offline estimate above (which timed whole renders, start-up and file writing included). Every voice computes whether it sounds or not until phase 5.
