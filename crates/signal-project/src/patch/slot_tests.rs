@@ -200,10 +200,10 @@ fn a_device_slot_is_added_with_its_connections_and_undone() {
     };
     assert!(
         refused(
-            serde_json::json!({"op": "device.add", "name": "s", "play": "5.1", "role": "surround"}),
+            serde_json::json!({"op": "device.add", "name": "s", "play": "hexa", "role": "surround"}),
             &ctx()
         )
-        .contains("not built yet")
+        .contains("not a layout")
     );
     assert!(
         refused(

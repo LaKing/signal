@@ -25,6 +25,8 @@
 //! | `std.audio_tap` | [`AudioTap`] | direct, the tap of `std.audio_out` (ADR 0035 §3) | `io` |
 //! | `std.audio_in` | [`AudioIn`] | direct source, a device slot's stereo capture side (ADR 0038 §7) | `io` |
 //! | `std.audio_in_mono` | [`AudioInMono`] | direct source, a device slot's mono capture side | `io` |
+//! | `std.audio_out_mono`, `std.audio_out_quad`, `std.audio_out_5_1`, `std.audio_out_7_1` | [`AudioOutMono`], [`AudioOutQuad`], [`AudioOut51`], [`AudioOut71`] | direct, the audio sinks of ADR 0038 §2's other layouts | `io` |
+//! | `std.audio_tap_mono`, `std.audio_tap_quad`, `std.audio_tap_5_1`, `std.audio_tap_7_1` | [`AudioTapMono`], [`AudioTapQuad`], [`AudioTap51`], [`AudioTap71`] | direct, their taps (ADR 0035 §3) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
 //! | `std.onepole` | [`OnePole`] | direct | `filter` |
@@ -168,6 +170,7 @@ mod add;
 mod adsr;
 mod arith;
 mod audio_in;
+mod audio_layouts;
 mod audio_out;
 mod audio_tap;
 mod biquad;
@@ -236,6 +239,10 @@ pub use add::Add;
 pub use adsr::Adsr;
 pub use arith::{Div, Floor, Fract, Mod, Neg, Round, Sign};
 pub use audio_in::{AudioIn, AudioInMono};
+pub use audio_layouts::{
+    AudioOut51, AudioOut71, AudioOutMono, AudioOutQuad, AudioTap51, AudioTap71, AudioTapMono,
+    AudioTapQuad,
+};
 pub use audio_out::AudioOut;
 pub use audio_tap::AudioTap;
 pub use biquad::Biquad;
@@ -434,6 +441,14 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<AudioTap>(),
         direct::<AudioIn>(),
         direct::<AudioInMono>(),
+        direct::<AudioOutMono>(),
+        direct::<AudioOutQuad>(),
+        direct::<AudioOut51>(),
+        direct::<AudioOut71>(),
+        direct::<AudioTapMono>(),
+        direct::<AudioTapQuad>(),
+        direct::<AudioTap51>(),
+        direct::<AudioTap71>(),
         direct::<Osc>(),
         direct::<Svf>(),
         direct::<OnePole>(),
@@ -524,6 +539,10 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     // ADR 0035 §3: inside an included project, the audio sink is planned
     // as its tap.
     registry.set_sink_tap("std.audio_out", "std.audio_tap");
+    // ADR 0038 §2: the other layouts' sinks, and theirs.
+    for (sink, tap) in audio_layouts::SINKS {
+        registry.set_sink_tap(sink, tap);
+    }
     for module_type in vector::types() {
         registry.register(*module_type)?;
     }
@@ -848,7 +867,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 78] = [
+    const NAMES: [&str; 86] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -863,6 +882,14 @@ mod tests {
         "std.audio_tap",
         "std.audio_in",
         "std.audio_in_mono",
+        "std.audio_out_mono",
+        "std.audio_out_quad",
+        "std.audio_out_5_1",
+        "std.audio_out_7_1",
+        "std.audio_tap_mono",
+        "std.audio_tap_quad",
+        "std.audio_tap_5_1",
+        "std.audio_tap_7_1",
         "std.osc",
         "std.svf",
         "std.onepole",
@@ -1108,7 +1135,7 @@ mod tests {
         }
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
         // The M2.10-2 types (`std.merge`, ADR 0054, sits among the event types before them).
-        for name in NAMES[43..].iter().copied().chain(vectors) {
+        for name in NAMES[51..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");

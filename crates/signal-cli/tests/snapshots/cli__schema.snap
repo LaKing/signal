@@ -1,6 +1,5 @@
 ---
 source: crates/signal-cli/tests/cli.rs
-assertion_line: 436
 expression: text
 ---
 {
@@ -388,7 +387,15 @@ expression: text
             "std.audio_in",
             "std.audio_in_mono",
             "std.audio_out",
+            "std.audio_out_5_1",
+            "std.audio_out_7_1",
+            "std.audio_out_mono",
+            "std.audio_out_quad",
             "std.audio_tap",
+            "std.audio_tap_5_1",
+            "std.audio_tap_7_1",
+            "std.audio_tap_mono",
+            "std.audio_tap_quad",
             "std.biquad",
             "std.body2d",
             "std.buffer1k",

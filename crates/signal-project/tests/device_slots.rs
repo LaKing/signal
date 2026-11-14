@@ -5,7 +5,9 @@
 //! (`device::play_sides`). A `capture` side plans as a source,
 //! `std.audio_in` or `std.audio_in_mono`, its role handed beside the plan
 //! (`device::capture_sides`, ADR 0038 §7). Two outputs of one role are a
-//! plan error; the layouts not built yet, a slot that both plays and
+//! plan error; every layout of ADR 0038 §2 plays (`mono`, `quad`, `5.1`,
+//! `7.1` as their own sinks, their channels in order, a tap inside an
+//! include); the capture layouts not built yet, a slot that both plays and
 //! captures, a role that is no name, a device slot in a composite and a
 //! device slot with module keys are refused with their reason.
 
@@ -137,10 +139,6 @@ fn a_project_without_main_plays_its_first_role() {
 fn what_is_not_built_or_not_valid_is_refused_with_its_reason() {
     let cases = [
         (
-            "{ device = { play = \"5.1\", role = \"surround\" } }",
-            "cue: the layout `5.1` is not built yet",
-        ),
-        (
             "{ device = { play = \"hexa\" } }",
             "cue: `hexa` is not a layout",
         ),
@@ -243,4 +241,50 @@ fn a_capture_slot_is_a_source_of_its_role() {
             ("/room".to_owned(), "main".to_owned(), 2),
         ]
     );
+}
+
+/// ADR 0038 §2: every layout plays, as its own sink with the layout's
+/// channels in order: the side's width is the layout's, and inside an
+/// included project the sink is its tap.
+#[test]
+fn every_layout_plays_as_its_own_sink() {
+    for (layout, module, width) in [
+        ("mono", "std.audio_out_mono", 1),
+        ("quad", "std.audio_out_quad", 4),
+        ("5.1", "std.audio_out_5_1", 6),
+        ("7.1", "std.audio_out_7_1", 8),
+    ] {
+        let text = format!(
+            "{HEAD}[instances]\nosc = {{ module = \"std.sine_osc\", freq = 220.0 }}\nroom = {{ device = {{ play = \"{layout}\" }} }}\n\
+             [wiring]\nconnections = [ {{ from = \"osc.out\", to = \"room.{}\" }} ]\n",
+            if layout == "mono" { "m" } else { "l" }
+        );
+        let project = load(&text).unwrap();
+        let plan = project.plan(&registry()).unwrap().plan;
+        let room = plan
+            .instances
+            .iter()
+            .find(|i| i.address.as_str() == "/room")
+            .unwrap();
+        assert_eq!(room.descriptor.type_name, module, "{layout}");
+        let sides = play_sides(&project, &plan);
+        assert_eq!(sides.len(), 1);
+        assert_eq!(
+            (sides[0].role.as_str(), sides[0].width),
+            ("main", width),
+            "{layout}"
+        );
+        assert_eq!(
+            signal_project::device::layout_of_width(width),
+            layout,
+            "{layout}: shown by its width"
+        );
+    }
+    let mut registry = registry();
+    assert_eq!(
+        registry.sink_tap("std.audio_out_5_1"),
+        Some("std.audio_tap_5_1"),
+        "inside an include, its tap"
+    );
+    let _ = &mut registry;
 }

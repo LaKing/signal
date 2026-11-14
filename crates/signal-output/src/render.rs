@@ -125,6 +125,49 @@ pub fn render_blocks_tapped(
         .map(|(render, tracks, _)| (render, tracks))
 }
 
+/// ADR 0038 §2: the `WAVE_FORMAT_EXTENSIBLE` speaker mask of a layout of
+/// `channels` channels (mono front centre, stereo, quad front and back,
+/// 5.1 with side surrounds, 7.1 with back and side pairs); `None` for a
+/// width no layout has.
+pub fn channel_mask(channels: u16) -> Option<u32> {
+    match channels {
+        1 => Some(0x4),
+        2 => Some(0x3),
+        4 => Some(0x33),
+        6 => Some(0x60F),
+        8 => Some(0x63F),
+        _ => None,
+    }
+}
+
+/// Sets the speaker mask of the WAV file at `path`, which hound wrote with
+/// a mask of its own choosing (for 6 channels its back surrounds, `0x3F`),
+/// to [`channel_mask`]'s: four bytes of the `fmt ` chunk of an extensible
+/// header, the sample data untouched. A plain header, or a width no layout
+/// has, is left as it is.
+fn set_channel_mask(path: &Path, channels: u16) -> Result<(), RenderError> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let Some(mask) = channel_mask(channels) else {
+        return Ok(());
+    };
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut head = [0u8; 44];
+    if file.read_exact(&mut head).is_err() {
+        return Ok(());
+    }
+    // RIFF, WAVE, then `fmt ` first, as hound writes it: its format tag at
+    // 20, its extension's mask at 40.
+    let extensible = &head[0..4] == b"RIFF"
+        && &head[8..12] == b"WAVE"
+        && &head[12..16] == b"fmt "
+        && u16::from_le_bytes([head[20], head[21]]) == 0xFFFE;
+    if extensible {
+        file.seek(SeekFrom::Start(40))?;
+        file.write_all(&mask.to_le_bytes())?;
+    }
+    Ok(())
+}
+
 /// One more play side of a render (ADR 0038 §9): a device slot's sink other
 /// than the main one, its inputs times its `gain`, written as
 /// `devices/<slot>.wav` beside `audio.wav`.
@@ -156,6 +199,7 @@ impl SideRender {
             wav.write_sample(sample as f32)?;
         }
         wav.finalize()?;
+        set_channel_mask(path, self.channels)?;
         Ok(())
     }
 
@@ -463,11 +507,49 @@ impl Render {
             wav.write_sample(self.conversion.sample(sample))?;
         }
         wav.finalize()?;
+        set_channel_mask(&dir.join("audio.wav"), self.channels)?;
         fs::write(dir.join("log.jsonl"), &self.log)?;
         let manifest = self.manifest(provenance);
         let mut json = serde_json::to_vec_pretty(&manifest)?;
         json.push(b'\n');
         fs::write(dir.join("manifest.json"), json)?;
         Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0038 §2: a side's WAV carries its layout's speaker mask, its
+    /// samples as written.
+    #[test]
+    fn a_side_s_wav_carries_its_layout_s_mask() {
+        let dir = std::env::temp_dir().join(format!("signal-mask-{}", std::process::id()));
+        for (channels, mask) in [(1u16, 0x4u32), (4, 0x33), (6, 0x60F), (8, 0x63F)] {
+            let side = SideRender {
+                address: "/room".parse().unwrap(),
+                channels,
+                samples: (0..channels * 3).map(|i| f64::from(i) / 64.0).collect(),
+            };
+            let path = dir.join(format!("{channels}.wav"));
+            side.write(&path, 48_000).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 0xFFFE);
+            assert_eq!(
+                u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]),
+                mask,
+                "{channels} channels"
+            );
+            let read: Vec<f32> = hound::WavReader::open(&path)
+                .unwrap()
+                .samples::<f32>()
+                .map(Result::unwrap)
+                .collect();
+            let written: Vec<f32> = side.samples.iter().map(|&x| x as f32).collect();
+            assert_eq!(read, written);
+        }
+        assert_eq!(channel_mask(3), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

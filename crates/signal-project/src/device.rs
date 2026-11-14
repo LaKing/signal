@@ -7,12 +7,14 @@
 //! cue = { device = { play = "stereo", role = "cue" } }
 //! ```
 //!
-//! - `play`: a layout name (ADR 0038 §2). This version plans `stereo`,
-//!   which is `std.audio_out` (ADR 0038 §3: "`std.audio_out` stays as it is
-//!   and is the device slot `{ play = "stereo", role = "main" }`"), so a
-//!   device slot's ports are `l`, `r` and `gain`, as every existing
-//!   project's main output. The other layouts are reported as not built
-//!   yet.
+//! - `play`: a layout name (ADR 0038 §2). `stereo` plans as
+//!   `std.audio_out` (ADR 0038 §3: "`std.audio_out` stays as it is and is
+//!   the device slot `{ play = "stereo", role = "main" }`"), so its ports
+//!   are `l`, `r` and `gain`, as every existing project's main output;
+//!   `mono`, `quad`, `5.1` and `7.1` plan as `std.audio_out_mono`,
+//!   `std.audio_out_quad`, `std.audio_out_5_1` and `std.audio_out_7_1`,
+//!   their inputs the layout's channels in order. A discrete layout (a
+//!   table of ports) is not built yet.
 //! - `capture`: a layout name for the input side (ADR 0038 §7). This
 //!   version plans `stereo` as `std.audio_in` (outputs `l`, `r`) and `mono`
 //!   as `std.audio_in_mono` (output `m`), sources whose frames the driver
@@ -49,8 +51,28 @@ pub const LAYOUTS: [(&str, &[&str]); 5] = [
     ("7.1", &["l", "r", "c", "lfe", "lb", "rb", "ls", "rs"]),
 ];
 
-/// The layouts this version plans.
-pub const BUILT_LAYOUTS: [&str; 1] = ["stereo"];
+/// The layouts this version plans, with the module each plays as.
+pub const BUILT_LAYOUTS: [(&str, &str); 5] = [
+    ("mono", "std.audio_out_mono"),
+    ("stereo", STEREO_SINK),
+    ("quad", "std.audio_out_quad"),
+    ("5.1", "std.audio_out_5_1"),
+    ("7.1", "std.audio_out_7_1"),
+];
+
+/// Whether `module` is a play side's sink (`std.audio_out` or another
+/// layout's, ADR 0038 §2).
+pub fn is_play_sink(module: &str) -> bool {
+    BUILT_LAYOUTS.iter().any(|(_, m)| *m == module)
+}
+
+/// The layout a play side's sink `module` plays, if it is one.
+pub fn layout_of_sink(module: &str) -> Option<&'static str> {
+    BUILT_LAYOUTS
+        .iter()
+        .find(|(_, m)| *m == module)
+        .map(|(layout, _)| *layout)
+}
 
 /// The module a planned stereo capture side is (ADR 0038 §7).
 pub const STEREO_SOURCE: &str = "std.audio_in";
@@ -93,15 +115,11 @@ pub fn layout_of_width(width: usize) -> String {
 
 /// The module a device slot's `play` side plans as, or why it does not.
 pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
-    match play {
-        "stereo" => Ok(STEREO_SINK),
-        other if layout_channels(other).is_some() => Err(format!(
-            "the layout `{other}` is not built yet; this version plays `stereo` device slots (ADR 0038, M4.1)"
-        )),
-        other => Err(format!(
-            "`{other}` is not a layout (mono, stereo, quad, 5.1, 7.1)"
-        )),
-    }
+    BUILT_LAYOUTS
+        .iter()
+        .find(|(layout, _)| *layout == play)
+        .map(|(_, module)| *module)
+        .ok_or_else(|| format!("`{play}` is not a layout (mono, stereo, quad, 5.1, 7.1)"))
 }
 
 /// The module a device slot's `capture` side plans as, or why it does not.
@@ -215,7 +233,9 @@ mod tests {
         assert_eq!(layout_of_width(2), "stereo");
         assert_eq!(layout_of_width(3), "3 ch");
         assert_eq!(planned_module("stereo"), Ok(STEREO_SINK));
-        assert!(planned_module("5.1").unwrap_err().contains("not built yet"));
+        assert_eq!(planned_module("5.1"), Ok("std.audio_out_5_1"));
+        assert_eq!(layout_of_sink("std.audio_out_mono"), Some("mono"));
+        assert!(is_play_sink("std.audio_out") && !is_play_sink("std.audio_tap"));
         assert!(planned_module("hexa").unwrap_err().contains("not a layout"));
         assert_eq!(planned_source("stereo"), Ok(STEREO_SOURCE));
         assert_eq!(planned_source("mono"), Ok(MONO_SOURCE));
