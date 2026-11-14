@@ -11,7 +11,8 @@ use signal_graph::ExecutionPlan;
 use signal_project::transaction;
 
 use crate::panel::{
-    ParameterView, Target, WriteEdit, Written, after_write_all, write_project_chosen_under,
+    ParameterView, Target, WriteEdit, Written, after_write_all, write_files_under,
+    write_project_chosen_under,
 };
 
 use super::Host;
@@ -23,7 +24,9 @@ use super::writer::WriteCtx;
 pub(super) fn control_of(port: &PortAddress) -> Option<(String, String)> {
     let instance = port.instance();
     let name = instance.as_str().strip_prefix('/')?;
-    (!name.contains('/')).then(|| (name.to_owned(), port.port().to_owned()))
+    // ADR 0046 §4 (phase 2): `<slot>/<inner>`, an own inside's instance, is
+    // a control when the panel has it; anything deeper never is.
+    (name.matches('/').count() <= 1).then(|| (name.to_owned(), port.port().to_owned()))
 }
 
 /// The base of plan parameter `port` as the plan was built (its files'
@@ -207,7 +210,7 @@ impl Host {
             .collect();
         // What plays already: nothing to send.
         let sent = vec![true; edits.len()];
-        self.controls_written(&edits, &sent, &before, after);
+        self.controls_written(&edits, &sent, Some(&before), Some(after), false);
         let describe = self.describe(false);
         self.broadcast(&describe);
         self.push_graph(false);
@@ -312,8 +315,9 @@ impl Host {
             fail(
                 "not-editable",
                 format!(
-                    "{address} is not editable: only the parameters of a top-level instance are \
-                     (a parameter inside a composite is set in the composite's file)"
+                    "{address} is not editable: only the parameters of a top-level instance, \
+                     and of an instance in a slot's own inside, are (a parameter inside a \
+                     shared composite is set in the composite's file)"
                 ),
             )
         };
@@ -414,16 +418,35 @@ impl Host {
                 )
             })
             .collect();
-        let written =
-            write_project_chosen_under(&self.opening.dir, ctx.lock(), &texts, &|_, _| true);
-        let (before, after) = match written.map(|(b, a, _)| (b, a)) {
+        // ADR 0046 §4 (phase 2): an own inside's instance is written into
+        // its composite's file; the watch's reload of that file then finds
+        // the running project holding it already.
+        let deep = edits.iter().any(|e| e.instance.contains('/'));
+        let written = if deep {
+            write_files_under(&self.opening.dir, ctx.lock(), &texts).map(|changed| {
+                changed
+                    .into_iter()
+                    .find(|(path, _, _)| path == signal_project::PROJECT_FILE)
+                    .map(|(_, b, a)| (b, a))
+            })
+        } else {
+            write_project_chosen_under(&self.opening.dir, ctx.lock(), &texts, &|_, _| true)
+                .map(|(b, a, _)| Some((b, a)))
+        };
+        let project = match written {
             Ok(texts) => texts,
             Err(error) => {
                 self.controls_unwritten(edits, &sent, &error.to_string());
                 return Err(fail(error.code(), error.to_string()));
             }
         };
-        let note = self.controls_written(edits, &sent, &before, after);
+        let note = self.controls_written(
+            edits,
+            &sent,
+            project.as_ref().map(|(b, _)| b.as_str()),
+            project.as_ref().map(|(_, a)| a.clone()),
+            deep,
+        );
         let describe = self.describe(false);
         self.broadcast(&describe);
         // `graph.files` names the written file's new SHA-256.
@@ -504,8 +527,9 @@ impl Host {
         &mut self,
         edits: &[ControlWrite],
         sent: &[bool],
-        before: &str,
-        after: String,
+        before: Option<&str>,
+        after: Option<String>,
+        others: bool,
     ) -> Option<String> {
         let file = Path::new(signal_project::PROJECT_FILE);
         // The written file, read at once: a later edit differs from it.
@@ -520,7 +544,7 @@ impl Host {
             .run
             .as_mut()
             .and_then(|r| r.file.take())
-            .is_some_and(|text| text == before);
+            .is_some_and(|text| before.is_some_and(|before| text == before));
         for edit in edits {
             self.panel.release(&edit.instance, &edit.parameter);
         }
@@ -581,7 +605,12 @@ impl Host {
         // The running project now holds `after`. The watch takes the file as
         // seen only when it still is `after` once stamped (no edit came
         // between the write and the stamp; a later one differs from it).
+        // A write into another file too (an own inside's, ADR 0046 §4)
+        // leaves `project.toml`'s acceptance to the watch's reload, which
+        // finds nothing to apply.
         if held
+            && !others
+            && let Some(after) = after
             && let Some(stamp) = stamp
             && signal_project::read_regular_to_string(self.opening.dir.join(file))
                 .is_ok_and(|text| text == after)

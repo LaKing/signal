@@ -628,3 +628,85 @@ fn an_own_inside_is_made_edited_and_undone(transport: Transport) {
 }
 
 both!(an_own_inside_is_made_edited_and_undone);
+
+/// ADR 0046 §4 and test 5 (phase 2): an own inside's instance's parameter
+/// is a control (`/fx/<inner>.<p>`) and its `commit` writes the inside's
+/// file, `project.toml` untouched; before the inside is the slot's own, the
+/// same address is refused as shared content.
+fn an_own_inside_s_parameter_commits_into_its_file(transport: Transport) {
+    let mut rig = slots("slot-inside-commit", transport);
+    let (mut ws, _) = rig.client();
+    let path = rig.dir.join("project.toml");
+    // Shared content (a primitive loaded as it is): no control inside.
+    let error = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "commit", "address": "/fx/gain.db", "value": -12}),
+        "error",
+    );
+    assert_eq!(error["code"], "not-editable", "{error}");
+    patch(
+        &mut rig,
+        &mut ws,
+        2,
+        json!([{"op": "slot.inside", "slot": "fx"}]),
+    );
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    let host = fs::read_to_string(&path).unwrap();
+    let inside = rig.dir.join("composites/fx_inside.toml");
+    let d = rig.request(&mut ws, 4, json!({"type": "describe"}), "describe");
+    let inner: Vec<&Value> = d["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["address"].as_str().unwrap().starts_with("/fx/"))
+        .collect();
+    let db = inner
+        .iter()
+        .find(|c| c["parameter"] == "db")
+        .unwrap_or_else(|| panic!("no inner db control: {d}"));
+    assert_eq!(db["inSnapshots"], false, "{db}");
+    let address = db["address"].as_str().unwrap().to_owned();
+    let committed = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "commit", "address": address, "value": -12}),
+        "committed",
+    );
+    assert_eq!(committed["writes"], 1, "{committed}");
+    let text = fs::read_to_string(&inside).unwrap();
+    assert!(text.contains("db = -12"), "{text}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        host,
+        "project.toml untouched"
+    );
+    let d = rig.request(&mut ws, 6, json!({"type": "describe"}), "describe");
+    let base = d["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["address"] == address.as_str())
+        .unwrap()["base"]
+        .clone();
+    assert_eq!(base, -12.0);
+    // Back to its default: the key removed from the inside's file.
+    rig.request(
+        &mut ws,
+        7,
+        json!({"type": "commit", "address": address, "value": null}),
+        "committed",
+    );
+    assert!(!fs::read_to_string(&inside).unwrap().contains("db = -12"));
+    // Snapshots name top-level parameters only.
+    let error = rig.request(
+        &mut ws,
+        8,
+        json!({"type": "snapshot.exclude", "address": address, "exclude": true}),
+        "error",
+    );
+    assert_eq!(error["code"], "not-editable", "{error}");
+    rig.finish();
+}
+
+both!(an_own_inside_s_parameter_commits_into_its_file);

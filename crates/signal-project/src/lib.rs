@@ -84,7 +84,8 @@ pub use slot::{
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{
-    WriteError, read_parameter, write_parameter, write_parameters, write_snapshot_exclude,
+    WriteError, own_inside_of, parameter_file, read_parameter, write_parameter, write_parameters,
+    write_parameters_in, write_snapshot_exclude,
 };
 
 use locate::{

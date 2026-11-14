@@ -535,7 +535,13 @@ impl Host {
         let failure = match written {
             Ok((before, after)) => {
                 if !writes.is_empty() {
-                    note = self.controls_written(&writes, &sent_writes, &before, after);
+                    note = self.controls_written(
+                        &writes,
+                        &sent_writes,
+                        Some(&before),
+                        Some(after),
+                        false,
+                    );
                 }
                 None
             }
@@ -671,7 +677,9 @@ impl Host {
                 ),
             )
         };
-        let (instance, parameter) = control_of(&port).ok_or_else(not_editable)?;
+        let (instance, parameter) = control_of(&port)
+            .filter(|(instance, _)| !instance.contains('/'))
+            .ok_or_else(not_editable)?;
         let path = self.opening.dir.join(signal_project::PROJECT_FILE);
         let failed = |error: String| {
             fail(

@@ -652,8 +652,9 @@ impl Targets<'_> {
     /// What `port` names among the controls and the plan, as written.
     fn find_planned(&self, port: &PortAddress) -> Option<Found> {
         let instance = port.instance();
+        // A top-level instance's, or (ADR 0046 §4) an own inside's
+        // instance's (`/synth/vcf`): the panel has only those.
         if let Some(name) = instance.as_str().strip_prefix('/')
-            && !name.contains('/')
             && let Some(target) = self.panel.target(name, port.port())
         {
             return Some(Found::Parameter {

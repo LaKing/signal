@@ -196,6 +196,74 @@ pub fn write_parameters(
     Ok(text)
 }
 
+/// ADR 0046 §4 (phase 2): the file a control's value is written into and
+/// the instance's name there, for the control's instance key: a top-level
+/// instance (`echo`) in `project.toml`; `<slot>/<inner>`, an instance of the
+/// own inside of the top-level slot `<slot>` (the project composite it
+/// loads whose `inside_of` names it, ADR 0037 "Editable insides"), in that
+/// composite's file. `None` for any other key: an instance inside shared
+/// content is not written from a control.
+pub fn parameter_file(files: &[crate::SourceFile], key: &str) -> Option<(String, String)> {
+    let Some((slot, inner)) = key.split_once('/') else {
+        return Some((PROJECT_FILE.to_owned(), key.to_owned()));
+    };
+    if inner.contains('/') {
+        return None;
+    }
+    let inside = own_inside_of(files, slot)?;
+    Some((
+        format!("{}/{inside}.toml", crate::COMPOSITES),
+        inner.to_owned(),
+    ))
+}
+
+/// ADR 0037 "Editable insides": the name of the project composite the
+/// top-level slot `slot` loads when it is the slot's own inside (its
+/// `inside_of` is `slot`); `None` for any other slot or instance.
+pub fn own_inside_of(files: &[crate::SourceFile], slot: &str) -> Option<String> {
+    let project: toml::Table = files
+        .iter()
+        .find(|f| f.path == PROJECT_FILE)?
+        .text
+        .parse()
+        .ok()?;
+    let entry = project.get("instances")?.get(slot)?;
+    entry.get("slot")?;
+    let load = entry.get("load")?.as_str()?;
+    let text = crate::inside::composite_file(files, load)?;
+    (crate::inside::owner_of(&text)? == slot).then(|| load.to_owned())
+}
+
+/// [`write_parameters`] over a project's files: each edit, its instance a
+/// control's key ([`parameter_file`]), into its file. The files changed,
+/// as `(path, text before, text after)`, in the order first written.
+pub fn write_parameters_in(
+    files: &[crate::SourceFile],
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+) -> Result<Vec<(String, String, String)>, WriteError> {
+    let mut changed: Vec<(String, String, String)> = Vec::new();
+    for &(key, parameter, value, order) in edits {
+        let (path, instance) =
+            parameter_file(files, key).ok_or_else(|| WriteError::NoInstance(key.to_owned()))?;
+        let at = match changed.iter().position(|(p, _, _)| *p == path) {
+            Some(at) => at,
+            None => {
+                let text = files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .map(|f| f.text.clone())
+                    .ok_or_else(|| WriteError::NoInstance(key.to_owned()))?;
+                changed.push((path.clone(), text.clone(), text));
+                changed.len() - 1
+            }
+        };
+        if let Some(entry) = changed.get_mut(at) {
+            entry.2 = write_parameter(&entry.2, &instance, parameter, value, order)?;
+        }
+    }
+    Ok(changed)
+}
+
 impl Project {
     /// This project with [`write_parameter`] applied to its `project.toml`:
     /// what the running project becomes when a value is written back, so
@@ -233,8 +301,10 @@ impl Project {
         edits: &[(&str, &str, Option<f64>, &[&str])],
     ) -> Result<Project, WriteError> {
         let mut files = self.files.clone();
-        for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
-            file.text = write_parameters(&file.text, edits)?;
+        for (path, _, after) in write_parameters_in(&self.files, edits)? {
+            for file in files.iter_mut().filter(|f| f.path == path) {
+                file.text = after.clone();
+            }
         }
         // A project that includes others is not rebuilt here: read from its
         // folder again, an included project changed on disk but not yet

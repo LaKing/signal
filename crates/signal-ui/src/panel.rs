@@ -303,20 +303,22 @@ impl Panel {
             .filter_map(|r| Some((r.slot.strip_prefix('/')?, r)))
             .filter(|(name, _)| !name.contains('/'))
             .collect();
-        let mut instances = Vec::new();
-        for def in &project.root.instances {
-            let excluded = project.snapshot_excluded(&def.name);
-            let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
-                continue;
-            };
+        // One instance's rows: `key` its control key (`echo`; `synth/vcf`
+        // for an own inside's instance, ADR 0046 §4), `excluded` the names
+        // left out of snapshots (`None`: none go into them).
+        let rows_of = |def: &signal_graph::InstanceDef,
+                       key: &str,
+                       address: &InstanceAddress,
+                       excluded: Option<&std::collections::BTreeSet<String>>,
+                       slot: Option<&&signal_project::SlotResolution>|
+         -> Instance {
             let mut instance = Instance {
-                name: def.name.clone(),
+                name: key.to_owned(),
                 module: def.module.clone(),
                 order: Vec::new(),
                 parameters: Vec::new(),
                 inner: Vec::new(),
             };
-            let slot = slots.get(def.name.as_str());
             let names: Vec<String> = match (registry.get(&def.module), composites.get(&*def.module))
             {
                 _ if slot.is_some() => slot
@@ -350,9 +352,9 @@ impl Panel {
                     .and_then(|m| m.content.clone())
                     .unwrap_or_else(|| name.clone());
                 let targets = if slot.is_some() {
-                    resolve(&with_content, registry, &address, &def.module, &content)
+                    resolve(&with_content, registry, address, &def.module, &content)
                 } else {
-                    resolve(&composites, registry, &address, &def.module, &content)
+                    resolve(&composites, registry, address, &def.module, &content)
                 };
                 let Some((_, first, inner_value, _)) = targets.first() else {
                     continue;
@@ -403,7 +405,7 @@ impl Panel {
                         effective: None,
                         modulated: ports.iter().any(|p| modulated(plan, p)),
                         editable: true,
-                        in_snapshots: !excluded.contains(name),
+                        in_snapshots: excluded.is_some_and(|e| !e.contains(name)),
                         values,
                         snap,
                     },
@@ -414,6 +416,35 @@ impl Panel {
                 });
             }
             instance.order = names;
+            instance
+        };
+        let mut instances = Vec::new();
+        for def in &project.root.instances {
+            let excluded = project.snapshot_excluded(&def.name);
+            let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
+                continue;
+            };
+            let slot = slots.get(def.name.as_str());
+            let mut instance = rows_of(def, &def.name, &address, Some(&excluded), slot);
+            // ADR 0046 §4 (phase 2): an own inside's instances are controls
+            // of their own (`/synth/vcf.cutoff`), written into its file; the
+            // read-only rows would show them twice.
+            let own = slot
+                .and_then(|_| signal_project::own_inside_of(&project.files, &def.name))
+                .and_then(|name| composites.get(name.as_str()).copied());
+            if let Some(inside) = own {
+                instances.push(instance);
+                for inner_def in &inside.instances {
+                    let Ok(inner_address) = address.child(&inner_def.name) else {
+                        continue;
+                    };
+                    let key = format!("{}/{}", def.name, inner_def.name);
+                    // Not in snapshots: ADR 0041's `snapshot_exclude` names
+                    // top-level parameters only.
+                    instances.push(rows_of(inner_def, &key, &inner_address, None, None));
+                }
+                continue;
+            }
             if registry.get(&def.module).is_none() {
                 instance.inner = inner(plan, &address);
             }
@@ -591,7 +622,9 @@ impl Panel {
     /// corrected ("corrected on load"), in the panel's order.
     pub fn corrections(&self) -> Vec<Correction> {
         let mut list = Vec::new();
-        for i in &self.instances {
+        // An own inside's instance (`synth/vcf`, ADR 0046 §4) is corrected
+        // in its file by hand: Save writes `project.toml` only.
+        for i in self.instances.iter().filter(|i| !i.name.contains('/')) {
             for row in &i.parameters {
                 // As the plan compares (`-0` is `0`: no warning, no correction).
                 if let Some(from) = row.written
@@ -1244,6 +1277,41 @@ fn write_project_locked(
         )));
     }
     Ok((before, after, kept))
+}
+
+/// ADR 0046 §4 (phase 2): [`write_project_chosen_under`] for edits whose
+/// instance keys may name an own inside's instance (`synth/vcf`), each
+/// written into its file ([`signal_project::parameter_file`]): every file
+/// read under the writer `lock`, edited, and replaced only while it still
+/// holds the text read. Gives each file changed as `(path, before,
+/// after)`. A file found changed stops the write there: the files before it
+/// in the list are written.
+pub fn write_files_under(
+    dir: &Path,
+    lock: io::Result<ProjectLock>,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+) -> Result<Vec<(String, String, String)>, ProjectWriteError> {
+    use signal_project::transaction::replace_unchanged;
+    let what = what_of(edits);
+    let _lock = lock.map_err(|e| lock_failed(dir, edits, &e))?;
+    let failed = |error: String| {
+        ProjectWriteError::Failed(format!("{what} not written to {}: {error}", dir.display()))
+    };
+    let files = signal_project::read_sources(dir).map_err(|e| failed(e.to_string()))?;
+    let changed =
+        signal_project::write_parameters_in(&files, edits).map_err(|e| failed(e.to_string()))?;
+    for (path, before, after) in &changed {
+        let written = replace_unchanged(&dir.join(path), Some(before.as_bytes()), after.as_bytes())
+            .map_err(|e| failed(e.to_string()))?;
+        if !written {
+            return Err(ProjectWriteError::Changed(format!(
+                "{what} not written to {}: {path} changed while the value was written \
+                 (another writer); nothing more was written",
+                dir.display()
+            )));
+        }
+    }
+    Ok(changed)
 }
 
 /// Why [`write_project`] wrote nothing.
