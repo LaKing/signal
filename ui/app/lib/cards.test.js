@@ -187,3 +187,33 @@ test('the main window’s plane is connected as a main window: ready, told what 
   connectPlaneCards(browser, { target: {} });
   assert.equal(browser.cardChannel, undefined);
 });
+
+// ADR 0035 §10: an include's panel, in its own shadow root below the plate, has cards of its own, `<key>:<id>`;
+// a panel window shows only those it holds (one it does not takes no room) and an include none of whose cards it holds not at all.
+test("an include's cards get their own ids, and a panel window shows only those it holds", () => {
+  const appended = [];
+  const include = { localName: 'signal-include', style: fakeCard('', '').style, getAttribute: (a) => (a === 'bind' ? '/drums' : null) };
+  const inInclude = (card) => Object.assign(card, { getRootNode: () => ({ host: include }) });
+  const own = [inInclude(fakeCard('', 'Kick')), inInclude(fakeCard('', 'Kick'))];
+  include.shadowRoot = { querySelectorAll: (q) => (q === '.body .signal-card' ? own : []), querySelector: () => null, append: (e) => appended.push(e) };
+  const host = [fakeCard('', 'mixer', { x: 8, y: 8, w: 300, h: 100 })];
+  const doc = fakeDoc(host);
+  const panel = doc.panel;
+  panel.shadowRoot = { querySelectorAll: (q) => (q === 'signal-include' ? [include] : []) };
+  doc.querySelectorAll = (q) => (q.startsWith('.signal-card') ? host : q === 'signal-panel' ? [panel] : []);
+  doc.createElement = () => ({ dataset: {} });
+  const cards = cardsOf(doc);
+  assert.deepEqual(cards.map((c) => c.id), ['mixer', 'drums:kick', 'drums:kick-2']);
+  assert.ok(cards.every((c) => isCardId(c.id)));
+  applyCards(doc, { view: 'panel', cards: ['drums:kick-2'] });
+  assert.deepEqual(own.map((c) => c.style.get('display')?.[0] ?? ''), ['none', ''], 'not held here: no room taken below the plate');
+  assert.equal(include.style.get('display'), undefined, 'the include shows: it has a card here');
+  assert.deepEqual(panel.crops.at(-1), { x: 0, y: 0, w: 0, h: 0 }, "no card of the plate: the plate shows nothing");
+  assert.equal(appended.length, 1, 'the held style in its shadow root, once');
+  applyCards(doc, { view: 'panel', cards: ['mixer'] });
+  assert.deepEqual(include.style.get('display'), ['none', undefined], 'none of its cards here: not drawn');
+  assert.deepEqual(panel.crops.at(-1), { x: 8, y: 8, w: 300, h: 100 });
+  applyCards(doc, { view: 'main', held: [{ card: 'drums:kick', where: 'Panel window 1' }] });
+  assert.equal(include.style.get('display'), undefined, 'a main window draws it');
+  assert.ok(own[0].attrs.has(HELD_MARK));
+});

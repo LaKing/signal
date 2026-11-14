@@ -404,6 +404,16 @@ ${BROWSER_CSS}
 .browser svg.preview-svg .wire.events { stroke: var(--signal-meter-rms, #3ecf8e); } .browser svg.preview-svg .wire.vector { stroke: var(--signal-effective, #ffb74d); }
 `;
 
+/** ADR 0032: a held card's look (its placeholder over it), in the Stack's shadow root and in an include's (ADR 0035 §10). */
+const HELD_PANEL_CSS = `
+[data-held] { position: relative; background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
+[data-held]::before, [data-held]::after { visibility: hidden !important; }
+[data-held] :not(.held-note, .held-note *) { visibility: hidden !important; }
+.held-note { position: absolute; inset: 0; z-index: 1; display: flex; gap: .6rem; align-items: center; padding: 0 .75rem; box-sizing: border-box; border: 1px dashed var(--signal-track, #2a2f38); border-radius: 8px; background: var(--signal-bg, #15181d); color: var(--signal-muted, #8a93a3); font: 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; white-space: nowrap; visibility: visible !important; }
+.held-note span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.held-note button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-muted, #8a93a3); border-radius: 3px; padding: .1rem .6rem; cursor: pointer; }
+`;
+
 /** A front panel's shadow root CSS: the panel's cards placed by the plane, the panel's own look otherwise. */
 const PANEL_CSS = `
 :host { display: block; position: absolute; left: 0; top: 0; contain: layout style; }
@@ -421,13 +431,7 @@ const PANEL_CSS = `
 .face-panel > .signal-cards > signal-slot[data-card] { display: flex !important; flex-direction: column; gap: 0.6rem; }
 .face-panel > .signal-cards > signal-slot[data-card] > .signal-cards { display: grid; }
 /* ADR 0032: a card another window holds keeps its place, nothing of it drawn but its placeholder. */
-[data-held] { position: relative; background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
-[data-held]::before, [data-held]::after { visibility: hidden !important; }
-[data-held] :not(.held-note, .held-note *) { visibility: hidden !important; }
-.held-note { position: absolute; inset: 0; z-index: 1; display: flex; gap: .6rem; align-items: center; padding: 0 .75rem; box-sizing: border-box; border: 1px dashed var(--signal-track, #2a2f38); border-radius: 8px; background: var(--signal-bg, #15181d); color: var(--signal-muted, #8a93a3); font: 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; white-space: nowrap; visibility: visible !important; }
-.held-note span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.face-panel > .signal-cards > [data-faded] .held-note { visibility: hidden !important; pointer-events: none; }
-.held-note button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-muted, #8a93a3); border-radius: 3px; padding: .1rem .6rem; cursor: pointer; }
+${HELD_PANEL_CSS}.face-panel > .signal-cards > [data-faded] .held-note { visibility: hidden !important; pointer-events: none; }
 `;
 
 function svg(name, attributes = {}, text = null) {
@@ -2860,7 +2864,8 @@ export class SignalPlane extends HTMLElement {
   namedCards(s) {
     const out = [...(s.named?.values() ?? [])].filter((c) => [...s.cards.values()].some((e) => e === c.raw || e.contains?.(c.raw)));
     for (const element of s.cards.values()) {
-      if (element.localName !== 'signal-slot') continue;
+      // A slot's part and an include's panel (ADR 0035 §10) draw their cards later.
+      if (element.localName !== 'signal-slot' && element.localName !== 'signal-include') continue;
       for (const c of cardsOf(element)) if (!out.some((o) => o.raw === c.raw)) out.push(c);
     }
     return out;
@@ -2869,6 +2874,17 @@ export class SignalPlane extends HTMLElement {
   /** Stack `s`'s held cards marked (`data-held`, PANEL_CSS), each with its placeholder: where it is, Show and Bring back. */
   applyHeld(s) {
     for (const note of s.shadow?.querySelectorAll?.('.held-note') ?? []) note.remove();
+    // An include's cards are in its own shadow root: the held style and notes there too.
+    for (const element of s.cards.values()) {
+      const root = element.localName === 'signal-include' ? element.shadowRoot : null;
+      if (!root) continue;
+      for (const note of root.querySelectorAll('.held-note')) note.remove();
+      if (!root.querySelector('style[data-held-style]')) {
+        const style = html('style', { textContent: HELD_PANEL_CSS });
+        style.dataset.heldStyle = '';
+        root.append(style);
+      }
+    }
     const held = this.heldCards();
     for (const card of this.namedCards(s)) {
       const where = held.get(card.id);

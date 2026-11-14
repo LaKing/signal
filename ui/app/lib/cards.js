@@ -36,7 +36,10 @@
 // `slot.<name>` (crates/signal-ui/src/parts.rs `slot_card_id`), and the
 // cards of its part are cards of their own, their ids counted in the part
 // and prefixed with the slot's name (`synth:mono-synth`), as the server
-// names them when Group into slot moves a card (`ui/windows.toml`).
+// names them when Group into slot moves a card (`ui/windows.toml`). ADR
+// 0035 §10: an include's panel (`<signal-include>`, in its own shadow root)
+// has cards of its own, `<key>:<id>`; in a panel window they are drawn
+// below the plate, one not held there taking no room.
 
 import { ContextMenu, menusClaimed } from '../../controls/context-menu.js';
 import { union } from '../../lib/plate.js';
@@ -135,8 +138,30 @@ export function menuMessage(id, card, placed, size) {
  */
 export function findCards(doc) {
   const own = [...doc.querySelectorAll('.signal-card, .signal-cards > signal-slot')].filter((c) => !c.parentElement?.closest('.signal-card'));
-  if (own.length) return own;
-  return [...doc.querySelectorAll('signal-panel')].flatMap((p) => [...(p.shadowRoot?.querySelectorAll('.generated > section') ?? [])]);
+  const base = own.length ? own : [...doc.querySelectorAll('signal-panel')].flatMap((p) => [...(p.shadowRoot?.querySelectorAll('.generated > section') ?? [])]);
+  return [...base, ...includesOf(doc).flatMap(includeCardElements)];
+}
+
+/**
+ * ADR 0035 §10: the `<signal-include>`s of `doc` (an include itself, those
+ * in it, and those its panels show after their cards, in their shadow
+ * roots), in order.
+ */
+export function includesOf(doc) {
+  const own = doc.localName === 'signal-include' ? [doc] : [];
+  const panels = [...(doc.querySelectorAll?.('signal-panel') ?? [])];
+  return [...own, ...(doc.querySelectorAll?.('signal-include') ?? []), ...panels.flatMap((p) => [...(p.shadowRoot?.querySelectorAll('signal-include') ?? [])])];
+}
+
+/** The cards of an include's panel (its shadow root's `.signal-card`s not inside another), in order. */
+export function includeCardElements(include) {
+  return [...(include.shadowRoot?.querySelectorAll('.body .signal-card') ?? [])].filter((c) => !c.parentElement?.closest('.signal-card'));
+}
+
+/** The `<signal-include>` whose panel holds card `element` (ADR 0035 §10), or null. */
+export function includeOfCard(element) {
+  const host = element?.getRootNode?.()?.host;
+  return host?.localName === 'signal-include' ? host : null;
 }
 
 function heading(card) {
@@ -159,7 +184,7 @@ function titleOf(element) {
   return (heading(element)?.textContent ?? '').trim();
 }
 
-/** `[{ element, raw, id, title }]` of `doc`'s cards; a part's ids `<slot>:<id>`. */
+/** `[{ element, raw, id, title }]` of `doc`'s cards; a part's ids `<slot>:<id>`, an include's `<key>:<id>`. */
 export function cardsOf(doc) {
   const elements = findCards(doc);
   const titles = elements.map(titleOf);
@@ -171,12 +196,13 @@ export function cardsOf(doc) {
       ids[i] = `slot.${slotName(element)}`;
       return;
     }
-    const slot = slotOfCard(element);
+    const slot = slotOfCard(element) ?? includeOfCard(element);
     if (!groups.has(slot)) groups.set(slot, []);
     groups.get(slot).push(i);
   });
   for (const [slot, indexes] of groups) {
     const own = cardIds(indexes.map((i) => ({ id: elements[i].id, title: titles[i] })));
+    // A slot's part and an include's panel name their cards by the slot or the include (`bind="/<name>"`).
     const prefix = slot ? `${slotName(slot)}:` : '';
     indexes.forEach((i, n) => {
       ids[i] = `${prefix}${own[n]}`;
@@ -212,10 +238,25 @@ export const HELD_CSS = `[${HELD_MARK}], [${HELD_MARK}] *, [${HELD_MARK}] *::bef
 export function applyCards(doc, state) {
   const cards = cardsOf(doc);
   const placed = arrangement(cards.map((c) => c.id), state);
+  const panelView = state?.view === 'panel';
+  // An include's panel is drawn in its own shadow root: the held style there too.
+  for (const include of includesOf(doc)) {
+    const root = include.shadowRoot;
+    if (root && !root.querySelector('style[data-signal-app="held"]')) {
+      const hide = (doc.ownerDocument ?? doc).createElement?.('style');
+      if (hide) {
+        hide.dataset.signalApp = 'held';
+        hide.textContent = HELD_CSS;
+        root.append(hide);
+      }
+    }
+  }
   cards.forEach((card, i) => {
     const { element } = card;
     const p = placed[i];
     card.held = p.held;
+    // ADR 0035 §10: an include's cards are below the plate, in its own flow: one a panel window does not show takes no room there.
+    if (panelView && includeOfCard(card.raw)) element.style.setProperty('display', p.shown ? '' : 'none');
     // Not held here: hidden, its box kept (a display of none would move the cards after it).
     for (const [name, value] of Object.entries({ visibility: 'hidden', 'pointer-events': 'none' })) element.style.setProperty(name, p.shown ? '' : value, p.shown ? '' : 'important');
     if (p.shown) element.removeAttribute?.(HIDDEN_MARK);
@@ -227,6 +268,11 @@ export function applyCards(doc, state) {
     if (held) element.setAttribute?.(HELD_MARK, '');
     else element.removeAttribute?.(HELD_MARK);
   });
+  // An include none of whose cards a panel window shows is not drawn there (its title neither).
+  for (const include of includesOf(doc)) {
+    const some = cards.some((c, i) => placed[i].shown && includeOfCard(c.raw) === include);
+    include.style?.setProperty('display', !panelView || some ? '' : 'none');
+  }
   cropPanel(doc, cards, state);
   return [cards, placed];
 }
@@ -235,7 +281,8 @@ export function applyCards(doc, state) {
 export function cropPanel(doc, cards, state) {
   const panel = doc.querySelector?.('signal-panel');
   if (!panel?.setCrop) return;
-  const shown = state?.view === 'panel' ? cards.filter(shownCard).map((c) => panel.plateRect(c.element)) : null;
+  // An include's cards are below the plate, never on it.
+  const shown = state?.view === 'panel' ? cards.filter((c) => shownCard(c) && !includeOfCard(c.raw)).map((c) => panel.plateRect(c.element)) : null;
   // A panel window holding nothing (or nothing drawn yet) shows nothing, never the whole plate.
   panel.setCrop(shown ? (union(shown) ?? { x: 0, y: 0, w: 0, h: 0 }) : null);
 }
@@ -422,6 +469,8 @@ export function connectCards(frame, { target = globalThis, initial = null, shown
       const observe = () => {
         observer.observe(d.querySelector('signal-panel') ?? d.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['editing'] });
         for (const p of d.querySelectorAll('signal-panel')) if (p.shadowRoot) observer.observe(p.shadowRoot, { childList: true, subtree: true });
+        // ADR 0035 §10: an include draws its panel later, in its own shadow root.
+        for (const include of includesOf(d)) if (include.shadowRoot) observer.observe(include.shadowRoot, { childList: true, subtree: true });
       };
       observer = new View.MutationObserver(() => {
         observer.disconnect();
