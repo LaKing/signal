@@ -290,3 +290,14 @@ export function outOfPart(node, root) {
   });
 }
 
+/**
+ * ADR 0046 §5: whether top-level slot `slot` loads a project (`load` a
+ * path: `../studio`, `./deck`), whose own panel it shows, rooted and
+ * read-only, while it has no part of its own nor a template's.
+ */
+export function slotLoadsProject(description, slot) {
+  const found = (description?.content?.slots ?? []).find((s) => s.slot === `/${slot}`);
+  const load = found?.load ?? null;
+  return typeof load === 'string' && (load.startsWith('./') || load.startsWith('../') || load.startsWith('/') || load === '.') && !load.endsWith('.signal');
+}
+

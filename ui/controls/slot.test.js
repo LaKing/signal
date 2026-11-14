@@ -106,3 +106,11 @@ test('the part is read once the connection opens; a failure is said, not hidden 
   await slot.readPart(connection);
   assert.match(slot.partState.error, /the disk is gone/);
 });
+
+test('no control shadows SignalElement’s template() with a getter (a slot drew nothing so, 2026-11-14)', () => {
+  const dir = new URL('./', import.meta.url);
+  for (const name of readdirSync(dir).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'))) {
+    const text = readFileSync(new URL(name, dir), 'utf8');
+    assert.doesNotMatch(text, /\bget\s+template\s*\(/, name);
+  }
+});

@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseContent, serialize } from './panel-tree.js';
-import { emptyPartTree, intoPart, opensAsCard, outOfPart, slotTemplate, templatePartFile, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
+import { emptyPartTree, intoPart, opensAsCard, outOfPart, slotLoadsProject, slotTemplate, templatePartFile, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
 
 const ui = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, ui), 'utf8');
@@ -151,4 +151,12 @@ test('ADR 0046 §5: a control dragged into a part binds relative, out of it abso
   assert.deepEqual(outOfPart(inside, '/synth').node.children.map((c) => c.attributes.bind), ['/synth.cutoff', '/synth/vcf.lp']);
   const roll = { id: 'n7', kind: 'control', tag: 'signal-piano-roll', attributes: { pattern: 'melody', 'position-bind': '/melody.position', audition: 'none' } };
   assert.match(intoPart(roll, '/synth').error, /\/melody.position lies outside/);
+});
+
+test('ADR 0046 §5: a slot loading a project shows that project’s panel; a module or an archive does not', () => {
+  const description = { content: { slots: [{ slot: '/deck_b', load: '../studio' }, { slot: '/fx', load: 'std.gain' }, { slot: '/z', load: './z.signal' }, { slot: '/e' }] } };
+  assert.equal(slotLoadsProject(description, 'deck_b'), true);
+  assert.equal(slotLoadsProject(description, 'fx'), false);
+  assert.equal(slotLoadsProject(description, 'z'), false);
+  assert.equal(slotLoadsProject(description, 'e'), false);
 });

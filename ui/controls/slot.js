@@ -30,7 +30,9 @@
 import { browserEntries } from '../lib/module-browser.js';
 import { generationOf, named } from '../lib/opening.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
-import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute, slotTemplate, templatePartFile } from '../lib/parts.js';
+import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute, slotLoadsProject, slotTemplate, templatePartFile } from '../lib/parts.js';
+import { includePanelFile, includePattern } from '../lib/include.js';
+import { faceAttribute } from '../lib/schematic-face.js';
 import { asleepVoices, cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp, voicesOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { layOutCards } from './plate.js';
@@ -146,7 +148,8 @@ ${BROWSER_CSS}`;
    * project template's while it has none of its own.
    */
   get file() {
-    if (this.partSource === 'template' && this.template) return templatePartFile(this.template);
+    if (this.partSource === 'template' && this.interfaceTemplate) return templatePartFile(this.interfaceTemplate);
+    if (this.partSource === 'project' && this.slotName) return includePanelFile(this.slotName);
     return this.ownFile;
   }
 
@@ -156,7 +159,7 @@ ${BROWSER_CSS}`;
   }
 
   /** ADR 0046 §9: the project interface template the slot starts from, if any. */
-  get template() {
+  get interfaceTemplate() {
     return slotTemplate(this.description, this.slotName);
   }
 
@@ -165,8 +168,12 @@ ${BROWSER_CSS}`;
     return `/${this.slotName}`;
   }
 
-  /** What a part's control attribute shows: its addresses rooted (the panel editor's hook). */
+  /** What a part's control attribute shows: its addresses rooted (the panel editor's hook); a loaded project's panel also its skins and patterns from its own folder (ADR 0046 §5). */
   attributeValue(name, value) {
+    if (this.partSource === 'project' && !this.partEditor?.editing) {
+      if (name === 'pattern') return includePattern(this.slotName, value);
+      return faceAttribute(name, value, this.root, new URL(`/include/${this.slotName}/main.html`, location.href).href);
+    }
     return rootedAttribute(name, value, this.root);
   }
 
@@ -276,11 +283,15 @@ ${BROWSER_CSS}`;
     // Described means open: a part not read yet (or whose read the connection dropped) is read now.
     if (this.partState === null && !this.partReading) this.readPart();
     // A template known only now (ADR 0046 §9): its part is looked for once.
-    else if (this.partState && !this.partState.exists && this.template && this.templateLooked !== this.template && !this.partReading) {
-      this.templateLooked = this.template;
-      this.readPart();
+    else if (this.partState && !this.partState.exists && !this.partReading) {
+      const fallback = this.interfaceTemplate ?? (slotLoadsProject(description, this.slotName) ? 'project' : null);
+      if (fallback && this.templateLooked !== fallback) {
+        this.templateLooked = fallback;
+        this.readPart();
+      }
     }
-    if (this.partState?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
+    // A loaded project's panel is checked in that project, not as this slot's part.
+    if (this.partState?.exists && this.partCheck && this.file && this.partSource !== 'project') this.partCheck.described(description, this.file);
   }
 
   streams(connection) {
@@ -343,19 +354,27 @@ ${BROWSER_CSS}`;
       this.partReading = false;
     }
     if (file !== this.file) return;
-    if (!read?.exists && this.template) {
-      const shared = await connection.request({ type: 'panel.read', file: templatePartFile(this.template) }).catch(() => null);
+    if (!read?.exists && this.interfaceTemplate) {
+      const shared = await connection.request({ type: 'panel.read', file: templatePartFile(this.interfaceTemplate) }).catch(() => null);
       if (shared?.exists) {
         this.partSource = 'template';
         read = shared;
       }
     }
+    // ADR 0046 §5: else a loaded project's own panel, rooted, read-only.
+    if (!read?.exists && slotLoadsProject(this.description, this.slotName)) {
+      const own = await connection.request({ type: 'panel.read', file: includePanelFile(this.slotName) }).catch(() => null);
+      if (own?.exists && typeof own.html === 'string') {
+        this.partSource = 'project';
+        read = { ...own, editable: true };
+      }
+    }
     this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, plate: read?.plate ?? null, error: read?.exists && !read?.editable ? read.reason : null };
     await this.showPart();
-    if (this.partState.exists && this.description) {
+    if (this.partState.exists && this.description && this.partSource !== 'project') {
       this.partCheck.checked = undefined;
       this.partCheck.asking = undefined;
-      this.partCheck.described(this.description, file);
+      this.partCheck.described(this.description, this.file);
     }
   }
 
@@ -377,7 +396,7 @@ ${BROWSER_CSS}`;
   /** A `panel.written` push: the part another client (or a patch) wrote. */
   partWritten(message) {
     // Its own part made while it showed its template's: its own from now on.
-    if (message?.file === this.ownFile && this.partSource === 'template' && typeof message.html === 'string') this.partSource = 'own';
+    if (message?.file === this.ownFile && (this.partSource === 'template' || this.partSource === 'project') && typeof message.html === 'string') this.partSource = 'own';
     if (message?.file !== this.file) return;
     if (this.partEditor?.editing) {
       this.partEditor.written(message);
@@ -389,7 +408,7 @@ ${BROWSER_CSS}`;
 
   /** The part's binding check again (the panel editor asks after a write). */
   recheck() {
-    if (!this.partCheck || !this.connection?.description || !this.file || !this.partState?.exists) return;
+    if (!this.partCheck || !this.connection?.description || !this.file || !this.partState?.exists || this.partSource === 'project') return;
     this.partCheck.checked = undefined;
     this.partCheck.asking = undefined;
     this.partCheck.described(this.connection.description, this.file);
@@ -463,7 +482,7 @@ ${BROWSER_CSS}`;
     this.setFolded(false);
     // ADR 0046 §9: a template's part is edited for every slot from it, or
     // copied into this slot's own first (copy on write).
-    if (this.partSource === 'template' && this.partState?.exists) {
+    if ((this.partSource === 'template' || this.partSource === 'project') && this.partState?.exists) {
       const choice = await this.chooseTemplateEdit();
       if (choice === null) return;
       if (choice === 'own') {
@@ -503,8 +522,11 @@ ${BROWSER_CSS}`;
         resolve(choice);
       };
       const button = (text, choice) => Object.assign(document.createElement('button'), { type: 'button', textContent: text, onclick: () => done(choice) });
-      const text = Object.assign(document.createElement('span'), { textContent: `This slot shows the part of interface ${this.template}. ` });
-      box.replaceChildren(text, button(`Edit it for every slot from ${this.template}`, 'template'), button('Make this slot’s own copy', 'own'), button('Cancel', null));
+      // A loaded project's panel is the linked project's: only a copy is edited here (Make part own).
+      const project = this.partSource === 'project';
+      const text = Object.assign(document.createElement('span'), { textContent: project ? 'This slot shows the panel of the project it loads (linked). ' : `This slot shows the part of interface ${this.interfaceTemplate}. ` });
+      const choices = project ? [button('Make part own', 'own'), button('Cancel', null)] : [button(`Edit it for every slot from ${this.interfaceTemplate}`, 'template'), button('Make this slot’s own copy', 'own'), button('Cancel', null)];
+      box.replaceChildren(text, ...choices);
       box.hidden = false;
     });
   }
