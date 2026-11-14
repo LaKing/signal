@@ -1885,7 +1885,7 @@ pub fn render_file(dir: &Path, relative: &str) -> Result<PathBuf, String> {
 
 /// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or
 /// ends in `.signal`; every other value is a module reference.
-pub(crate) fn is_project_path(load: &str) -> bool {
+pub fn is_project_path(load: &str) -> bool {
     load.contains('/') || load.ends_with(".signal")
 }
 

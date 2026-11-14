@@ -143,6 +143,37 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Files to write by [`write`]'s all-or-nothing writer: `copies` new
+    /// (never over an existing file), `edits` replacing the project's own
+    /// files as `files` (read now) hold them; checked to load if the
+    /// project loaded before. For copies made elsewhere (ADR 0051 §10: a
+    /// Stack imported).
+    pub fn new(
+        dir: &Path,
+        copies: Vec<(String, String)>,
+        edits: Vec<(String, String)>,
+        library: &Library,
+    ) -> Result<Prepared, VendorError> {
+        let files = project_sources(dir)?;
+        for (path, _) in &copies {
+            if dir.join(path).exists() {
+                return Err(VendorError::Exists(path.clone()));
+            }
+        }
+        let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
+        let prepared = Prepared {
+            copies,
+            edits,
+            reused: Vec::new(),
+            files,
+            loaded_before,
+        };
+        if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+            return Err(VendorError::Invalid(diagnostics));
+        }
+        Ok(prepared)
+    }
+
     /// Every file it would write (new and rewritten), relative to the project.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.copies

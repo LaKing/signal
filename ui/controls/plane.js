@@ -2905,8 +2905,13 @@ export class SignalPlane extends HTMLElement {
       if (device) return { items: [{ id: 'make-clock', label: `Make ${device.name} the clock device` }], act: (id) => id === 'make-clock' && this.makeClock(device.key) };
       if (!this.model || path.some((node) => node?.classList?.contains?.('box') || node?.classList?.contains?.('tray'))) return null;
       return {
-        items: [{ id: 'create-stack', label: 'Create new Stack' }, { id: 'import-instrument', label: 'Import Instrument…' }],
-        act: (id) => (id === 'create-stack' ? this.addStack(at) : id === 'import-instrument' && this.importInstrument()),
+        items: [{ id: 'create-stack', label: 'Create new Stack' }, { id: 'import-instrument', label: 'Import Instrument…' }, { id: 'import-stack', label: 'Import Stack…' }],
+        act: (id) => {
+          if (id === 'create-stack') return this.addStack(at);
+          if (id === 'import-instrument') return this.importInstrument();
+          if (id === 'import-stack') return this.importStack();
+          return false;
+        },
       };
     }
     // The instrument whose front panel holds the click (on a control of it too).
@@ -2947,6 +2952,7 @@ export class SignalPlane extends HTMLElement {
       if (slotOf.slot.project) shows.push({ id: 'copy-instrument', label: 'Make Own Copy' });
     }
     shows.push({ id: 'show-stack', label: 'Show Stack' });
+    if (this.model && !this.model.derived && (level === 'stack' || level === 'wiring')) shows.push({ id: 'export-stack', label: 'Save Stack as Project…' });
     const show = (id) => {
       if (id === 'show-chip') return this.showChip(chip), true;
       if (id === 'add-module') return this.openAddModule(hit), true;
@@ -2957,6 +2963,7 @@ export class SignalPlane extends HTMLElement {
       if (id === 'export-instrument') return this.exportInstrument(entry), true;
       if (id === 'copy-instrument') return this.copyInstrument(entry), true;
       if (id === 'show-stack') return this.fitOnScreen(name, null), true;
+      if (id === 'export-stack') return this.exportStack(name), true;
       return false;
     };
     // The Show in items' subject (ui/app/lib/show-in.js `subjectOf`): the instance, the pin or the wire under the click.
@@ -3454,6 +3461,32 @@ export class SignalPlane extends HTMLElement {
     try {
       const reply = await this.connection.request({ type: 'slot.import', path });
       await this.writePatch([reply.op], `Import ${reply.name} (${reply.op.load})`, 0, '');
+    } catch (error) {
+      this.say(`Not imported: ${error?.message ?? error}`);
+    }
+  }
+
+  /** ADR 0051 §10: Stack `stack` saved as a project of its own in a chosen folder. */
+  async exportStack(stack) {
+    const path = await this.chooseFolder('export', stack);
+    if (!path) return;
+    try {
+      const reply = await this.connection.request({ type: 'stack.export', stack, path });
+      this.say(`Saved the Stack ${stack} as a project: ${reply.path}`);
+    } catch (error) {
+      this.say(`Not saved: ${error?.message ?? error}`);
+    }
+  }
+
+  /** ADR 0051 §10: a chosen Stack project copied in as a new Stack. */
+  async importStack() {
+    const path = await this.chooseFolder('import');
+    if (!path) return;
+    const base = this.session.bases.get('');
+    if (!base) return this.say('Not imported: project.toml is not known yet');
+    try {
+      const reply = await this.connection.request({ type: 'stack.import', path, base });
+      this.say(`Imported the Stack ${reply.stack}`);
     } catch (error) {
       this.say(`Not imported: ${error?.message ?? error}`);
     }

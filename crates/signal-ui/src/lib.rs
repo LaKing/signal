@@ -52,6 +52,7 @@ pub mod player;
 mod server;
 pub mod setup;
 pub mod snapshot;
+pub mod stacks;
 
 use std::path::{Path, PathBuf};
 

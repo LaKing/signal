@@ -248,6 +248,110 @@ impl Host {
         }))
     }
 
+    /// `stack.export` (ADR 0051 §10): Stack `stack` of `ui/plane.toml`
+    /// saved as a project in the new or empty folder `path` (absolute)
+    /// ([`crate::stacks::export_stack`]); the project is only read.
+    pub(super) fn stack_export(&self, message: &Value) -> Result<Value, Failure> {
+        let stack = message
+            .get("stack")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "stack.export needs `stack`"))?;
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                fail(
+                    "bad-message",
+                    "stack.export needs `path`, an absolute folder",
+                )
+            })?;
+        let busy = path.exists()
+            && fs::read_dir(&path)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(true);
+        if busy {
+            return Err(fail(
+                "bad-value",
+                format!("{} exists and is not empty", path.display()),
+            ));
+        }
+        let files = crate::stacks::export_stack(&self.opening.dir, stack, &path)
+            .map_err(|e| fail("bad-value", e))?;
+        for (relative, text) in &files {
+            let full = path.join(relative);
+            if let Some(dir) = full.parent() {
+                fs::create_dir_all(dir)
+                    .map_err(|e| fail("write-failed", format!("{}: {e}", dir.display())))?;
+            }
+            transaction::write_atomic(&full, text.as_bytes())
+                .map_err(|e| fail("write-failed", format!("{}: {e}", full.display())))?;
+        }
+        Ok(json!({
+            "type": "stack.exported",
+            "stack": stack,
+            "path": path.display().to_string(),
+            "written": files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// `stack.import` (ADR 0051 §10): the Stack project in folder `path`
+    /// copied in as a new Stack ([`crate::stacks::import_stack`]) by
+    /// `signal vendor`'s all-or-nothing writer, while `project.toml` is
+    /// the version `base` names.
+    pub(super) fn stack_import(&mut self, message: &Value) -> Result<Value, Failure> {
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                fail(
+                    "bad-message",
+                    "stack.import needs `path`, an absolute folder",
+                )
+            })?;
+        let base = message.get("base").and_then(Value::as_str).ok_or_else(|| {
+            fail(
+                "bad-message",
+                "stack.import needs `base`, the SHA-256 of project.toml",
+            )
+        })?;
+        let now = signal_project::read_regular(self.opening.dir.join(PROJECT_FILE))
+            .ok()
+            .map(|bytes| sha256_hex(&bytes));
+        if now.as_deref() != Some(base) {
+            return Err(fail_with(
+                "conflict",
+                format!("{PROJECT_FILE} changed since the version the import names"),
+                json!({"file": PROJECT_FILE, "base": now}),
+            ));
+        }
+        let (copies, edits, stack) = crate::stacks::import_stack(&self.opening.dir, &path)
+            .map_err(|e| fail("bad-value", e))?;
+        let library = signal_project::Library::builtin();
+        let prepared = vendor::Prepared::new(&self.opening.dir, copies, edits, library)
+            .map_err(|e| fail("does-not-load", e.to_string()))?;
+        if let Some(file) = prepared.paths().find(|file| self.linked_file(file)) {
+            return Err(fail(
+                "write-failed",
+                format!("nothing was imported: {file} is reached through a link"),
+            ));
+        }
+        let written = vendor::write(&self.opening.dir, prepared, library)
+            .map_err(|e| fail("write-failed", e.to_string()))?;
+        if self.run.is_none() {
+            self.push_graph(false);
+        }
+        Ok(json!({
+            "type": "stack.imported",
+            "stack": stack,
+            "copied": written.copied,
+            "rewritten": written.rewritten,
+        }))
+    }
+
     /// `slot.import` (ADR 0051 §10, Link): the `slot.add` op that adds a
     /// slot loading the project in folder `path` (absolute), written
     /// relative to the open project, its interface the project's exports
@@ -272,7 +376,7 @@ impl Host {
         if target == own {
             return Err(fail("bad-value", "a project cannot hold itself"));
         }
-        let load = relative_path(&own, &target).ok_or_else(|| {
+        let load = crate::stacks::relative_folder(&own, &target).ok_or_else(|| {
             fail(
                 "bad-value",
                 "the folder cannot be written relative to the project",
@@ -957,33 +1061,9 @@ impl Host {
     }
 }
 
-/// `to` relative to the folder `from` (both canonical): `./x`, `../x`,
-/// `../../a/b`; `None` when they share no root.
-fn relative_path(from: &Path, to: &Path) -> Option<String> {
-    let a: Vec<_> = from.components().collect();
-    let b: Vec<_> = to.components().collect();
-    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    if common == 0 {
-        return None;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    for _ in common..a.len() {
-        parts.push("..".to_owned());
-    }
-    for c in b.get(common..).unwrap_or(&[]) {
-        parts.push(c.as_os_str().to_string_lossy().into_owned());
-    }
-    let text = parts.join("/");
-    Some(if text.starts_with("..") {
-        text
-    } else {
-        format!("./{text}")
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::relative_path;
+    use crate::stacks::relative_folder as relative_path;
     use std::path::Path;
 
     #[test]

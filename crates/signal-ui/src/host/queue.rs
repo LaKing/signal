@@ -71,7 +71,8 @@ pub(super) fn class_of(kind: &str, message: &Value) -> Class {
         | "panel.write"
         | "pattern.write"
         | "file.write"
-        | "vendor" => (true, Order::Write),
+        | "vendor"
+        | "stack.import" => (true, Order::Write),
         // Messages that save, revert or replace the open project: a stale
         // `generation` or `projectId` on one is refused as on any mutation
         // (ADR 0049), so a page of an earlier opening can neither discard

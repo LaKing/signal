@@ -264,9 +264,87 @@ fn an_instrument_is_saved_imported_and_copied(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0051 §10: a Stack saved as a project (`stack.export`) and imported
+/// back as a second Stack (`stack.import`): its slot renamed, its own
+/// inside with it, the plane's new Stack to the right.
+fn a_stack_is_saved_and_imported(transport: Transport) {
+    let mut rig = tone("file-stack", transport);
+    let (mut ws, _) = rig.client();
+    let base = |rig: &Rig| {
+        json!(sha256_hex(
+            fs::read_to_string(rig.dir.join("project.toml"))
+                .unwrap()
+                .as_bytes()
+        ))
+    };
+    let b = base(&rig);
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "patch", "level": "", "base": b, "ops": [{"op": "slot.make", "slot": "voice", "instances": ["a", "b", "sum"]}]}),
+        "patched",
+    );
+    fs::create_dir_all(rig.dir.join("ui")).unwrap();
+    fs::write(
+        rig.dir.join("ui/plane.toml"),
+        "schema_version = 1\n\n[[stack]]\nname = \"main\"\nat = [0, 0]\nwidth = 160\ninstruments = [\"voice\"]\n",
+    )
+    .unwrap();
+    let saved = rig.dir.parent().unwrap().join("main-saved");
+    let exported = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "stack.export", "stack": "main", "path": saved.display().to_string()}),
+        "stack.exported",
+    );
+    let written: Vec<&str> = exported["written"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for file in [
+        "project.toml",
+        "composites/voice_inside.toml",
+        "ui/main.html",
+        "ui/plane.toml",
+    ] {
+        assert!(written.contains(&file), "{file}: {written:?}");
+    }
+    let text = fs::read_to_string(saved.join("project.toml")).unwrap();
+    assert!(
+        text.contains("[exports]") && text.contains("voice_sum_out = \"voice.sum_out\""),
+        "{text}"
+    );
+    let b = base(&rig);
+    let imported = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "stack.import", "path": saved.display().to_string(), "base": b}),
+        "stack.imported",
+    );
+    assert_eq!(imported["stack"], "main_2");
+    let project = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(
+        project.contains("voice_2 = { slot = {") && project.contains("load = \"voice_2_inside\""),
+        "{project}"
+    );
+    let inside = fs::read_to_string(rig.dir.join("composites/voice_2_inside.toml")).unwrap();
+    assert!(inside.contains("inside_of = \"voice_2\""), "{inside}");
+    let plane = fs::read_to_string(rig.dir.join("ui/plane.toml")).unwrap();
+    assert!(
+        plane.contains("name = \"main_2\"")
+            && plane.contains("at = [200, 0]")
+            && plane.contains("\"voice_2\""),
+        "{plane}"
+    );
+    rig.finish();
+}
+
 both!(
     a_write_is_applied_live,
     refusals_write_nothing,
     vendor_copies_a_library_composite,
     an_instrument_is_saved_imported_and_copied,
+    a_stack_is_saved_and_imported,
 );
