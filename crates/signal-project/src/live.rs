@@ -448,6 +448,20 @@ fn same_sink(
             ),
         )]);
     }
+    same_sides(old, before, new, plan)
+}
+
+/// An edit keeps the running project's play and capture sides with their
+/// roles (`old` planned as `before`, `new` as `plan`): the run routes them
+/// when it starts. Checked for every live edit, a parameter-only one too
+/// (the audit of 2026-11-14: a re-role changes no instance, connection or
+/// value, so it diffed as no change and was accepted).
+fn same_sides(
+    old: &Project,
+    before: &signal_graph::ExecutionPlan,
+    new: &Project,
+    plan: &signal_graph::ExecutionPlan,
+) -> Result<(), Vec<crate::Diagnostic>> {
     // ADR 0038: the run routes its play sides when it starts (and the engine
     // keeps a run's sinks): adding, removing or re-roling one needs a
     // restart.
@@ -527,7 +541,10 @@ pub fn check_edit(
         }
     };
     let options = crate::DiffOptions::default();
+    let devices_changed = old.device_slots() != new.device_slots();
     match crate::diff::diff_plans(old, before, new, planned, &options)? {
+        // The same instances: a changed device slot is a changed role.
+        ProjectEdit::Parameters(_) if devices_changed => same_sides(old, before, new, before),
         ProjectEdit::Parameters(_) => Ok(()),
         ProjectEdit::Structural { plan, .. } => same_sink(old, before, new, &plan),
     }
@@ -586,6 +603,11 @@ pub fn send_edit_with_bases(
     let replaced = replaced_slots(old, &new, registry);
     match edit {
         ProjectEdit::Parameters(changes) if replaced.is_empty() => {
+            // The same instances: a changed device slot is a changed role.
+            if old.device_slots() != new.device_slots() {
+                let before = old.plan(registry).map_err(EditError::Invalid)?.plan;
+                same_sides(old, &before, &new, &before).map_err(EditError::Invalid)?;
+            }
             controller.poll(&mut Both(live, observer));
             room(controller, changes.len())?;
             for change in changes {

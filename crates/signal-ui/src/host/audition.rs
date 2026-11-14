@@ -45,9 +45,11 @@ impl Auditions {
         self.releases.remove(&(port.clone(), key));
         let held = self.held.entry(client).or_default();
         if on {
-            // One held note per port and client: a new one takes over,
-            // as the sequencer's voice does.
-            held.retain(|(p, _)| *p != port);
+            // Every key held is kept, also several on one port: the
+            // sequencer's poly `notes` output holds each (the audit of
+            // 2026-11-14), and an off of a key the mono voice no longer
+            // sounds leaves it as it is, so ending all of them is right
+            // for both.
             held.insert((port, key));
         } else {
             // Only the key held ends: an off of a key slid away from (or

@@ -438,6 +438,32 @@ pub fn import_stack(dir: &Path, source: &Path) -> Result<Imported, String> {
             names.insert(name.to_owned(), new);
         }
     }
+    // An identical composite of the host stands for the incoming one only
+    // while what it refers to keeps its name (the audit of 2026-11-14).
+    let mut reused: Vec<String> = modules
+        .iter()
+        .filter(|(name, new)| {
+            let path = format!("composites/{name}.toml");
+            name == new
+                && host_files.contains_key(&path)
+                && host_files.get(&path) == from.get(&path)
+        })
+        .map(|(name, _)| format!("composites/{name}.toml"))
+        .collect();
+    let texts: BTreeMap<String, String> = modules
+        .keys()
+        .filter_map(|name| {
+            from.get(&format!("composites/{name}.toml"))
+                .map(|t| (name.clone(), t.clone()))
+        })
+        .collect();
+    signal_project::vendor::settle_reuse(
+        &mut modules,
+        &pattern_names,
+        &texts,
+        &mut reused,
+        &|name| format!("{stack}_{name}"),
+    );
     let mut inside_names: BTreeMap<String, String> = BTreeMap::new();
     for (load, slot) in &insides {
         let new_slot = lookup(&renamed, slot)?;

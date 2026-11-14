@@ -415,6 +415,19 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
             names.insert(name.to_owned(), new);
         }
     }
+    let texts: BTreeMap<String, String> = source
+        .iter()
+        .filter_map(|f| {
+            let name = f
+                .path
+                .strip_prefix(&format!("{COMPOSITES}/"))?
+                .strip_suffix(".toml")?;
+            Some((name.to_owned(), f.text.clone()))
+        })
+        .collect();
+    settle_reuse(&mut renamed, &patterns, &texts, &mut reused, &|name| {
+        format!("{slot}_{name}")
+    });
     let inside = crate::inside::default_name("", slot, &|n| {
         taken(&format!("{COMPOSITES}/{n}.toml")) || renamed.values().any(|v| v == n)
     });
@@ -509,6 +522,73 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
         return Err(VendorError::Invalid(diagnostics));
     }
     Ok(prepared)
+}
+
+/// The local composites (`module`, a slot's module `load`) and patterns a
+/// definition's text refers to.
+fn local_refs(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut modules = Vec::new();
+    let mut patterns = Vec::new();
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return (modules, patterns);
+    };
+    if let Some(instances) = table.get("instances").and_then(toml::Value::as_table) {
+        for entry in instances.values() {
+            if let Some(module) = entry.get("module").and_then(toml::Value::as_str) {
+                modules.push(module.to_owned());
+            }
+            if entry.get("slot").is_some()
+                && let Some(load) = entry.get("load").and_then(toml::Value::as_str)
+                && !crate::is_project_path(load)
+            {
+                modules.push(load.to_owned());
+            }
+            if let Some(pattern) = entry.get("pattern").and_then(toml::Value::as_str) {
+                patterns.push(pattern.to_owned());
+            }
+        }
+    }
+    (modules, patterns)
+}
+
+/// Settles which incoming composites the host's identical files may stand
+/// for (the audit of 2026-11-14): `composites` and `patterns` map each
+/// incoming name to the name it gets (its own when the host has the same
+/// text, which `reused` lists by path, or none); `texts` are the incoming
+/// composites by name. A reused composite one of whose local references
+/// (`module`, a slot's `load`, `pattern`) gets another name would resolve
+/// the host's file of that name, not its own: it is copied too, under
+/// `fresh(name)`, and so on until nothing changes. The host's files are
+/// never rewritten.
+pub fn settle_reuse(
+    composites: &mut BTreeMap<String, String>,
+    patterns: &BTreeMap<String, String>,
+    texts: &BTreeMap<String, String>,
+    reused: &mut Vec<String>,
+    fresh: &dyn Fn(&str) -> String,
+) {
+    loop {
+        let mut changed = false;
+        for (name, text) in texts {
+            let path = format!("{COMPOSITES}/{name}.toml");
+            if !reused.contains(&path) {
+                continue;
+            }
+            let (modules, pats) = local_refs(text);
+            let moved = modules
+                .iter()
+                .any(|m| composites.get(m).is_some_and(|n| n != m))
+                || pats.iter().any(|p| patterns.get(p).is_some_and(|n| n != p));
+            if moved {
+                reused.retain(|r| *r != path);
+                composites.insert(name.clone(), fresh(name));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// ADR 0035 §11: the top-level include `key` of the project in `dir`
@@ -615,6 +695,19 @@ pub fn prepare_include(
             names.insert(stem.to_owned(), new);
         }
     }
+    let texts: BTreeMap<String, String> = source
+        .iter()
+        .filter_map(|f| {
+            let name = f
+                .path
+                .strip_prefix(&format!("{COMPOSITES}/"))?
+                .strip_suffix(".toml")?;
+            Some((name.to_owned(), f.text.clone()))
+        })
+        .collect();
+    settle_reuse(&mut renamed, &patterns, &texts, &mut reused, &|stem| {
+        format!("{top}_{stem}")
+    });
     let composite_path = format!("{COMPOSITES}/{top}.toml");
     if taken(&composite_path) || renamed.values().any(|v| *v == top) {
         return Err(VendorError::Exists(composite_path));

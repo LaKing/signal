@@ -243,3 +243,92 @@ both!(
     a_client_evicted_with_a_note_held_ends_it_once_the_queue_has_room,
     a_queued_note_of_a_client_gone_is_not_left_sounding,
 );
+
+#[test]
+fn audit_disconnect_releases_every_polyphonic_audition_note() {
+    let source =
+        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("audit-poly-audition-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("project.toml"),
+        r#"schema_version = 1
+[project]
+name = "poly-audition"
+sample_rate = 48000
+[instances]
+melody = { module = "std.note_seq" }
+alloc = { module = "std.voice_alloc", voices = 2 }
+gates = { module = "std.unpack64" }
+out = { module = "std.audio_out" }
+[wiring]
+connections = [
+ { from = "melody.notes", to = "alloc.notes" },
+ { from = "alloc.gate", to = "gates.in" },
+]
+"#,
+    )
+    .unwrap();
+    let mut rig = rig(
+        "audit-poly-audition",
+        Options {
+            transport: Transport::Local,
+            project: Some(source),
+            ..Options::default()
+        },
+    );
+    let (mut watcher, _) = rig.client();
+    let scope = rig.request(
+        &mut watcher,
+        1,
+        json!({"type":"subscribe","stream":"scope","port":"/gates.e0","rate":4800}),
+        "subscribed",
+    );
+    let sub = scope["sub"].as_u64().unwrap();
+    let second = rig.request(
+        &mut watcher,
+        2,
+        json!({"type":"subscribe","stream":"scope","port":"/gates.e1","rate":4800}),
+        "subscribed",
+    );
+    let second = second["sub"].as_u64().unwrap();
+    let (mut holder, _) = rig.client();
+    for (id, key) in [(1, 60), (2, 64)] {
+        rig.request(
+            &mut holder,
+            id,
+            json!({"type":"note","address":"/melody.audition","key":key,"velocity":0.5,"on":true}),
+            "ack",
+        );
+    }
+    gate(&mut rig, &mut watcher, sub, 1.0, "first poly voice held");
+    gate(
+        &mut rig,
+        &mut watcher,
+        second,
+        1.0,
+        "second poly voice held",
+    );
+    drop(holder);
+    let until = Instant::now() + Duration::from_millis(400);
+    let mut last = None;
+    let mut last_second = None;
+    while Instant::now() < until {
+        rig.pump();
+        while let Some(got) = receive(&mut watcher) {
+            if let Some(f) = got.frame(SCOPE, sub) {
+                last = f.f32s().last().copied();
+            }
+            if let Some(f) = got.frame(SCOPE, second) {
+                last_second = f.f32s().last().copied();
+            }
+        }
+    }
+    eprintln!("voice gates after holder disconnect: {last:?}, {last_second:?}");
+    assert_eq!(last_second, Some(0.0), "disconnect cleanup has run");
+    rig.finish();
+    assert_eq!(
+        last,
+        Some(0.0),
+        "the first audition note stays held after its client disconnects"
+    );
+}

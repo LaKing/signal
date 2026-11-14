@@ -229,14 +229,16 @@ fn compose(a: &[f64], b: &[f64], x: usize, y: usize, z: usize) -> Vec<f64> {
 /// The `itu` downmix from `from` to a smaller `to`: the direct row, else the
 /// composition of steps down; `None` when `to` is not below `from`.
 fn downmix(from: &str, to: &str) -> Option<Vec<f64>> {
-    if let Some(named) = direct_row(from, to) {
-        return Some(dense(from, to, &named));
-    }
     let width = |l: &str| layout_channels(l).map_or(0, <[_]>::len);
     let mut at = from;
     let mut rows: Option<Vec<f64>> = None;
     while at != to {
-        let (next, named) = step_down(at)?;
+        // A direct row from here to `to` (5.1 → quad, also after 7.1 → 5.1:
+        // the audit of 2026-11-14), else the next step down.
+        let (next, named) = match direct_row(at, to) {
+            Some(named) => (to, named),
+            None => step_down(at)?,
+        };
         let step = dense(at, next, &named);
         rows = Some(match rows {
             None => step,
@@ -524,6 +526,15 @@ mod tests {
                     let m = m.unwrap();
                     assert_eq!(m.rows.len(), m.to_width() * m.from_width(), "{from} → {to}");
                     assert!(m.rows.iter().all(|c| c.is_finite()));
+                    // A fold-down loses no channel but the LFE (the audit of
+                    // 2026-11-14: 7.1 → quad lost C, Ls and Rs).
+                    if folds(from, to) {
+                        let w = m.from_width();
+                        for (s, name) in layout_channels(from).unwrap().iter().enumerate() {
+                            let reached = (0..m.to_width()).any(|t| m.rows[t * w + s] != 0.0);
+                            assert!(reached || *name == "lfe", "{from} → {to}: {name} lost");
+                        }
+                    }
                 }
             }
         }
