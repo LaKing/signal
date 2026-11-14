@@ -13,6 +13,7 @@ mod mcp;
 mod play;
 mod render;
 mod replay;
+mod slot_export;
 mod snapshot;
 mod ui;
 mod vendor;
@@ -81,6 +82,10 @@ enum Command {
     /// project's composites/, as the project's own text, and point the
     /// project's references at the copies (ADR 0027 §4).
     Vendor(vendor::VendorArgs),
+    /// Save a top-level slot as a project of its own in a new folder (ADR
+    /// 0046 §9, ADR 0051 §10): its content as the project, its interface as
+    /// `[exports]`, its part as `ui/main.html`.
+    SlotExport(slot_export::SlotExportArgs),
     /// A project's snapshots (ADR 0041): list, save, restore, undo or delete
     /// the values of its top-level parameters stored under a name in
     /// snapshots.toml, and exclude a control from them.
@@ -269,6 +274,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Pack(args) => files::pack(args, cli.json),
         Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Vendor(args) => vendor::run(args, cli.json),
+        Command::SlotExport(args) => slot_export::run(args, cli.json),
         Command::Snapshot(args) => snapshot::run(args, &registry, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),

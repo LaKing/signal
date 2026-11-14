@@ -34,6 +34,7 @@ pub mod archive;
 pub mod device;
 mod diagnostic;
 mod diff;
+pub mod export;
 mod include;
 pub mod inside;
 mod library;
@@ -2083,17 +2084,15 @@ fn definition(
                     ));
                 }
             }
+            // ADR 0051 §10: a slot loading a module may have a seed too (a
+            // project imported as its own inside keeps its streams); an
+            // empty slot has nothing to seed.
             if let (Some(slot), Some((_, span))) = (&slot, &seed)
-                && slot
-                    .load
-                    .as_ref()
-                    .is_none_or(|(load, _)| !is_project_path(load))
+                && slot.load.is_none()
             {
                 problems.push((
                     span.start,
-                    format!(
-                        "{instance}: `seed` is a project's seed scope; this slot loads no project"
-                    ),
+                    format!("{instance}: `seed` is a seed scope; this slot holds nothing"),
                 ));
             }
             let set = entry

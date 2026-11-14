@@ -1821,6 +1821,81 @@ fn make_instrument_on_the_studio_keeps_its_audio() {
     );
 }
 
+/// ADR 0051 §10, test 8: an instrument travels. The studio's drum machine
+/// made an instrument, saved as a project (`signal slot-export`), linked
+/// back (`load = "<path>"`), then copied in as the slot's own inside
+/// (`signal vendor --slot`): the studio's audio bit for bit at each step,
+/// and its panels check.
+#[test]
+fn an_instrument_saved_linked_and_copied_back_keeps_the_studio_s_audio() {
+    let signal = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let hash = |dir: &std::path::Path, name: &str| -> serde_json::Value {
+        let out = dir.join(name);
+        signal(&[
+            "render",
+            dir.to_str().unwrap(),
+            "--seconds",
+            "4",
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap())
+                .unwrap();
+        manifest["audio_fnv1a64"].clone()
+    };
+    let dir = mcp_common::copy_of("studio", "mcp-travel");
+    let original = hash(&dir, "r0");
+    let mut mcp = Mcp::started(&dir, &[]);
+    let drums = [
+        "drums", "kick", "snare", "clap", "hats", "tom", "rim", "cymbal", "drum_a", "drum_b",
+    ];
+    mcp.ok("slot_make", json!({"slot": "rhythm", "instances": drums}));
+    assert!(mcp.finish().success());
+    assert_eq!(hash(&dir, "r1"), original, "made");
+    // Saved as a project of its own beside the studio.
+    let saved = dir.parent().unwrap().join("rhythm-saved");
+    let _ = std::fs::remove_dir_all(&saved);
+    signal(&[
+        "slot-export",
+        dir.to_str().unwrap(),
+        "rhythm",
+        "--out",
+        saved.to_str().unwrap(),
+    ]);
+    let panel = std::fs::read_to_string(saved.join("ui/main.html")).unwrap();
+    assert!(
+        panel.contains("bind=\"/kick.tune\"") && !panel.contains("part="),
+        "{panel}"
+    );
+    // Linked: the slot loads the saved project.
+    let text = std::fs::read_to_string(dir.join("project.toml")).unwrap();
+    let linked = text.replace(
+        "load = \"rhythm_inside\", seed = \"run\"",
+        "load = \"../rhythm-saved\"",
+    );
+    assert_ne!(linked, text);
+    std::fs::write(dir.join("project.toml"), &linked).unwrap();
+    assert_eq!(hash(&dir, "r2"), original, "linked");
+    // Copied in: its own inside again, with the project's seed.
+    signal(&["vendor", dir.to_str().unwrap(), "--slot", "rhythm"]);
+    let copied = std::fs::read_to_string(dir.join("project.toml")).unwrap();
+    assert!(copied.contains("load = \"rhythm_inside_2\""), "{copied}");
+    assert_eq!(hash(&dir, "r3"), original, "copied");
+    signal(&["ui", "check", dir.to_str().unwrap()]);
+}
+
 /// ADR 0044 §6–7, test 10: a poly slot's allocator is structure: its
 /// `voices` is no control and `set_parameter` refuses it; `slot_voices`
 /// changes the count in the file, applied live.

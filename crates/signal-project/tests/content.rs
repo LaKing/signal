@@ -1211,8 +1211,8 @@ fn slot_and_project_keys_are_checked() {
             "`seed` applies to an included project or a slot",
         ),
         (
-            r#"{ slot = "lib.voice", load = "voice", seed = 1 }"#,
-            "`seed` is a project's seed scope; this slot loads no project",
+            r#"{ slot = "lib.voice", seed = 1 }"#,
+            "`seed` is a seed scope; this slot holds nothing",
         ),
         (
             r#"{ slot = "lib.voice", load = "voice", gpu = "0" }"#,

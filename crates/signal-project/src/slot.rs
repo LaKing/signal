@@ -1435,7 +1435,21 @@ fn resolve_def(
         let Some(slot) = &content.slot else {
             continue;
         };
-        let inherit_seed = content.inherit_seed.is_some();
+        // ADR 0051 §5, §10: a slot loading a module with `seed` is a scope
+        // root, the run's seed (`"run"`) or its own.
+        let scope_seed = if content.inherit_seed.is_some() {
+            Some(None)
+        } else {
+            content
+                .seed
+                .clone()
+                .filter(|_| {
+                    slot.load
+                        .as_ref()
+                        .is_some_and(|(load, _)| !crate::is_project_path(load))
+                })
+                .map(|(seed, _)| Some(seed))
+        };
         let Some(interface) = interfaces.get(slot_name.as_str()).copied() else {
             // Its interface did not resolve (reported): nothing of it plans.
             renames.insert(slot_name, (false, BTreeMap::new()));
@@ -1891,10 +1905,10 @@ fn resolve_def(
         }
         // ADR 0051 §5: a scope root inheriting the run's seed, so what it
         // holds draws the streams it drew at the level above.
-        if inherit_seed
+        if let Some(seed) = scope_seed
             && let Some(instance) = out.def.instances.iter_mut().find(|i| i.name == *slot_name)
         {
-            instance.scope = Some(signal_graph::ScopeDef { seed: None });
+            instance.scope = Some(signal_graph::ScopeDef { seed });
         }
         if let Some((voices, voices_at)) = poly {
             let definition = poly_name(name, slot_name);

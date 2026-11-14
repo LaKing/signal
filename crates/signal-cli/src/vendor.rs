@@ -15,8 +15,15 @@ use crate::{Failure, print_stdout};
 pub(crate) struct VendorArgs {
     /// The project folder.
     project: PathBuf,
-    /// The library composite, `lib.<name>` (`signal modules` lists them).
-    composite: String,
+    /// The library composite, `lib.<name>` (`signal modules` lists them);
+    /// none with `--slot`.
+    #[arg(required_unless_present = "slot")]
+    composite: Option<String>,
+    /// ADR 0037 phase 4, ADR 0051 §10: instead, make top-level slot SLOT,
+    /// which links a project (`load = "<path>"`), hold its own copy of it
+    /// (its inside, composites, patterns and panel as the slot's part).
+    #[arg(long, conflicts_with_all = ["composite", "name"])]
+    slot: Option<String>,
     /// The name of the copy (default: its name without `lib.`). The library
     /// composites it uses keep their names without `lib.`.
     #[arg(long = "as")]
@@ -25,12 +32,21 @@ pub(crate) struct VendorArgs {
 
 /// `signal vendor`.
 pub(crate) fn run(args: &VendorArgs, json: bool) -> Result<(), Failure> {
-    let vendored = vendor::vendor(
-        &args.project,
-        &args.composite,
-        args.name.as_deref(),
-        Library::builtin(),
-    )
+    let vendored = match (&args.slot, &args.composite) {
+        (Some(slot), _) => vendor::prepare_slot(&args.project, slot, Library::builtin())
+            .and_then(|prepared| vendor::write(&args.project, prepared, Library::builtin())),
+        (None, Some(composite)) => vendor::vendor(
+            &args.project,
+            composite,
+            args.name.as_deref(),
+            Library::builtin(),
+        ),
+        (None, None) => {
+            return Err(Failure::Usage(
+                "name a library composite, or a slot with --slot".to_owned(),
+            ));
+        }
+    }
     .map_err(|error| match error {
         // A conflict is a runtime failure of the files, not of the arguments.
         VendorError::Io { .. } | VendorError::Changed(_) => Failure::Io(error.to_string()),

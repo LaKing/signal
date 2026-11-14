@@ -289,6 +289,247 @@ pub fn prepare(
     Ok(prepared)
 }
 
+/// ADR 0037 phase 4, ADR 0051 §10 (import): slot `slot` of the project in
+/// `dir`, which links a project (`load = "<path>"`), made to hold its own
+/// copy of it: the linked project's `project.toml` becomes the slot's own
+/// inside (`composites/<slot>_inside.toml`, `inside_of = "<slot>"`, its
+/// instances, connections and exports), its composites and patterns are
+/// copied into the host (one with a name the host has with another text
+/// is copied as `<slot>_<name>`, and the references to it rewritten), its
+/// `ui/main.html` becomes the slot's part (`ui/parts/<slot>.html`), each
+/// binding on a port an export reaches rebound to the export (`.name`),
+/// and the slot loads the copy with the project's seed scope as its
+/// `seed`, so it plays what the link played, bit for bit.
+pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepared, VendorError> {
+    let files = project_sources(dir)?;
+    let host_text = files
+        .iter()
+        .find(|f| f.path == PROJECT_FILE)
+        .map(|f| f.text.clone())
+        .unwrap_or_default();
+    let mut host = parse(PROJECT_FILE, &host_text)?;
+    let invalid = |m: String| VendorError::InvalidName(m);
+    let entry = host
+        .get("instances")
+        .and_then(|i| i.get(slot))
+        .and_then(Item::as_value)
+        .and_then(Value::as_inline_table)
+        .ok_or_else(|| invalid(format!("no slot `{slot}` written inline at the top level")))?;
+    if entry.get("slot").is_none() {
+        return Err(invalid(format!("`{slot}` is not a slot")));
+    }
+    if entry.get("map").is_some() {
+        return Err(invalid(format!(
+            "`{slot}` has a `map`: copy it after removing the map"
+        )));
+    }
+    let load = entry
+        .get("load")
+        .and_then(Value::as_str)
+        .filter(|l| crate::is_project_path(l))
+        .ok_or_else(|| invalid(format!("`{slot}` links no project (`load = \"<path>\"`)")))?
+        .to_owned();
+    let source_dir = dir.join(&load);
+    let source = project_sources(&source_dir)?;
+    let text = |path: &str| {
+        source
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.text.clone())
+    };
+    let source_project = parse(
+        &format!("{load}/{PROJECT_FILE}"),
+        &text(PROJECT_FILE).unwrap_or_default(),
+    )?;
+    let seed = match entry.get("seed").and_then(Value::as_integer) {
+        Some(seed) => seed,
+        None => source_project
+            .get("project")
+            .and_then(|p| p.get("seed"))
+            .and_then(Item::as_integer)
+            .unwrap_or(0),
+    };
+    let have = |path: &str| {
+        files
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.text.clone())
+    };
+    let taken = |path: &str| have(path).is_some() || dir.join(path).exists();
+
+    // The names: a composite or pattern the host has with another text is
+    // copied under `<slot>_<name>`.
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+    let mut patterns: BTreeMap<String, String> = BTreeMap::new();
+    let mut copies: Vec<(String, String)> = Vec::new();
+    let mut reused: Vec<String> = Vec::new();
+    for file in &source {
+        for (prefix, names) in [(COMPOSITES, &mut renamed), ("patterns", &mut patterns)] {
+            let Some(name) = file
+                .path
+                .strip_prefix(&format!("{prefix}/"))
+                .and_then(|n| n.strip_suffix(".toml"))
+            else {
+                continue;
+            };
+            let path = format!("{prefix}/{name}.toml");
+            let new = match have(&path) {
+                Some(existing) if existing == file.text => {
+                    reused.push(path);
+                    name.to_owned()
+                }
+                Some(_) => format!("{slot}_{name}"),
+                None => name.to_owned(),
+            };
+            names.insert(name.to_owned(), new);
+        }
+    }
+    let inside = crate::inside::default_name("", slot, &|n| {
+        taken(&format!("{COMPOSITES}/{n}.toml")) || renamed.values().any(|v| v == n)
+    });
+    let retarget = |document: &mut DocumentMut| {
+        rewrite(document, &renamed);
+        if let Some(instances) = document
+            .get_mut("instances")
+            .and_then(Item::as_table_like_mut)
+        {
+            for (_, entry) in instances.iter_mut() {
+                if let Some(pattern) = entry.as_table_like_mut().and_then(|e| e.get_mut("pattern"))
+                    && let Some(new) = pattern.as_str().and_then(|p| patterns.get(p)).cloned()
+                {
+                    replace(pattern, &new);
+                }
+            }
+        }
+    };
+    for file in &source {
+        for (prefix, names) in [(COMPOSITES, &renamed), ("patterns", &patterns)] {
+            let Some(name) = file
+                .path
+                .strip_prefix(&format!("{prefix}/"))
+                .and_then(|n| n.strip_suffix(".toml"))
+            else {
+                continue;
+            };
+            let new = names.get(name).cloned().unwrap_or_else(|| name.to_owned());
+            let path = format!("{prefix}/{new}.toml");
+            if reused.contains(&path) {
+                continue;
+            }
+            let mut document = parse(&file.path, &file.text)?;
+            if prefix == COMPOSITES {
+                if let Some(item) = document
+                    .get_mut("composite")
+                    .and_then(Item::as_table_like_mut)
+                    .and_then(|c| c.get_mut("name"))
+                {
+                    replace(item, &new);
+                }
+                retarget(&mut document);
+            }
+            if taken(&path) {
+                return Err(VendorError::Exists(path));
+            }
+            copies.push((path, document.to_string()));
+        }
+    }
+
+    // The inside: the linked project's text as a composite.
+    let mut document = source_project.clone();
+    document.remove("schema_version");
+    document.remove("project");
+    retarget(&mut document);
+    let inside_text = format!(
+        "schema_version = 1\n\n[composite]\nname = {}\ninside_of = {}\n\n{}",
+        Value::from(inside.as_str()),
+        Value::from(slot),
+        document.to_string().trim_start()
+    );
+    copies.push((format!("{COMPOSITES}/{inside}.toml"), inside_text));
+
+    // The part: its panel, rebound on the exports.
+    // A part the slot has already is kept.
+    let part = format!("ui/parts/{slot}.html");
+    if let Ok(panel) = crate::read_regular_to_string(source_dir.join("ui/main.html"))
+        && !dir.join(&part).exists()
+    {
+        copies.push((part, part_of(&panel, slot, &source_project)));
+    }
+
+    // The slot loads the copy, with the seed scope it had.
+    let table = host
+        .get_mut("instances")
+        .and_then(|i| i.get_mut(slot))
+        .and_then(Item::as_value_mut)
+        .and_then(Value::as_inline_table_mut)
+        .ok_or_else(|| invalid(format!("no slot `{slot}`")))?;
+    table.insert("load", Value::from(inside.as_str()));
+    table.insert("seed", Value::from(seed));
+    let edits = vec![(PROJECT_FILE.to_owned(), host.to_string())];
+    let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
+    let prepared = Prepared {
+        copies,
+        edits,
+        reused,
+        files,
+        loaded_before,
+    };
+    if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+        return Err(VendorError::Invalid(diagnostics));
+    }
+    Ok(prepared)
+}
+
+/// A project's panel as the part of slot `slot` holding it: the marker
+/// written, each binding on a port an export of `project` reaches rebound
+/// to that export (`.name`), the others kept (paths inside the content).
+fn part_of(panel: &str, slot: &str, project: &DocumentMut) -> String {
+    let mut exports: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(roles) = project.get("exports").and_then(Item::as_table_like) {
+        for (_, role) in roles.iter() {
+            let Some(role) = role.as_table_like() else {
+                continue;
+            };
+            for (name, value) in role.iter() {
+                let targets: Vec<String> = match value.as_value() {
+                    Some(Value::String(s)) => vec![s.value().clone()],
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for target in targets {
+                    exports
+                        .entry(format!("/{target}"))
+                        .or_insert_with(|| format!(".{name}"));
+                }
+            }
+        }
+    }
+    let marked = panel.replacen(
+        "<signal-panel",
+        &format!("<signal-panel part=\"{slot}\""),
+        1,
+    );
+    let mut out = String::with_capacity(marked.len());
+    let mut rest = marked.as_str();
+    while let Some(at) = rest.find("bind=\"") {
+        let (before, after) = rest.split_at(at + "bind=\"".len());
+        out.push_str(before);
+        let end = after.find('"').unwrap_or(after.len());
+        let rebound: Vec<String> = after[..end]
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|a| !a.is_empty())
+            .map(|a| exports.get(a).cloned().unwrap_or_else(|| a.to_owned()))
+            .collect();
+        out.push_str(&rebound.join(" "));
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The first of `dir`'s `relative` path and its folders (below `dir`) that
 /// is a symbolic link, if any.
 fn linked_on_the_way(dir: &Path, relative: &str) -> Option<PathBuf> {
@@ -432,12 +673,15 @@ impl<'d> Written<'d> {
         edits: &[(String, String)],
         files: &[SourceFile],
     ) -> Result<(), VendorError> {
-        if !copies.is_empty() {
-            let folder = self.dir.join(COMPOSITES);
-            fs::create_dir_all(&folder).map_err(|error| VendorError::Io {
-                path: folder,
-                error,
-            })?;
+        // Each copy's folder (`composites/`, and for `vendor --slot`
+        // `patterns/` and `ui/parts/`).
+        for (path, _) in copies {
+            if let Some(folder) = self.dir.join(path).parent() {
+                fs::create_dir_all(folder).map_err(|error| VendorError::Io {
+                    path: folder.to_owned(),
+                    error,
+                })?;
+            }
         }
         let staging = |full: &Path, text: &str| {
             transaction::stage(full, text.as_bytes()).map_err(|error| VendorError::Io {
