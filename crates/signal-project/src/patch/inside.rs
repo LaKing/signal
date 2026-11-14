@@ -149,7 +149,11 @@ impl Patching<'_> {
 
     /// `composites/<name>.toml` set to `text` (`None`: removed); returns the
     /// `composite.file` that undoes it.
-    fn write_inside(&mut self, name: &str, text: Option<String>) -> Result<Op, PatchError> {
+    pub(super) fn write_inside(
+        &mut self,
+        name: &str,
+        text: Option<String>,
+    ) -> Result<Op, PatchError> {
         if name == self.ctx.level {
             return Err(bad(format!(
                 "composites/{name}.toml is this patch's level: its own ops edit it"

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 45] = [
+const TOOLS: [&str; 46] = [
     "project_info",
     "graph",
     "modules",
@@ -52,6 +52,7 @@ const TOOLS: [&str; 45] = [
     "slot_inside",
     "slot_ungroup",
     "slot_group",
+    "slot_make",
     "write_pattern",
     "write_panel",
     "write_file",
@@ -1722,6 +1723,102 @@ fn slot_group_moves_the_controls_into_a_part_and_is_undone() {
     assert_eq!(mcp.file("ui/main.html"), panel);
     assert!(!dir.join("ui/parts/osc.html").exists());
     assert!(mcp.finish().success());
+}
+
+/// ADR 0051 §5: `slot_make` moves two instances into a new slot's own
+/// inside, their panel controls into its part (binds unchanged), and the
+/// reply's inverse undoes every file.
+#[test]
+fn slot_make_makes_an_instrument_and_is_undone() {
+    let text = "schema_version = 1\n\n[project]\nname = \"make\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 220 }\namp = { module = \"std.gain\", db = -6 }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"amp.in\" },\n  { from = \"amp.out\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-make");
+    let panel = "<!doctype html>\n<signal-panel>\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>voice</h2>\n      <signal-knob bind=\"/osc.freq\" label=\"freq\"></signal-knob>\n      <signal-knob bind=\"/amp.db\" label=\"level\"></signal-knob>\n    </section>\n  </div>\n</signal-panel>\n";
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+    std::fs::write(dir.join("ui/main.html"), panel).unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    let made = mcp.ok(
+        "slot_make",
+        json!({"slot": "voice", "instances": ["osc", "amp"]}),
+    );
+    let project = mcp.file("project.toml");
+    assert!(
+        project.contains("voice = { slot = { outputs = { amp_out = {} }, parameters = { osc_freq = {}, amp_db = {} } }, load = \"voice_inside\", seed = \"run\" }"),
+        "{project}"
+    );
+    assert!(
+        project.contains("{ from = \"voice.amp_out\", to = \"out.l\" }"),
+        "{project}"
+    );
+    let inside = mcp.file("composites/voice_inside.toml");
+    assert!(
+        inside.contains("{ from = \"osc.out\", to = \"amp.in\" }"),
+        "{inside}"
+    );
+    let part = std::fs::read_to_string(dir.join("ui/parts/voice.html")).unwrap();
+    // Bound on the slot's own ports: a parameter inside a composite is no control.
+    assert!(
+        part.contains("bind=\".osc_freq\"") && part.contains("bind=\".amp_db\""),
+        "{part}"
+    );
+    assert!(
+        mcp.file("ui/main.html")
+            .contains("<signal-slot bind=\"/voice\">")
+    );
+    mcp.ok("patch", json!({"ops": made["inverse"]}));
+    assert_eq!(mcp.file("project.toml"), text);
+    assert_eq!(mcp.file("ui/main.html"), panel);
+    assert!(!dir.join("ui/parts/voice.html").exists());
+    assert!(!dir.join("composites/voice_inside.toml").exists());
+    assert!(mcp.finish().success());
+}
+
+/// ADR 0051 §5, test 7: Make instrument on the studio's drum machine (its
+/// step sequencer with its pattern and tick events, the seven 909 voices
+/// and their two mixers, hats and cymbal drawing noise)
+/// renders the studio's audio bit for bit; only addresses and the log move.
+#[test]
+fn make_instrument_on_the_studio_keeps_its_audio() {
+    let render = |dir: &std::path::Path, out: &str| -> serde_json::Value {
+        let out = dir.join(out);
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args([
+                "render",
+                dir.to_str().unwrap(),
+                "--seconds",
+                "4",
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap()
+    };
+    let dir = mcp_common::copy_of("studio", "mcp-make-studio");
+    let before = render(&dir, "before");
+    let mut mcp = Mcp::started(&dir, &[]);
+    let drums = [
+        "drums", "kick", "snare", "clap", "hats", "tom", "rim", "cymbal", "drum_a", "drum_b",
+    ];
+    mcp.ok("slot_make", json!({"slot": "rhythm", "instances": drums}));
+    assert!(mcp.finish().success());
+    let project = std::fs::read_to_string(dir.join("project.toml")).unwrap();
+    assert!(project.contains("rhythm = { slot = {"), "{project}");
+    let after = render(&dir, "after");
+    assert_eq!(after["audio_fnv1a64"], before["audio_fnv1a64"]);
+    // The drums' controls moved into the part, and every binding checks.
+    let part = std::fs::read_to_string(dir.join("ui/parts/rhythm.html")).unwrap();
+    assert!(part.contains("bind=\".kick_tune\""), "{part}");
+    let check = std::process::Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(["ui", "check", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
 }
 
 /// ADR 0044 §6–7, test 10: a poly slot's allocator is structure: its

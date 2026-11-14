@@ -33,6 +33,7 @@ use crate::write::{inline, number, standard};
 
 mod group;
 mod inside;
+mod make;
 mod slot;
 
 pub use group::{part_key, part_path};
@@ -333,6 +334,28 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controls: Option<Vec<usize>>,
     },
+    /// ADR 0051 §5: Make instrument, `slot.group` extended to several
+    /// instances of the top level: they move into slot `slot`'s new own
+    /// inside with the connections among them, every connection across
+    /// its boundary through a port of its interface, the slot written with
+    /// `seed = "run"` so their random streams are kept. The host moves the
+    /// panel controls on them into the slot's part.
+    #[serde(rename = "slot.make")]
+    SlotMake {
+        /// The new slot's name.
+        slot: String,
+        /// The instances it takes, in the order given.
+        instances: Vec<String>,
+    },
+    /// The level's text set to `text` while it is `was`, byte for byte:
+    /// the inverse of `slot.make`.
+    #[serde(rename = "level.restore")]
+    LevelRestore {
+        /// The text to set.
+        text: String,
+        /// The text it must be now.
+        was: String,
+    },
     /// ADR 0046 §8: a presentation file under `ui/` (`main.html`,
     /// `windows.toml` or `parts/<key>.html`, named relative to `ui/`) set
     /// to `text` (absent: removed) while it holds `was` (absent: it does
@@ -585,6 +608,10 @@ pub struct Patched {
     /// ADR 0037 §2: the slot ports renamed, `slot.old` → `slot.new` at the
     /// level, in order: the caller rewrites the panel bindings on them.
     pub renamed: Vec<(String, String)>,
+    /// ADR 0051 §5 (`slot.make`): each moved instance's port or parameter
+    /// that is now a port of the new slot, `inst.port` → `slot.port`: the
+    /// caller rebinds the panels on them.
+    pub made: Vec<(String, String)>,
     /// ADR 0037 §2, ADR 0041: the slot ports renamed (`slot.old`,
     /// `Some(slot.new)`) and removed (`slot.port`, `None`) at the level, in
     /// the order the ops did them (an op's removals before its renames): the
@@ -612,6 +639,7 @@ pub fn apply(
         ctx,
         notes: Vec::new(),
         renamed: Vec::new(),
+        made: Vec::new(),
         follow: Vec::new(),
         files: BTreeMap::new(),
     };
@@ -628,6 +656,7 @@ pub fn apply(
         inverse,
         notes: patch.notes,
         renamed: patch.renamed,
+        made: patch.made,
         follow: patch.follow,
         files: inside::changed(patch.files),
     })
@@ -1778,6 +1807,7 @@ struct Patching<'a> {
     ctx: &'a Context<'a>,
     notes: Vec<String>,
     renamed: Vec<(String, String)>,
+    made: Vec<(String, String)>,
     follow: Vec<(String, Option<String>)>,
     /// The other files written, by path: (as read, as now).
     files: BTreeMap<String, (Option<String>, Option<String>)>,
@@ -2440,6 +2470,8 @@ impl Patching<'_> {
             Op::ExportRestore { changes } => self.export_restore(changes),
             Op::SlotGroup { instance, .. } => return self.slot_group(instance),
             Op::SlotUngroup { slot } => return self.slot_ungroup(slot),
+            Op::SlotMake { slot, instances } => return self.slot_make(slot, instances),
+            Op::LevelRestore { text, was } => self.level_restore(text, was),
             Op::PanelRestore { file, text, was } => self.panel_restore(file, text, was),
         };
         one.map(|op| vec![op])
@@ -2519,3 +2551,6 @@ mod inside_tests;
 
 #[cfg(test)]
 mod group_tests;
+
+#[cfg(test)]
+mod make_tests;

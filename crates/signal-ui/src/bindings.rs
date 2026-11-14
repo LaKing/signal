@@ -1296,6 +1296,39 @@ pub fn references(ui: &Path, prefixes: &[String]) -> Vec<(String, usize, String)
     found
 }
 
+/// The addresses under `prefixes` that the panels in `ui` name in any
+/// binding attribute, `bind` and every `*-bind` (`step-bind`,
+/// `position-bind`, …), in file order.
+pub fn bound_addresses(ui: &Path, prefixes: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for path in panel_files(ui).unwrap_or_default() {
+        let Ok(text) = signal_project::read_regular_to_string(&path) else {
+            continue;
+        };
+        for element in elements(&text) {
+            for attribute in &element.attributes {
+                if attribute.name != "bind" && !attribute.name.ends_with("-bind") {
+                    continue;
+                }
+                let Some((value, _)) = &attribute.value else {
+                    continue;
+                };
+                for address in value.split(|c: char| c.is_whitespace() || c == ',') {
+                    let hit = prefixes.iter().any(|p| {
+                        address
+                            .strip_prefix(p.as_str())
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    });
+                    if hit {
+                        found.push(address.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Checks every panel of the project in `dir` (loaded as `project`) against
 /// its plan: `signal ui check`.
 pub fn check_project(

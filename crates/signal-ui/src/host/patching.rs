@@ -965,18 +965,28 @@ impl Host {
         let mut strip: Vec<String> = Vec::new();
         for op in ops {
             match op {
-                Op::SlotGroup { instance, controls } if level.is_empty() => {
+                Op::SlotGroup { .. } | Op::SlotMake { .. } if level.is_empty() => {
+                    let instance = match op {
+                        Op::SlotGroup { instance, .. } => instance,
+                        Op::SlotMake { slot, .. } => slot,
+                        _ => continue,
+                    };
                     let main = format!("ui/{MAIN_PANEL}");
                     // Without a main panel the default one shows the slot's card.
                     let Some(text) = now(&files, patched, &main) else {
                         continue;
                     };
                     let grouped = panel_content(&text).and_then(|(start, end)| {
-                        crate::parts::group_content(
-                            text.get(start..end).unwrap_or(""),
-                            instance,
-                            controls.as_deref(),
-                        )
+                        let content = text.get(start..end).unwrap_or("");
+                        match op {
+                            Op::SlotMake { slot, .. } => {
+                                crate::parts::make_content(content, slot, &patched.made)
+                            }
+                            Op::SlotGroup { controls, .. } => {
+                                crate::parts::group_content(content, instance, controls.as_deref())
+                            }
+                            _ => Err("no grouping".to_owned()),
+                        }
                     });
                     let grouped = match grouped {
                         Ok(grouped) => grouped,

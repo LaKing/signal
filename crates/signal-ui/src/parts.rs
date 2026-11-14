@@ -139,13 +139,14 @@ pub fn bind_list(bind: &str) -> Vec<&str> {
 }
 
 /// ADR 0046 §8: the ports and parameters of instance `name` of a level
-/// that the host panels in `ui` bind, through each of the level's instance
+/// that the host panels in `ui` bind (in any binding attribute, `bind` or
+/// `*-bind`), through each of the level's instance
 /// paths `paths` (`""` for the top level), by name, in file and source
 /// order (`slot.group` puts them into the interface).
 pub fn bound_on(ui: &std::path::Path, paths: &[String], name: &str) -> Vec<String> {
     let prefixes: Vec<String> = paths.iter().map(|p| format!("{p}/{name}")).collect();
     let mut found: Vec<String> = Vec::new();
-    for (_, _, address) in crate::bindings::references(ui, &prefixes) {
+    for address in crate::bindings::bound_addresses(ui, &prefixes) {
         for prefix in &prefixes {
             if let Some(port) = address
                 .strip_prefix(prefix.as_str())
@@ -825,7 +826,7 @@ pub struct Grouped {
 
 /// Whether control `node` binds only inside `root` (every address of its
 /// `bind`, at least one), and those addresses made relative.
-fn movable(node: &Node, root: &str) -> Option<String> {
+fn movable(node: &Node, relative_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let Node::Control { tag, .. } = node else {
         return None;
     };
@@ -837,10 +838,7 @@ fn movable(node: &Node, root: &str) -> Option<String> {
     if addresses.is_empty() {
         return None;
     }
-    let relative: Option<Vec<String>> = addresses
-        .iter()
-        .map(|a| relative_address(a, root))
-        .collect();
+    let relative: Option<Vec<String>> = addresses.iter().map(|a| relative_of(a)).collect();
     relative.map(|r| r.join(" "))
 }
 
@@ -887,18 +885,37 @@ fn count(node: &Node) -> usize {
 
 /// `node` with every control's bind made relative to `root` (the moved
 /// ones bind only inside it).
-fn rebound(node: Node, root: &str) -> Node {
+fn rebound(node: Node, relative_of: &dyn Fn(&str) -> Option<String>) -> Node {
+    rebound_attributes(node, relative_of, &|n| n == "bind")
+}
+
+/// [`rebound`] for every attribute `which` names, each address mapped by
+/// `relative_of` where it gives one (kept where it gives none).
+fn rebound_attributes(
+    node: Node,
+    relative_of: &dyn Fn(&str) -> Option<String>,
+    which: &dyn Fn(&str) -> bool,
+) -> Node {
     match node {
         Node::Control { tag, attributes } => Node::Control {
             attributes: attributes
                 .into_iter()
                 .map(|(n, v)| {
-                    if n == "bind" {
+                    if which(&n) {
                         let relative = v.as_deref().and_then(|b| {
-                            bind_list(b)
-                                .iter()
-                                .map(|a| relative_address(a, root))
-                                .collect::<Option<Vec<String>>>()
+                            if n == "bind" {
+                                bind_list(b)
+                                    .iter()
+                                    .map(|a| relative_of(a))
+                                    .collect::<Option<Vec<String>>>()
+                            } else {
+                                Some(
+                                    bind_list(b)
+                                        .iter()
+                                        .map(|a| relative_of(a).unwrap_or_else(|| (*a).to_owned()))
+                                        .collect(),
+                                )
+                            }
                         });
                         (n, relative.map(|r| r.join(" ")).or(v))
                     } else {
@@ -918,7 +935,10 @@ fn rebound(node: Node, root: &str) -> Node {
             kind,
             classes,
             place: None,
-            children: children.into_iter().map(|c| rebound(c, root)).collect(),
+            children: children
+                .into_iter()
+                .map(|c| rebound_attributes(c, relative_of, which))
+                .collect(),
         },
         text => text,
     }
@@ -957,13 +977,73 @@ pub fn group_content(
     instance: &str,
     select: Option<&[usize]>,
 ) -> Result<Grouped, String> {
-    let nodes = parse(html)?;
     let root = format!("/{instance}");
+    moved_content(html, instance, &|a| relative_address(a, &root), select)
+}
+
+/// Make instrument on the main panel's content `html` (ADR 0051 §5): as
+/// [`group_content`], for the controls whose every bind lies in one of the
+/// top-level `instances` that moved into slot `slot`'s own inside; their
+/// binds keep their text, which in the part names the same instance inside
+/// the slot (`/kick.level` is `/rhythm/kick.level`).
+pub fn make_content(html: &str, slot: &str, made: &[(String, String)]) -> Result<Grouped, String> {
+    // `/inst.port` → `/slot.port`, for every port the slot took.
+    let absolute = |a: &str| {
+        let endpoint = a.strip_prefix('/')?;
+        made.iter()
+            .find(|(old, _)| old == endpoint)
+            .map(|(_, new)| format!("/{new}"))
+    };
+    let root = format!("/{slot}");
+    let relative = |a: &str| relative_address(&absolute(a)?, &root);
+    let binds = |n: &str| n == "bind" || n.ends_with("-bind");
+    moved_with(
+        html,
+        slot,
+        (&relative, &|node| {
+            rebound_attributes(node, &relative, &binds)
+        }),
+        &|node| rebound_attributes(node, &absolute, &binds),
+        None,
+    )
+}
+
+/// The controls `relative_of` makes relative (every bind of theirs) moved
+/// into slot `instance`'s part.
+fn moved_content(
+    html: &str,
+    instance: &str,
+    relative_of: &dyn Fn(&str) -> Option<String>,
+    select: Option<&[usize]>,
+) -> Result<Grouped, String> {
+    moved_with(
+        html,
+        instance,
+        (relative_of, &|node| rebound(node, relative_of)),
+        &|node| node,
+        select,
+    )
+}
+
+/// Which controls move (their `bind` made relative) and how each is written.
+type Moving<'a> = (&'a dyn Fn(&str) -> Option<String>, &'a dyn Fn(Node) -> Node);
+
+/// What moves into slot `instance`'s part: the controls whose `bind`
+/// `relative_of` makes relative, each written by `moving` (its binds made
+/// relative); every control staying in the host written by `staying`.
+fn moved_with(
+    html: &str,
+    instance: &str,
+    (relative_of, moving_node): Moving<'_>,
+    staying: &dyn Fn(Node) -> Node,
+    select: Option<&[usize]>,
+) -> Result<Grouped, String> {
+    let nodes = parse(html)?;
     let all = controls(&nodes);
     let moving: Vec<bool> = all
         .iter()
         .enumerate()
-        .map(|(i, c)| movable(c, &root).is_some() && select.is_none_or(|s| s.contains(&i)))
+        .map(|(i, c)| movable(c, relative_of).is_some() && select.is_none_or(|s| s.contains(&i)))
         .collect();
     let moved = moving.iter().filter(|m| **m).count();
     let old_ids = host_card_ids(&cards_of(&nodes));
@@ -985,7 +1065,7 @@ pub fn group_content(
         } = node
         else {
             next += count(node);
-            host.push(node.clone());
+            host.push(staying(node.clone()));
             continue;
         };
         let mut kept: Vec<Node> = Vec::new();
@@ -1014,7 +1094,7 @@ pub fn group_content(
                     }
                 )
             {
-                kept.push(child.clone());
+                kept.push(staying(child.clone()));
                 if is_card {
                     origins.push(origin);
                 }
@@ -1023,7 +1103,7 @@ pub fn group_content(
             let mut from = start;
             let part = filtered(child, &|i| ours.contains(&i), &mut from);
             if let Some(part) = part {
-                part_cards.push(rebound(part, &root));
+                part_cards.push(moving_node(part));
             }
             if ours.len() == n {
                 // Nothing but moved controls: the part keeps it.
@@ -1041,7 +1121,7 @@ pub fn group_content(
             } else {
                 let mut from = start;
                 if let Some(rest) = filtered(child, &|i| !ours.contains(&i), &mut from) {
-                    kept.push(rest);
+                    kept.push(staying(rest));
                     origins.push(origin);
                 }
                 if !placed {

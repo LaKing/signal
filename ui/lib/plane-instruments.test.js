@@ -113,3 +113,26 @@ test('a slot with a part is its own instrument; ties of controls go to the earli
   assert.equal(instrumentTitle('card:first', [{ id: 'first', heading: 'FIRST' }]), 'FIRST');
   assert.equal(instrumentTitle('deck'), 'deck');
 });
+
+test('Make instrument: the card’s engine into a slot named after its title', async () => {
+  const { makeInstrumentOp } = await import('./plane-instruments.js');
+  const instances = [
+    { name: 'kick', module: 'kick909' },
+    { name: 'snare', module: 'snare909' },
+    { name: 'drum_machine', module: 'std.mix' },
+    { name: 'synth', slot: { from: 'lib.voice' } },
+    { name: 'out', module: 'std.audio_out' },
+  ];
+  const owner = new Map([
+    ['kick', 'card:drums'],
+    ['snare', 'card:drums'],
+    ['drum_machine', null],
+    ['synth', 'card:drums'],
+    ['out', null],
+  ]);
+  const made = makeInstrumentOp('card:drums', owner, instances, 'Drum Machine');
+  assert.deepEqual(made.op, { op: 'slot.make', slot: 'drum_machine_2', instances: ['kick', 'snare'] });
+  assert.equal(makeInstrumentOp('synth', owner, instances).error, 'It is an instrument already (a slot)');
+  assert.match(makeInstrumentOp('card:empty', owner, instances).error, /binds no instance/);
+  assert.equal(makeInstrumentOp('card:x1', new Map([['kick', 'card:x1']]), instances, '909 Kit').slot, 'i_909_kit');
+});

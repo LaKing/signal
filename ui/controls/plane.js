@@ -77,8 +77,8 @@ import { graphGeneration, named } from '../lib/opening.js';
 import { defaultPanel } from '../lib/panel.js';
 import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
-import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
-import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
+import { PLANE_FILE, cardOfEntry, entryOf, isCardEntry, panelCards, planeOf, withEntries, writePlane } from '../lib/plane-file.js';
+import { assignInstruments, edgePins, hasPart, instanceOf, instrumentTitle, makeInstrumentOp, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
 import { absentInputBoxes, cableDrop, clockBadge, deviceEntry, keepOrder, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, throughCables } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
@@ -2933,6 +2933,8 @@ export class SignalPlane extends HTMLElement {
     if (hit?.kind === 'e-card' || hit?.kind === 'e-pin') engine.push({ id: 'copy-address', label: 'Copy address' });
     if (engine.length) shows.push(...engine, { id: 'separator' });
     if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
+    // ADR 0051 §5: a card's instrument (the migration form) made a slot holding its engine.
+    if (entry && isCardEntry(entry) && this.model && (level === 'stack' || level === 'wiring')) shows.push({ id: 'make-instrument', label: 'Make Instrument' });
     shows.push({ id: 'show-stack', label: 'Show Stack' });
     const show = (id) => {
       if (id === 'show-chip') return this.showChip(chip), true;
@@ -2940,6 +2942,7 @@ export class SignalPlane extends HTMLElement {
       if (id === 'remove') return this.writeEngine(removeOps(hit)).then((ok) => ok && this.selection?.kind === 'engine' && this.selection.item.key === hit.key && this.select(null)), true;
       if (id === 'copy-address') return globalThis.navigator?.clipboard?.writeText(hit.address).catch(() => this.say('Not copied: the clipboard was refused')), true;
       if (id === 'show-instrument') return this.fitOnScreen(name, entry), true;
+      if (id === 'make-instrument') return this.makeInstrument(entry), true;
       if (id === 'show-stack') return this.fitOnScreen(name, null), true;
       return false;
     };
@@ -3387,6 +3390,13 @@ export class SignalPlane extends HTMLElement {
       return Promise.resolve(false);
     }
     return this.writePatch(edit.ops, edit.what, 0, edit.level);
+  }
+
+  /** ADR 0051 §5: Make instrument on the card instrument `entry`: a `slot.make` patch, undoable like any. */
+  makeInstrument(entry) {
+    const made = makeInstrumentOp(entry, this.model?.owner, this.graph?.top?.instances ?? [], instrumentTitle(entry, this.model?.cards ?? []));
+    if (made.error) return this.say(`Not made: ${made.error}`);
+    return this.writePatch([made.op], `Make Instrument ${made.slot} of ${made.instances.join(', ')}`, 0, '');
   }
 
   /** The file a level's patch writes, as the person reads it. */

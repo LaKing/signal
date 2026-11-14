@@ -222,3 +222,31 @@ export function roleEndpoints(instances = []) {
   }
   return out;
 }
+
+/**
+ * ADR 0051 §5, Make instrument: the `slot.make` op that turns the card
+ * instrument `entry` (the migration form, `card:<id>`) into a slot holding
+ * its engine, the top-level instances `owner` assigns to it (no slot, no
+ * device slot), named after its title (`Drum Machine` → `drum_machine`,
+ * then `_2`, … while an instance has the name). `{op, slot, instances}`,
+ * or `{error}` when there is nothing to make.
+ */
+export function makeInstrumentOp(entry, owner, instances = [], title = '') {
+  if (!isCardEntry(entry)) return { error: 'It is an instrument already (a slot)' };
+  const moved = instances
+    .filter((i) => owner?.get(i.name) === entry && !i.slot && !roleOf(i))
+    .map((i) => i.name);
+  if (!moved.length) return { error: 'Its card binds no instance to make an instrument of' };
+  const base =
+    String(title || entry.slice(CARD_PREFIX.length))
+      .normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .replace(/^(?=[0-9])/, 'i_') || 'instrument';
+  const taken = new Set(instances.map((i) => i.name).filter((n) => !moved.includes(n)));
+  let slot = /^[a-z]/.test(base) ? base : `i_${base}`;
+  for (let n = 2; taken.has(slot); n++) slot = `${base}_${n}`;
+  return { op: { op: 'slot.make', slot, instances: moved }, slot, instances: moved };
+}

@@ -441,6 +441,18 @@ const TOOLS: &[Tool] = &[
         },
         run: slot_group,
     },
+    Tool {
+        name: "slot_make",
+        group: Group::Patch,
+        description: "Make instrument (ADR 0051 §5): top-level module instances `instances` move into a new slot `slot`'s own inside (composites/<slot>_inside.toml) with the connections among them; every connection across the boundary goes through an auto port of the slot's interface (`<instance>_<port>`) and an export of the same name; the slot takes the first instance's place with `seed = \"run\"`, so random streams and the audio stay the same (addresses and the log change). The main panel's controls on them move into ui/parts/<slot>.html with their binds unchanged (they name the instances inside the slot), the open slot card in their place. Slots, includes, device slots and instances with `gpu` are refused (a `pattern` moves along). The reply's `inverse` undoes every file byte for byte.",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "instances": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "base": {"type": "string"}}),
+                &["slot", "instances"],
+            )
+        },
+        run: slot_make,
+    },
     // Edit text.
     Tool {
         name: "write_pattern",
@@ -2203,6 +2215,10 @@ fn slot_ungroup(context: &Context, arguments: &Value) -> Outcome {
 
 fn slot_group(context: &Context, arguments: &Value) -> Outcome {
     slot_op(context, arguments, json!({"op": "slot.group"}))
+}
+
+fn slot_make(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.make"}))
 }
 
 fn schematic_move(context: &Context, arguments: &Value) -> Outcome {
