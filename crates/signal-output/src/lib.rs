@@ -68,7 +68,7 @@ pub use render::{
     render_fed, render_sides, render_with,
 };
 pub use routing::{
-    CaptureSide, Captured, Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedCapture,
+    CaptureSide, Captured, Heard, MAIN, Placement, PlaySide, Prefer, RoleBinding, RoutedCapture,
     RoutedSide, Routing, SecondaryRoute, SoundSystem, route, route_captures,
 };
 pub use runner::{

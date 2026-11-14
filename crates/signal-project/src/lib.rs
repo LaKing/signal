@@ -838,13 +838,13 @@ impl Project {
             }
         }
 
-        // ADR 0038 §5.4: versions of a role (several sinks of one role) are
-        // not built; two of one layout are always an error.
+        // ADR 0038 §5.4: a role may have several versions, one per layout;
+        // two of one layout are an error.
         if let Some(planned) = &planned {
             let sides = device::play_sides(self, &planned.plan);
-            for (address, role) in device::repeated_roles(&sides) {
+            for (address, role, layout) in device::repeated_layouts(&sides) {
                 let message = format!(
-                    "{address}: another output already plays role `{role}`; give it its own role (`device = {{ play = \"stereo\", role = \"…\" }}`)"
+                    "{address}: another output already plays role `{role}` in `{layout}`; a role's versions differ in layout, or give it its own role (`device = {{ play = \"{layout}\", role = \"…\" }}`)"
                 );
                 push_unique(&mut errors, self.instance_error(&address, message));
             }

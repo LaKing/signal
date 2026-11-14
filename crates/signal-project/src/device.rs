@@ -189,13 +189,20 @@ pub fn play_sides(project: &Project, plan: &ExecutionPlan) -> Vec<PlaySide> {
         .collect()
 }
 
-/// The main play side: the side of role `main`, else the first in canonical
-/// order (ADR 0038 §4's exception), if the plan has any.
+/// The main play side: the side of role `main`, else of the first role in
+/// canonical order (ADR 0038 §4's exception); of a role with several
+/// versions (§5.4), the largest, the first by address among equals. What a
+/// session records, whatever the machine plays.
 pub fn main_side(sides: &[PlaySide]) -> Option<&PlaySide> {
-    sides.iter().find(|s| s.role == MAIN).or_else(|| {
-        sides
-            .iter()
-            .min_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)))
+    let role = if sides.iter().any(|s| s.role == MAIN) {
+        MAIN
+    } else {
+        sides.iter().map(|s| s.role.as_str()).min()?
+    };
+    sides.iter().filter(|s| s.role == role).min_by(|a, b| {
+        b.width
+            .cmp(&a.width)
+            .then_with(|| a.address.cmp(&b.address))
     })
 }
 
@@ -206,17 +213,24 @@ fn top_level_name(address: &InstanceAddress) -> Option<&str> {
     (!name.contains('/')).then_some(name)
 }
 
-/// The roles played by more than one sink: each later sink, by address,
-/// with the role (ADR 0038 §5.4: versions of a role are not built, and two
-/// of one layout are always an error).
-pub(crate) fn repeated_roles(sides: &[PlaySide]) -> Vec<(InstanceAddress, String)> {
-    let mut first: BTreeMap<&str, &InstanceAddress> = BTreeMap::new();
+/// The versions of a role that repeat a layout: each later sink, by
+/// address, with the role and the layout (ADR 0038 §5.4: a role may have
+/// several versions, one per layout; two of one layout are an error).
+pub(crate) fn repeated_layouts(sides: &[PlaySide]) -> Vec<(InstanceAddress, String, String)> {
+    let mut first: BTreeMap<(&str, usize), &InstanceAddress> = BTreeMap::new();
     let mut ordered: Vec<&PlaySide> = sides.iter().collect();
     ordered.sort_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)));
     let mut repeated = Vec::new();
     for side in ordered {
-        if first.insert(side.role.as_str(), &side.address).is_some() {
-            repeated.push((side.address.clone(), side.role.clone()));
+        if first
+            .insert((side.role.as_str(), side.width), &side.address)
+            .is_some()
+        {
+            repeated.push((
+                side.address.clone(),
+                side.role.clone(),
+                layout_of_width(side.width),
+            ));
         }
     }
     repeated

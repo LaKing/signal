@@ -31,8 +31,13 @@
 //!   by position, the rest reported. `main` without a binding is the clock
 //!   device's channels 1–2 as stereo (1 as mono on a one-channel device),
 //!   so a 5.1 project is heard at once on a stereo system.
+//! - **The author's versions** (ADR 0038 §5.4): a role played by several
+//!   sides of different layouts plays one of them: with `prefer = "author"`
+//!   (the default) the version of the machine's layout, else the largest,
+//!   converted; with `prefer = "adapter"` always the largest. The others are
+//!   computed and heard nowhere.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use signal_core::InstanceAddress;
 
@@ -78,6 +83,31 @@ pub struct RoleBinding {
     pub layout: Option<String>,
     /// How a side of another layout is converted on it (ADR 0038 §5.6).
     pub adapter: Adapter,
+    /// Which of a role's versions plays (ADR 0038 §5.4).
+    pub prefer: Prefer,
+}
+
+/// Which version of a role a machine plays (ADR 0038 §5.4, the Setup's
+/// `prefer`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Prefer {
+    /// The author's version of the machine's layout, else the largest,
+    /// converted.
+    #[default]
+    Author,
+    /// Always the largest version, converted by the machine's adapter.
+    Adapter,
+}
+
+impl Prefer {
+    /// From the Setup's value (`"author"`, `"adapter"`); anything else is
+    /// the default.
+    pub fn from_name(name: Option<&str>) -> Prefer {
+        match name {
+            Some("adapter") => Prefer::Adapter,
+            _ => Prefer::Author,
+        }
+    }
 }
 
 impl RoleBinding {
@@ -89,6 +119,7 @@ impl RoleBinding {
             channels,
             layout: None,
             adapter: Adapter::default(),
+            prefer: Prefer::Author,
         }
     }
 
@@ -125,6 +156,8 @@ pub enum Heard {
     Adapted(String),
     /// Bound to a device that is not present.
     Missing(String),
+    /// Another version of its role plays (ADR 0038 §5.4): that side.
+    Version(InstanceAddress),
 }
 
 /// One play side as routed.
@@ -280,51 +313,66 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
     let mut ordered: Vec<&PlaySide> = sides.iter().collect();
     ordered.sort_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)));
     let has_main = ordered.iter().any(|s| s.role == MAIN);
+    // ADR 0038 §4's exception: without `main`, the first role in canonical
+    // order plays as main unless the machine binds it.
+    let stand_in = ordered
+        .first()
+        .filter(|s| !has_main && !system.roles.contains_key(&s.role))
+        .map(|s| s.role.clone());
+    let played_as_of = |role: &str| {
+        if stand_in.as_deref() == Some(role) {
+            MAIN.to_owned()
+        } else {
+            role.to_owned()
+        }
+    };
+    let binding_of = |played_as: &str| match system.roles.get(played_as) {
+        Some(binding) => Some(binding.clone()),
+        // ADR 0038 §4: a fresh machine's main is stereo on channels 1–2
+        // (mono on a one-channel device).
+        None if played_as == MAIN => Some(RoleBinding::clock(if device_channels == Some(1) {
+            vec![1]
+        } else {
+            vec![1, 2]
+        })),
+        None => None,
+    };
+    let chosen = chosen_versions(&ordered, |role| binding_of(&played_as_of(role)));
     let mut notices = Vec::new();
     // Per device (`None`: the clock device), the channels taken.
     let mut used: BTreeMap<(Option<String>, u16), String> = BTreeMap::new();
-    let mut roles_seen: BTreeSet<&str> = BTreeSet::new();
     let mut routed = Vec::with_capacity(ordered.len());
-    for (k, side) in ordered.iter().enumerate() {
+    for side in &ordered {
         let who = format!("{} ({})", side.role, side.address);
-        if !roles_seen.insert(side.role.as_str()) {
-            // The plan refuses this (two versions of a role are not built);
-            // routing never sums them either.
+        let version = chosen.get(side.role.as_str());
+        if let Some(version) = version
+            && version.address != side.address
+        {
             notices.push(format!(
-                "{who}: another output already plays role `{}`; not heard",
-                side.role
+                "{who}: {}; computed, not heard",
+                version.instead(&side.role)
             ));
-            routed.push(unheard(side, Heard::Unrouted));
+            routed.push(unheard(side, Heard::Version(version.address.clone())));
             continue;
         }
-        let own = system.roles.get(&side.role);
-        let played_as = if !has_main && k == 0 && own.is_none() {
+        let played_as = played_as_of(&side.role);
+        if played_as != side.role {
             notices.push(format!(
                 "{who}: the project has no `main` output; `{}` plays as main",
                 side.role
             ));
-            MAIN.to_owned()
-        } else {
-            side.role.clone()
+        }
+        let Some(binding) = binding_of(&played_as) else {
+            notices.push(format!(
+                "{who}: not heard on this machine (nothing binds it: [play.{}] in the Setup)",
+                side.role
+            ));
+            routed.push(unheard(side, Heard::Unrouted));
+            continue;
         };
-        let binding = match system.roles.get(&played_as) {
-            Some(binding) => binding.clone(),
-            // ADR 0038 §4: a fresh machine's main is stereo on channels 1–2
-            // (mono on a one-channel device).
-            None if played_as == MAIN => RoleBinding::clock(if device_channels == Some(1) {
-                vec![1]
-            } else {
-                vec![1, 2]
-            }),
-            None => {
-                notices.push(format!(
-                    "{who}: not heard on this machine (nothing binds it: [play.{}] in the Setup)",
-                    side.role
-                ));
-                routed.push(unheard(side, Heard::Unrouted));
-                continue;
-            }
-        };
+        if let Some(line) = version.and_then(|v| v.author.as_ref()) {
+            notices.push(format!("{who}: {line}"));
+        }
         let (device, heard) = match &binding.placement {
             Placement::Clock => (None, Heard::Clock),
             Placement::Other(name) => (Some(name.clone()), Heard::Adapted(name.clone())),
@@ -530,6 +578,94 @@ pub fn route_captures(
         });
     }
     (routed, notices)
+}
+
+/// The version of a role that plays (ADR 0038 §5.4).
+struct Version {
+    /// Its side.
+    address: InstanceAddress,
+    /// Its layout, by its width.
+    layout: String,
+    /// When the author's version plays in place of the largest: §5.8's line
+    /// ("5.1 → stereo (author's stereo version)").
+    author: Option<String>,
+}
+
+impl Version {
+    /// What the other versions' notice says.
+    fn instead(&self, role: &str) -> String {
+        if self.author.is_some() {
+            format!(
+                "the author's {} version of `{role}` ({}) plays",
+                self.layout, self.address
+            )
+        } else {
+            format!(
+                "the {} version of `{role}` ({}) plays",
+                self.layout, self.address
+            )
+        }
+    }
+}
+
+/// For each role with several sides (`ordered`, in canonical order), the
+/// version that plays on its binding (`binding_of`, by role; none: the role
+/// is not heard, its largest version is still the one named): §5.4.
+fn chosen_versions<'a>(
+    ordered: &[&'a PlaySide],
+    binding_of: impl Fn(&str) -> Option<RoleBinding>,
+) -> BTreeMap<&'a str, Version> {
+    let mut roles: BTreeMap<&str, Vec<&PlaySide>> = BTreeMap::new();
+    for side in ordered {
+        roles.entry(side.role.as_str()).or_default().push(side);
+    }
+    let layout = |side: &PlaySide| {
+        layout_by_width(side.width).map_or_else(|| format!("{} ch", side.width), str::to_owned)
+    };
+    let mut chosen = BTreeMap::new();
+    for (role, versions) in roles {
+        if versions.len() < 2 {
+            continue;
+        }
+        // The largest, the first in canonical order among equals.
+        let Some(largest) = versions
+            .iter()
+            .copied()
+            .reduce(|best, v| if v.width > best.width { v } else { best })
+        else {
+            continue;
+        };
+        let binding = binding_of(role);
+        let own = binding
+            .as_ref()
+            .filter(|b| b.prefer == Prefer::Author)
+            .and_then(RoleBinding::layout)
+            .and_then(|to| {
+                versions
+                    .iter()
+                    .copied()
+                    .find(|v| layout_by_width(v.width) == Some(to))
+            });
+        let version = match own {
+            Some(own) if own.address != largest.address => Version {
+                address: own.address.clone(),
+                layout: layout(own),
+                author: Some(format!(
+                    "{} → {} (author's {} version)",
+                    layout(largest),
+                    layout(own),
+                    layout(own)
+                )),
+            },
+            _ => Version {
+                address: largest.address.clone(),
+                layout: layout(largest),
+                author: None,
+            },
+        };
+        chosen.insert(role, version);
+    }
+    chosen
 }
 
 fn unheard(side: &PlaySide, heard: Heard) -> RoutedSide {
@@ -826,5 +962,95 @@ mod tests {
         let routing = route(&[side("/out", MAIN, 2)], &SoundSystem::default(), Some(1));
         assert_eq!(routing.targets(), [Some(0)]);
         assert_eq!(routing.sides[0].mix.as_ref().unwrap().to, "mono");
+    }
+
+    /// ADR 0038 §5.4: a stereo machine plays the author's stereo version of
+    /// a 5.1 `main`; a 5.1 machine plays the 5.1 version; `prefer =
+    /// "adapter"` plays the largest, converted; a machine of a layout no
+    /// version has plays the largest, converted. The other versions are in
+    /// the frame, heard nowhere.
+    #[test]
+    fn the_author_s_version_of_a_role_plays_where_it_fits() {
+        let sides = [side("/surround", MAIN, 6), side("/fold", MAIN, 2)];
+        let routing = route(&sides, &SoundSystem::default(), Some(2));
+        let fold = routing.side(&"/fold".parse().unwrap()).unwrap();
+        let surround = routing.side(&"/surround".parse().unwrap()).unwrap();
+        assert_eq!(fold.channels, [Some(1), Some(2)]);
+        assert!(fold.mix.is_none());
+        assert_eq!(surround.heard, Heard::Version("/fold".parse().unwrap()));
+        assert_eq!(routing.width(), 8);
+        assert_eq!(
+            routing.targets(),
+            [Some(0), Some(1), None, None, None, None, None, None]
+        );
+        assert_eq!(
+            routing.notices,
+            [
+                "main (/fold): 5.1 → stereo (author's stereo version)",
+                "main (/surround): the author's stereo version of `main` (/fold) plays; \
+                 computed, not heard",
+            ]
+        );
+
+        let wide = system(&[(MAIN, RoleBinding::clock(vec![1, 2, 3, 4, 5, 6]))]);
+        let routing = route(&sides, &wide, Some(6));
+        let surround = routing.side(&"/surround".parse().unwrap()).unwrap();
+        assert_eq!(surround.heard, Heard::Clock);
+        assert!(surround.mix.is_none());
+        assert_eq!(
+            routing.notices,
+            ["main (/fold): the 5.1 version of `main` (/surround) plays; computed, not heard"]
+        );
+
+        let mut adapter = RoleBinding::clock(vec![1, 2]);
+        adapter.prefer = Prefer::Adapter;
+        let routing = route(&sides, &system(&[(MAIN, adapter)]), Some(2));
+        let surround = routing.side(&"/surround".parse().unwrap()).unwrap();
+        assert_eq!(surround.channels, [Some(1), Some(2)]);
+        assert_eq!(
+            surround.mix.as_ref().unwrap().label,
+            "5.1 → stereo (ITU, LFE off)"
+        );
+        assert_eq!(
+            routing.side(&"/fold".parse().unwrap()).unwrap().heard,
+            Heard::Version("/surround".parse().unwrap())
+        );
+
+        let routing = route(&sides, &SoundSystem::default(), Some(1));
+        let surround = routing.side(&"/surround".parse().unwrap()).unwrap();
+        assert_eq!(surround.mix.as_ref().unwrap().to, "mono");
+        assert_eq!(surround.channels, [Some(1)]);
+    }
+
+    /// Without `main`, the first role's versions play as main: one of them.
+    #[test]
+    fn a_stand_in_main_plays_one_version() {
+        let sides = [
+            side("/a", "cue", 6),
+            side("/b", "cue", 2),
+            side("/z", "zone", 2),
+        ];
+        let routing = route(&sides, &SoundSystem::default(), Some(2));
+        let b = routing.side(&"/b".parse().unwrap()).unwrap();
+        assert_eq!(
+            (b.played_as.as_str(), b.channels.as_slice()),
+            (MAIN, &[Some(1), Some(2)][..])
+        );
+        assert_eq!(
+            routing.side(&"/a".parse().unwrap()).unwrap().heard,
+            Heard::Version("/b".parse().unwrap())
+        );
+        assert_eq!(
+            routing.side(&"/z".parse().unwrap()).unwrap().heard,
+            Heard::Unrouted
+        );
+        assert_eq!(
+            routing
+                .notices
+                .iter()
+                .filter(|n| n.contains("plays as main"))
+                .count(),
+            1
+        );
     }
 }

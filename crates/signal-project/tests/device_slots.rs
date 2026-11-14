@@ -125,6 +125,30 @@ fn the_role_defaults_to_main_so_two_mains_are_refused() {
     );
 }
 
+/// ADR 0038 §5.4: a role's versions differ in layout; a session records
+/// the largest, whatever the machine plays.
+#[test]
+fn a_role_may_have_versions_of_other_layouts() {
+    let text = format!(
+        "{HEAD}[instances]\nfold = {{ device = {{ play = \"stereo\" }} }}\nsurround = {{ device = {{ play = \"5.1\" }} }}\n"
+    );
+    let project = load(&text).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let sides = play_sides(&project, &plan);
+    assert_eq!(sides.len(), 2);
+    assert_eq!(main_side(&sides).unwrap().address.as_str(), "/surround");
+    assert_eq!(
+        sink_of(&project, &plan).unwrap(),
+        ("/surround".parse().unwrap(), 6)
+    );
+    let twice = format!("{text}again = {{ device = {{ play = \"5.1\", role = \"main\" }} }}\n");
+    let found = problems(&twice);
+    assert!(
+        found.contains("/surround: another output already plays role `main` in `5.1`"),
+        "{found}"
+    );
+}
+
 #[test]
 fn a_project_without_main_plays_its_first_role() {
     let text = format!(

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use signal_audio::{DeviceInfo, Direction, Resolution, labels, resolve};
-use signal_output::{MAIN, Placement, RoleBinding, SoundSystem};
+use signal_output::{MAIN, Placement, Prefer, RoleBinding, SoundSystem};
 use signal_project::device::valid_role;
 
 use crate::setup::{DeviceEntry, PlayEntry, Setup};
@@ -329,6 +329,7 @@ pub fn sound_system(setup: &Setup, devices: &[DeviceInfo]) -> SoundSystem {
                 channels: entry.channels.clone(),
                 layout: entry.layout.clone(),
                 adapter: entry.adapter(),
+                prefer: Prefer::from_name(entry.prefer.as_deref()),
             },
         );
     }
