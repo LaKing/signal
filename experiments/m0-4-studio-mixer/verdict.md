@@ -7,7 +7,7 @@ The owner's decision on ADR 0051 §13 (phase 4): the studio's `bus` (`std.mix` a
 | Decision | "igen" (yes), to the operator's question whether the Mixer goes into the studio, changing its golden by at most −147 dB |
 | Given by | Owner (PO), relayed verbatim by the operator (an AI agent, Claude) |
 | Date | 2026-11-14 |
-| Listening | Not a listening verdict: the owner decided on the measurement below. The difference is under f32 rounding of the output and is not meant to be heard |
+| Listening verdict | "Meghallgattam, szól, működik, tökjó." (I listened to it: it plays, it works, it's great), 2026-11-14, after the change was pushed (c3e7d16). The golden decision itself was taken on the measurement below, before listening |
 
 ## What changed, and why the sound moves
 
