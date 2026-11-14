@@ -660,8 +660,9 @@ pub(crate) struct InstanceEntry {
     pub(crate) map: Option<Spanned<MapEntries>>,
     /// ADR 0044 §1: a polyphonic slot's voices.
     pub(crate) voices: Option<Spanned<VoicesKey>>,
-    /// ADR 0035 §1: an included project's seed scope.
-    pub(crate) seed: Option<Spanned<u64>>,
+    /// ADR 0035 §1: an included project's seed scope; ADR 0051 §5:
+    /// `"run"` on a slot that loads a module, a scope inheriting the run's.
+    pub(crate) seed: Option<Spanned<SeedKey>>,
     /// ADR 0035 §1: overrides of the content's own parameters.
     pub(crate) set: Option<Spanned<SetEntries>>,
     /// M2.7-2: the GPU device a GPU-backed instance is pinned to, by id or
@@ -696,6 +697,44 @@ pub(crate) enum VoicesKey {
     Count(i64),
     Number(f64),
     Table(VoicesSpec),
+}
+
+/// The `seed` key as written: a seed, or `"run"` (ADR 0051 §5: a scope
+/// root that inherits the run's seed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeedKey {
+    Value(u64),
+    Run,
+}
+
+impl<'de> Deserialize<'de> for SeedKey {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SeedVisitor;
+        impl Visitor<'_> for SeedVisitor {
+            type Value = SeedKey;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a seed from 0 to 2⁶³−1, or \"run\" (the run's seed)")
+            }
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<SeedKey, E> {
+                Ok(SeedKey::Value(value))
+            }
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<SeedKey, E> {
+                u64::try_from(value)
+                    .map(SeedKey::Value)
+                    .map_err(|_| E::custom(format!("a seed is 0 or more; {value} is not")))
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<SeedKey, E> {
+                if value == "run" {
+                    Ok(SeedKey::Run)
+                } else {
+                    Err(E::custom(format!(
+                        "`seed = \"{value}\"`: a seed is a number, or \"run\" (the run's seed)"
+                    )))
+                }
+            }
+        }
+        deserializer.deserialize_any(SeedVisitor)
+    }
 }
 
 /// A count of voices, checked.
@@ -964,7 +1003,7 @@ impl JsonSchema for InstanceEntry {
                         }
                     ]
                 },
-                "seed": { "type": "integer", "minimum": 0 },
+                "seed": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "const": "run" }] },
                 "set": { "type": "object", "additionalProperties": { "type": "number" } },
                 "gpu": { "type": "string", "minLength": 1 },
                 "pattern": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },

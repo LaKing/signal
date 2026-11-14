@@ -56,6 +56,9 @@ pub(crate) struct ContentSpans {
     pub(crate) slot: Option<SlotSpans>,
     /// `seed` and the value's span.
     pub(crate) seed: Option<(u64, Span)>,
+    /// `seed = "run"` (ADR 0051 §5) and its span: a slot loading a module
+    /// is a scope root inheriting the run's seed.
+    pub(crate) inherit_seed: Option<Span>,
     /// `set`: each key, its span and its value.
     pub(crate) set: Vec<(String, Span, f64)>,
     /// The canonical folder of the project it includes or loads, once

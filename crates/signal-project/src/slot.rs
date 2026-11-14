@@ -1435,6 +1435,7 @@ fn resolve_def(
         let Some(slot) = &content.slot else {
             continue;
         };
+        let inherit_seed = content.inherit_seed.is_some();
         let Some(interface) = interfaces.get(slot_name.as_str()).copied() else {
             // Its interface did not resolve (reported): nothing of it plans.
             renames.insert(slot_name, (false, BTreeMap::new()));
@@ -1887,6 +1888,13 @@ fn resolve_def(
                     }
                 }
             }
+        }
+        // ADR 0051 §5: a scope root inheriting the run's seed, so what it
+        // holds draws the streams it drew at the level above.
+        if inherit_seed
+            && let Some(instance) = out.def.instances.iter_mut().find(|i| i.name == *slot_name)
+        {
+            instance.scope = Some(signal_graph::ScopeDef { seed: None });
         }
         if let Some((voices, voices_at)) = poly {
             let definition = poly_name(name, slot_name);

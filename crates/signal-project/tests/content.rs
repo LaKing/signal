@@ -251,7 +251,7 @@ fn an_include_draws_its_own_streams_and_sums_in_its_own_order() {
         .find(|i| i.address.as_str() == "/m/a")
         .unwrap();
     let key = a.stream.as_ref().unwrap();
-    assert_eq!((key.seed, key.relative.as_str()), (21, "/a"));
+    assert_eq!((key.seed, key.relative.as_str()), (Some(21), "/a"));
     assert!(dump(&plan).contains("\"relative\": \"/a\""));
     // The converter inside sits under its source's address.
     assert!(
@@ -1481,4 +1481,77 @@ fn pack_refuses_a_project_with_includes() {
         "{error}"
     );
     signal_project::archive::pack(&host.join("noisy")).unwrap();
+}
+
+/// ADR 0051 §5: `seed = "run"` on a slot loading a module makes it a scope
+/// root inheriting the run's seed, so a noise moved into it draws what it
+/// drew at the top (under the project's seed and another run seed alike);
+/// on a slot loading a project, or a module instance, it is refused.
+#[test]
+fn a_slot_inheriting_the_run_s_seed_keeps_its_streams() {
+    let top = scratch("seed-run-top");
+    write(
+        &top,
+        &[(
+            "project.toml",
+            "schema_version = 1\n[project]\nname = \"top\"\nseed = 5\n[instances]\nn = { module = \"std.noise\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [\n  { from = \"n.out\", to = \"out.l\" },\n]\n",
+        )],
+    );
+    let moved = scratch("seed-run-moved");
+    write(
+        &moved,
+        &[
+            (
+                "project.toml",
+                "schema_version = 1\n[project]\nname = \"moved\"\nseed = 5\n[instances]\nrack = { slot = { outputs = { out = {} } }, load = \"rack_inside\", seed = \"run\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [\n  { from = \"rack.out\", to = \"out.l\" },\n]\n",
+            ),
+            (
+                "composites/rack_inside.toml",
+                "schema_version = 1\n[composite]\nname = \"rack_inside\"\ninside_of = \"rack\"\n[instances]\nn = { module = \"std.noise\" }\n[exports]\noutputs = { out = \"n.out\" }\n",
+            ),
+        ],
+    );
+    for seed in [5, 77] {
+        let a = capture(&plan(&top), (48_000, seed), 512, (64, 1), &["/n.out"]);
+        let b = capture(
+            &plan(&moved),
+            (48_000, seed),
+            512,
+            (64, 1),
+            &["/rack/n.out"],
+        );
+        assert_eq!(bits(&a[0]), bits(&b[0]), "run seed {seed}");
+    }
+    let refused = scratch("seed-run-refused");
+    write(
+        &refused,
+        &[(
+            "project.toml",
+            "schema_version = 1\n[project]\nname = \"r\"\n[instances]\nn = { module = \"std.noise\", seed = \"run\" }\nout = { module = \"std.audio_out\" }\n",
+        )],
+    );
+    assert!(
+        has(
+            &problems(&refused),
+            &["`seed` applies to an included project or a slot"]
+        ),
+        "{:?}",
+        problems(&refused)
+    );
+    let bad = scratch("seed-run-bad");
+    write(
+        &bad,
+        &[(
+            "project.toml",
+            "schema_version = 1\n[project]\nname = \"r\"\n[instances]\ns = { slot = { outputs = { out = {} } }, seed = \"run\" }\nout = { module = \"std.audio_out\" }\n",
+        )],
+    );
+    assert!(
+        has(
+            &problems(&bad),
+            &["`seed = \"run\"` is a slot's that loads a module"]
+        ),
+        "{:?}",
+        problems(&bad)
+    );
 }

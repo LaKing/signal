@@ -166,7 +166,7 @@ pub(crate) fn diff_plans(
             new.instance_error(
                 &i.address,
                 format!(
-                    "{}: its random stream changed (an include's `seed`); a running project keeps every instance's stream: restart the project",
+                    "{}: its random stream changed (an include's or a slot's `seed`); a running project keeps every instance's stream: restart the project",
                     i.address
                 ),
             )

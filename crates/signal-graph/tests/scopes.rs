@@ -9,7 +9,7 @@ use signal_graph::{GraphError, ScopeDef};
 
 fn scoped(name: &str, module: &str, seed: u64) -> signal_graph::InstanceDef {
     signal_graph::InstanceDef {
-        scope: Some(ScopeDef { seed }),
+        scope: Some(ScopeDef { seed: Some(seed) }),
         ..inst(name, module)
     }
 }
@@ -39,7 +39,7 @@ fn the_innermost_scope_root_keys_the_stream() {
             .unwrap()
             .stream
             .as_ref()
-            .map(|k| (k.seed, k.relative.to_string()))
+            .map(|k| (k.seed.unwrap_or(u64::MAX), k.relative.to_string()))
     };
     assert_eq!(key("/free"), None);
     assert_eq!(key("/top/osc"), Some((3, "/osc".to_owned())));
@@ -72,4 +72,22 @@ fn a_primitive_cannot_be_a_scope_root() {
             .to_string()
             .contains("only a composite instance can be a scope root")
     );
+}
+
+/// ADR 0051 §5: a root that inherits the run's seed keys its instances by
+/// their relative address alone, so the engine draws the stream the
+/// instance would draw at that address under the run's seed.
+#[test]
+fn a_root_may_inherit_the_run_s_seed() {
+    let inner = composite("inner", vec![inst("osc", "test.osc")], vec![]);
+    let mut moved = inst("rack", "inner");
+    moved.scope = Some(ScopeDef { seed: None });
+    let plan = build(&composite("", vec![moved], vec![]), &[inner]).unwrap();
+    let key = plan.instances[0].stream.clone().unwrap();
+    assert_eq!(
+        (key.seed, key.relative.to_string()),
+        (None, "/osc".to_owned())
+    );
+    let under = signal_core::RngStream::for_key(42, &addr("/rack/osc"), Some(&key));
+    assert_eq!(under, signal_core::RngStream::derive(42, &addr("/osc")));
 }

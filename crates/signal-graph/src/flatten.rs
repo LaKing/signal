@@ -202,7 +202,7 @@ struct Flattener<'a> {
     exceeded: Option<PlanBudget>,
     /// The scope roots (ADR 0035 §4) being expanded, outermost first: each
     /// root's address and seed.
-    scopes: Vec<(InstanceAddress, u64)>,
+    scopes: Vec<(InstanceAddress, Option<u64>)>,
 }
 
 /// The widest vector port of `descriptor`, if any is wider than

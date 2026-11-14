@@ -2059,7 +2059,30 @@ fn definition(
                     }),
                 }
             });
-            let seed = entry.seed.as_ref().map(|s| (*s.get_ref(), s.span()));
+            let seed = entry.seed.as_ref().and_then(|s| match *s.get_ref() {
+                model::SeedKey::Value(n) => Some((n, s.span())),
+                model::SeedKey::Run => None,
+            });
+            let inherit_seed = entry
+                .seed
+                .as_ref()
+                .filter(|s| *s.get_ref() == model::SeedKey::Run)
+                .map(|s| s.span());
+            if let Some(span) = &inherit_seed {
+                let loads_module = slot.as_ref().is_some_and(|slot| {
+                    slot.load
+                        .as_ref()
+                        .is_some_and(|(load, _)| !is_project_path(load))
+                });
+                if !loads_module {
+                    problems.push((
+                        span.start,
+                        format!(
+                            "{instance}: `seed = \"run\"` is a slot's that loads a module (ADR 0051 §5); an included project keeps its own seed scope"
+                        ),
+                    ));
+                }
+            }
             if let (Some(slot), Some((_, span))) = (&slot, &seed)
                 && slot
                     .load
@@ -2092,6 +2115,7 @@ fn definition(
                         .map(|p| (p.get_ref().clone(), p.span())),
                     slot,
                     seed,
+                    inherit_seed,
                     set,
                     included: None,
                 },

@@ -406,7 +406,7 @@ impl Content {
                     .map_or(project.seed, |(seed, _)| *seed);
                 if let Some(instance) = def.instances.iter_mut().find(|i| i.name == name) {
                     instance.module = module.clone();
-                    instance.scope = Some(ScopeDef { seed });
+                    instance.scope = Some(ScopeDef { seed: Some(seed) });
                 }
                 if let Some(instance) = spans.instances.get_mut(&name) {
                     instance.module = module;

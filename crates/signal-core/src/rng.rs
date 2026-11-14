@@ -125,8 +125,10 @@ impl Xoshiro256PlusPlus {
 /// [`RngStream::for_key`]. Domain-free: a seed and an address.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct StreamKey {
-    /// The scope root's seed.
-    pub seed: u64,
+    /// The scope root's seed; `None` for a root that inherits the run's
+    /// (ADR 0051 §5): its instances draw the streams they would at the
+    /// relative address under the run's seed.
+    pub seed: Option<u64>,
     /// The address relative to the innermost scope root.
     pub relative: InstanceAddress,
 }
@@ -152,7 +154,7 @@ impl RngStream {
         key: Option<&StreamKey>,
     ) -> RngStream {
         match key {
-            Some(key) => RngStream::derive(key.seed, &key.relative),
+            Some(key) => RngStream::derive(key.seed.unwrap_or(master_seed), &key.relative),
             None => RngStream::derive(master_seed, address),
         }
     }

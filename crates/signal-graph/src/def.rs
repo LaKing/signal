@@ -66,8 +66,10 @@ pub struct InstanceDef {
 /// A scope root's settings (ADR 0035 §4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeDef {
-    /// The seed every random stream under the root derives from.
-    pub seed: u64,
+    /// The seed every random stream under the root derives from; `None`
+    /// inherits the run's seed (ADR 0051 §5: an instance moved under the
+    /// root keeps the stream it drew at its old address).
+    pub seed: Option<u64>,
 }
 
 /// A connection from an output port to an input port, both written `inst.port`
