@@ -24,13 +24,19 @@
 //!   through a clock adapter ([`crate::adapter`]), which the driver runs
 //!   ([`Routing::secondaries`]). Channels are taken per device: the same
 //!   channel number on two devices is two channels.
-//! - **Layouts are not converted yet** (ADR 0038 §5, phase 2): a side
-//!   whose width differs from its binding's channel count plays by
-//!   position; the rest is reported.
+//! - **Layouts are converted** (ADR 0038 §5, [`crate::layouts`]): a side of
+//!   one layout on a role of another (the binding's `layout`, else its
+//!   channel count's) plays through the role's adapter (`itu` by default),
+//!   its channels the machine's; a side or binding of no named layout plays
+//!   by position, the rest reported. `main` without a binding is the clock
+//!   device's channels 1–2 as stereo (1 as mono on a one-channel device),
+//!   so a 5.1 project is heard at once on a stereo system.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use signal_core::InstanceAddress;
+
+use crate::layouts::{Adapter, Mix, layout_by_width, layout_channels, mix};
 
 /// The default role (ADR 0038 §1): `std.audio_out`'s, and a device slot's
 /// without `role`.
@@ -61,20 +67,39 @@ pub enum Placement {
 }
 
 /// The machine's binding of one role: its device and channels.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RoleBinding {
     /// Its device.
     pub placement: Placement,
-    /// Its device channels, from 1, in the side's port order.
+    /// Its device channels, from 1, in its layout's channel order.
     pub channels: Vec<u16>,
+    /// Its layout (ADR 0038 §4); `None`: its channel count's (1 mono, 2
+    /// stereo, 4 quad, 6 5.1, 8 7.1, else none).
+    pub layout: Option<String>,
+    /// How a side of another layout is converted on it (ADR 0038 §5.6).
+    pub adapter: Adapter,
 }
 
 impl RoleBinding {
-    /// A binding on the clock device.
+    /// A binding on the clock device, its layout its channel count's, the
+    /// default adapter.
     pub fn clock(channels: Vec<u16>) -> RoleBinding {
         RoleBinding {
             placement: Placement::Clock,
             channels,
+            layout: None,
+            adapter: Adapter::default(),
+        }
+    }
+
+    /// Its layout: the written one, else its channel count's.
+    pub fn layout(&self) -> Option<&'static str> {
+        match &self.layout {
+            Some(name) => crate::layouts::LAYOUTS
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(n, _)| *n),
+            None => layout_by_width(self.channels.len()),
         }
     }
 }
@@ -82,7 +107,7 @@ impl RoleBinding {
 /// The machine's sound system: the binding of each role it describes. A
 /// `main` it does not describe plays on the clock device's channels 1 to
 /// its width.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SoundSystem {
     /// By role.
     pub roles: BTreeMap<String, RoleBinding>,
@@ -103,7 +128,7 @@ pub enum Heard {
 }
 
 /// One play side as routed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RoutedSide {
     /// The sink instance.
     pub address: InstanceAddress,
@@ -112,12 +137,23 @@ pub struct RoutedSide {
     /// The role whose binding it plays on: its own, or `main` for the first
     /// side of a project without `main`.
     pub played_as: String,
-    /// Its channels.
+    /// Its channels (the sink's inputs).
     pub width: usize,
-    /// Per port, the device channel (from 1) it plays on; `None`: not heard.
+    /// Per channel it plays (the sink's, or its conversion's), the device
+    /// channel (from 1) it plays on; `None`: not heard.
     pub channels: Vec<Option<u16>>,
     /// Whether it is heard.
     pub heard: Heard,
+    /// Its conversion to the role's layout (ADR 0038 §5), if they differ.
+    pub mix: Option<Mix>,
+}
+
+impl RoutedSide {
+    /// The channels it puts in the run's audio frame: its conversion's
+    /// target's, else its own.
+    pub fn frame_width(&self) -> usize {
+        self.mix.as_ref().map_or(self.width, Mix::to_width)
+    }
 }
 
 /// The play sides one secondary device plays (ADR 0052 §1): which channels
@@ -143,7 +179,7 @@ impl SecondaryRoute {
 }
 
 /// Every play side routed, in canonical order, and what to tell.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Routing {
     /// In canonical order: the order of the run's audio frame.
     pub sides: Vec<RoutedSide>,
@@ -152,9 +188,15 @@ pub struct Routing {
 }
 
 impl Routing {
-    /// The run's audio frame: every side's channels.
+    /// The run's audio frame: every side's channels, a converted side's as
+    /// its conversion gives them.
     pub fn width(&self) -> usize {
-        self.sides.iter().map(|s| s.width).sum()
+        self.sides.iter().map(RoutedSide::frame_width).sum()
+    }
+
+    /// Each side's conversion, in the frame's order (`Runner::convert`).
+    pub fn mixes(&self) -> Vec<Option<Mix>> {
+        self.sides.iter().map(|s| s.mix.clone()).collect()
     }
 
     /// The sinks, in the frame's order.
@@ -206,7 +248,7 @@ impl Routing {
                     }
                 }
             }
-            at += side.width;
+            at += side.frame_width();
         }
         routes.retain(|r| !r.sources.is_empty());
         routes
@@ -267,11 +309,13 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
         };
         let binding = match system.roles.get(&played_as) {
             Some(binding) => binding.clone(),
-            None if played_as == MAIN => RoleBinding::clock(
-                (1..=side.width)
-                    .filter_map(|c| u16::try_from(c).ok())
-                    .collect(),
-            ),
+            // ADR 0038 §4: a fresh machine's main is stereo on channels 1–2
+            // (mono on a one-channel device).
+            None if played_as == MAIN => RoleBinding::clock(if device_channels == Some(1) {
+                vec![1]
+            } else {
+                vec![1, 2]
+            }),
             None => {
                 notices.push(format!(
                     "{who}: not heard on this machine (nothing binds it: [play.{}] in the Setup)",
@@ -297,18 +341,46 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
         } else {
             None
         };
-        if binding.channels.len() != side.width {
+        // ADR 0038 §5: the side's layout on the role's.
+        let mut converted = None;
+        match (layout_by_width(side.width), binding.layout()) {
+            (Some(from), Some(to)) if from != to => match mix(from, to, &binding.adapter) {
+                Some(Ok(m)) => converted = Some(m),
+                Some(Err((why, fallback))) => {
+                    notices.push(format!("{who}: {why}"));
+                    converted = Some(fallback);
+                }
+                None => {}
+            },
+            _ => {}
+        }
+        if let Some(m) = &converted {
+            notices.push(format!("{who}: {}", m.label));
+        }
+        let width = converted.as_ref().map_or(side.width, Mix::to_width);
+        let wanted = binding
+            .layout()
+            .and_then(layout_channels)
+            .map_or(binding.channels.len(), <[_]>::len);
+        if binding.channels.len() != wanted {
             notices.push(format!(
-                "{who}: {} channel{} on {} device channel{}; played by position (layouts are not \
-                 converted yet)",
+                "{who}: [play.{played_as}] gives {} channel{} for its layout `{}` of {wanted}; \
+                 played by position",
+                binding.channels.len(),
+                plural(binding.channels.len()),
+                binding.layout().unwrap_or("?"),
+            ));
+        } else if converted.is_none() && binding.channels.len() != side.width {
+            notices.push(format!(
+                "{who}: {} channel{} on {} device channel{}; played by position",
                 side.width,
                 plural(side.width),
                 binding.channels.len(),
                 plural(binding.channels.len())
             ));
         }
-        let mut channels = Vec::with_capacity(side.width);
-        for port in 0..side.width {
+        let mut channels = Vec::with_capacity(width);
+        for port in 0..width {
             let Some(&channel) = binding.channels.get(port) else {
                 channels.push(None);
                 continue;
@@ -346,6 +418,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
             width: side.width,
             channels,
             heard,
+            mix: converted,
         });
     }
     Routing {
@@ -467,6 +540,7 @@ fn unheard(side: &PlaySide, heard: Heard) -> RoutedSide {
         width: side.width,
         channels: vec![None; side.width],
         heard,
+        mix: None,
     }
 }
 
@@ -571,6 +645,7 @@ mod tests {
                 RoleBinding {
                     placement: Placement::Other("Fireface".to_owned()),
                     channels: vec![1, 2],
+                    ..RoleBinding::clock(Vec::new())
                 },
             ),
             (
@@ -578,6 +653,7 @@ mod tests {
                 RoleBinding {
                     placement: Placement::Missing("BlackHole".to_owned(), "not found".to_owned()),
                     channels: vec![1, 2],
+                    ..RoleBinding::clock(Vec::new())
                 },
             ),
         ]);
@@ -620,6 +696,7 @@ mod tests {
         let other = |channels| RoleBinding {
             placement: Placement::Other("Speakers".to_owned()),
             channels,
+            ..RoleBinding::clock(Vec::new())
         };
         let system = system(&[("alt", other(vec![1, 2])), ("bus", other(vec![2, 6]))]);
         let routing = route(&sides, &system, Some(2));
@@ -643,14 +720,24 @@ mod tests {
     }
 
     #[test]
-    fn channels_out_of_range_or_of_another_width_are_reported() {
+    fn channels_out_of_range_or_of_another_layout_are_reported() {
         let sides = [side("/out", MAIN, 2), side("/cue", "cue", 2)];
-        let system = system(&[("cue", RoleBinding::clock(vec![5]))]);
-        let routing = route(&sides, &system, Some(4));
-        assert_eq!(routing.targets(), [None, None, Some(0), Some(1)]);
-        assert_eq!(routing.notices.len(), 2);
-        assert!(routing.notices[0].contains("played by position"));
+        let one = system(&[("cue", RoleBinding::clock(vec![5]))]);
+        let routing = route(&sides, &one, Some(4));
+        // A one-channel binding is mono (ADR 0038 §4): the stereo cue folds to it.
+        assert_eq!(routing.targets(), [None, Some(0), Some(1)]);
+        assert_eq!(routing.notices.len(), 2, "{:?}", routing.notices);
+        assert_eq!(routing.notices[0], "cue (/cue): stereo → mono (ITU)");
         assert!(routing.notices[1].contains("device channel 5 does not exist (the device has 4)"));
+        // A binding of no layout's width plays by position.
+        let three = system(&[("cue", RoleBinding::clock(vec![3, 4, 5]))]);
+        let routing = route(&sides, &three, Some(8));
+        assert_eq!(routing.targets(), [Some(2), Some(3), Some(0), Some(1)]);
+        assert!(
+            routing.notices[0].contains("played by position"),
+            "{:?}",
+            routing.notices
+        );
     }
 
     fn capture(address: &str, role: &str, width: usize) -> CaptureSide {
@@ -701,5 +788,43 @@ mod tests {
         let b = [side("/cue", "cue", 2), side("/out", MAIN, 2)];
         let system = system(&[("cue", RoleBinding::clock(vec![3, 4]))]);
         assert_eq!(route(&a, &system, None), route(&b, &system, None));
+    }
+
+    /// ADR 0038 §4, §5: a 5.1 main on a fresh machine is stereo on 1–2,
+    /// folded by BS.775 (its frame is the conversion's two channels); on a
+    /// 5.1 binding it plays as it is; a binding's `layout` overrides its
+    /// count; a one-channel device's main is mono.
+    #[test]
+    fn a_surround_main_folds_to_the_machine_s_layout() {
+        let sides = [side("/room", MAIN, 6)];
+        let routing = route(&sides, &SoundSystem::default(), Some(2));
+        assert_eq!(routing.width(), 2);
+        assert_eq!(routing.targets(), [Some(0), Some(1)]);
+        assert_eq!(
+            routing.sides[0].mix.as_ref().unwrap().label,
+            "5.1 → stereo (ITU, LFE off)"
+        );
+        assert_eq!(
+            routing.notices,
+            ["main (/room): 5.1 → stereo (ITU, LFE off)"]
+        );
+        let wide = system(&[(MAIN, RoleBinding::clock(vec![1, 2, 3, 4, 5, 6]))]);
+        let routing = route(&sides, &wide, Some(8));
+        assert!(routing.sides[0].mix.is_none() && routing.notices.is_empty());
+        assert_eq!(routing.width(), 6);
+        let mut quad = RoleBinding::clock(vec![1, 2, 3, 4, 5, 6]);
+        quad.layout = Some("quad".to_owned());
+        let routing = route(&sides, &system(&[(MAIN, quad)]), Some(8));
+        assert!(
+            routing
+                .notices
+                .iter()
+                .any(|n| n.contains("played by position")),
+            "{:?}",
+            routing.notices
+        );
+        let routing = route(&[side("/out", MAIN, 2)], &SoundSystem::default(), Some(1));
+        assert_eq!(routing.targets(), [Some(0)]);
+        assert_eq!(routing.sides[0].mix.as_ref().unwrap().to, "mono");
     }
 }

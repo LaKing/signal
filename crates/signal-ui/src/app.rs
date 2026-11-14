@@ -199,12 +199,12 @@ pub fn start(
     // ADR 0038 (M4.1): several play sides, or roles the Setup binds, are
     // routed; one sink alone plays as before.
     let sides = signal_project::device::play_sides(project, &plan);
-    let (mut output, sinks) = if crate::devices::routed(setup, sides.len()) {
+    let (mut output, sinks, mixes) = if crate::devices::routed(setup, &sides) {
         let (output, routing) = open_routed(backend, devices, setup, rate, &sides, seed, notes)?;
-        (output, routing.addresses())
+        (output, routing.addresses(), routing.mixes())
     } else {
         let output = open_output(backend, devices, setup, rate, width, seed, notes)?;
-        (output, Vec::new())
+        (output, Vec::new(), Vec::new())
     };
     // ADR 0038 §7: the project's inputs, from the Setup's capture roles.
     let captures = signal_project::device::capture_sides(project, &plan);
@@ -218,7 +218,7 @@ pub fn start(
     let buffer = output.period().unwrap_or(setup.buffer);
     plan.version = 0;
     let config = sized(realtime_config(setup, rate, seed), rate, seed, buffer);
-    let (runner, controller) = realtime_routed(
+    let (mut runner, controller) = realtime_routed(
         &plan,
         registry,
         config,
@@ -226,6 +226,8 @@ pub fn start(
         &sinks,
     )
     .map_err(|error| error.to_string())?;
+    // ADR 0038 §5: each side in its role's layout.
+    runner.convert(mixes);
     let recorder = SessionRecorder::new(project, registry, rate, seed, Provenance::default())
         .map_err(|error| error.to_string())?;
     let workers = runner.workers();

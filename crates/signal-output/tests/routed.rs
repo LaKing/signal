@@ -150,3 +150,83 @@ fn the_main_sink_renders_as_before_and_the_cue_beside_it() {
     let mut engine = Engine::new(&plan(&registry, true), &registry, config, Vec::new()).unwrap();
     assert!(render(&mut engine, FRAMES).is_err());
 }
+
+/// ADR 0038 test 4 (on the null driver): a 5.1 `main` on a fresh stereo
+/// machine is folded by BS.775 (L = l + k·c + k·ls, R = r + k·c + k·rs,
+/// the LFE out), its two channels exactly the matrix of the offline
+/// render's six, as the device gets them (clamped to f32); with
+/// `lfe = -10` the LFE joins at 0.31623.
+#[test]
+fn a_surround_main_is_folded_to_stereo() {
+    let registry = registry();
+    let names = ["l", "r", "c", "lfe", "ls", "rs"];
+    let mut instances = vec![instance("room", "std.audio_out_5_1", &[("gain", 0.5)])];
+    let mut connections = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let osc = format!("o{i}");
+        instances.push(instance(
+            &osc,
+            "std.sine_osc",
+            &[("freq", 110.0 * (i + 1) as f64)],
+        ));
+        connections.push(ConnectionDef {
+            from: format!("{osc}.out"),
+            to: format!("room.{name}"),
+            scale: Some(0.1),
+        });
+    }
+    let root = CompositeDef {
+        seed: None,
+        name: "project".to_owned(),
+        instances,
+        connections,
+        exports: Exports::default(),
+        sleep: Vec::new(),
+    };
+    let plan = build_plan(&root, &[], &registry, 0).unwrap();
+    // The project's six channels, offline (gain applied).
+    let mut engine =
+        Engine::new(&plan, &registry, EngineConfig::new(48_000, 1), Vec::new()).unwrap();
+    let six = render(&mut engine, FRAMES).unwrap().samples;
+    assert_eq!(six.len(), FRAMES as usize * 6);
+    let k = std::f64::consts::FRAC_1_SQRT_2;
+    for (adapter, lfe) in [
+        (signal_output::layouts::Adapter::default(), 0.0),
+        (
+            signal_output::layouts::Adapter::Itu {
+                lfe: Some(-10.0),
+                trim: 0.0,
+            },
+            10f64.powf(-0.5),
+        ),
+    ] {
+        let mut main = RoleBinding::clock(vec![1, 2]);
+        main.adapter = adapter;
+        let system = SoundSystem {
+            roles: [(MAIN.to_owned(), main)].into(),
+        };
+        let sides = [PlaySide {
+            address: address("/room"),
+            role: MAIN.to_owned(),
+            width: 6,
+        }];
+        let routing = route(&sides, &system, Some(2));
+        let (mut runner, _controller) = realtime_routed(
+            &plan,
+            &registry,
+            RealtimeConfig::new(48_000, 1),
+            None,
+            &routing.addresses(),
+        )
+        .unwrap();
+        assert_eq!(runner.convert(routing.mixes()), 2);
+        let played = play(runner, 2);
+        for (n, frame) in played.chunks(2).enumerate() {
+            let x = &six[n * 6..n * 6 + 6];
+            let l = x[0] + k * x[2] + lfe * x[3] + k * x[4];
+            let r = x[1] + k * x[2] + lfe * x[3] + k * x[5];
+            assert_eq!(frame[0], signal_output::device_sample(l), "L at {n}");
+            assert_eq!(frame[1], signal_output::device_sample(r), "R at {n}");
+        }
+    }
+}

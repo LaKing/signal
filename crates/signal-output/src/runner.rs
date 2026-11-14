@@ -22,6 +22,7 @@ use signal_graph::ExecutionPlan;
 use crate::audio::{AudioSink, Meter, to_device};
 use crate::fade::Fade;
 use crate::inputs::RunInput;
+use crate::layouts::Mix;
 use crate::scope::{ScopeBlock, ScopeControl, ScopeCounts, ScopeError, Scopes, scopes};
 use crate::vectors::{
     VectorControl, VectorCounts, VectorError, VectorSnapshot, VectorUnbound, Vectors, vectors,
@@ -81,6 +82,7 @@ pub fn realtime_routed(
         sinks,
         routed,
         width,
+        mixes: Vec::new(),
         meters: meter_tx,
         clipped: 0,
         ceiling: None,
@@ -101,6 +103,10 @@ pub fn realtime_routed(
     };
     Ok((runner, controller))
 }
+
+/// The most channels a converted sink has (7.1's): the conversion's
+/// buffer is this wide, on the stack.
+const MAX_MIX: usize = 8;
 
 /// What the runner counts for the control thread.
 #[derive(Debug, Default)]
@@ -124,8 +130,12 @@ pub struct Runner {
     /// The sinks were named ([`realtime_routed`]): each follows its own
     /// address across swaps.
     routed: bool,
-    /// The audio frame's channels: every sink's, concatenated.
+    /// The audio frame's channels: every sink's, concatenated (a converted
+    /// sink's as its conversion gives them).
     width: usize,
+    /// Per sink, in `sinks`' order, its conversion to its role's layout
+    /// (ADR 0038 §5; [`convert`](Runner::convert)).
+    mixes: Vec<Option<Mix>>,
     /// Per sink channel: (peak, sum of squares) of the current callback.
     levels: Vec<(f32, f64)>,
     meters: Producer<Meter>,
@@ -190,6 +200,7 @@ impl Runner {
         let done = {
             let mut device = Device {
                 sinks: &mut self.sinks,
+                mixes: &self.mixes,
                 routed: self.routed,
                 out: &mut *out,
                 channels,
@@ -245,6 +256,37 @@ impl Runner {
     /// The channels of the audio frame [`process`](Runner::process) writes:
     /// every played sink's, concatenated.
     pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Converts each sink to its role's layout (ADR 0038 §5): `mixes` in
+    /// the sinks' order (a [`Routing`](crate::Routing)'s
+    /// [`mixes`](crate::Routing::mixes), whose addresses the run plays), a
+    /// sink without one played as it is. Per frame each converted sink's
+    /// gained inputs go through its matrix, then its trim, then the clamp:
+    /// the audio frame holds the machine's channels. On the control thread,
+    /// before the driver starts (it allocates); a mix whose source width is
+    /// not its sink's is left out. Returns the frame's new width.
+    pub fn convert(&mut self, mixes: Vec<Option<Mix>>) -> usize {
+        self.mixes = self
+            .sinks
+            .iter()
+            .enumerate()
+            .map(|(i, sink)| {
+                mixes
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .filter(|m| m.from_width() == sink.width && sink.width <= MAX_MIX)
+            })
+            .collect();
+        self.width = self
+            .sinks
+            .iter()
+            .zip(&self.mixes)
+            .map(|(s, m)| m.as_ref().map_or(s.width, Mix::to_width))
+            .sum();
+        self.levels = vec![(0.0, 0.0); self.width];
         self.width
     }
 
@@ -343,6 +385,8 @@ impl DerefMut for Runner {
 /// One callback's device buffer, as the engine's output.
 struct Device<'a> {
     sinks: &'a mut [AudioSink],
+    /// Per sink, its conversion (empty: none).
+    mixes: &'a [Option<Mix>],
     routed: bool,
     out: &'a mut [f32],
     channels: usize,
@@ -398,17 +442,16 @@ impl SinkOutput for Device<'_> {
             row.fill(0.0);
             // The sinks' channels, concatenated in their order.
             let mut channel = 0;
-            for sink in self.sinks.iter() {
+            for (k, sink) in self.sinks.iter().enumerate() {
                 let gain = sink
                     .gain_index()
                     .and_then(|j| engine.parameter_at_frame(j, f));
-                for input in 0..sink.width {
+                let gained = |input: usize| {
                     let x = engine.sink_input_at(sink.id, input, f).unwrap_or(0.0);
-                    let sample = hold(
-                        to_device(gain.map_or(x, |g| g * x), self.clipped),
-                        self.ceiling,
-                        self.ceilinged,
-                    );
+                    gain.map_or(x, |g| g * x)
+                };
+                let mut put = |value: f64, channel: usize| {
+                    let sample = hold(to_device(value, self.clipped), self.ceiling, self.ceilinged);
                     if let Some(level) = self.levels.get_mut(channel) {
                         level.0 = level.0.max(sample.abs());
                         level.1 += f64::from(sample) * f64::from(sample);
@@ -416,7 +459,27 @@ impl SinkOutput for Device<'_> {
                     if let Some(out) = row.get_mut(channel) {
                         *out = sample;
                     }
-                    channel += 1;
+                };
+                match self.mixes.get(k).and_then(Option::as_ref) {
+                    // ADR 0038 §5.7: gain → matrix → trim → clamp, in a
+                    // fixed buffer (at most 8 channels: no allocation).
+                    Some(mix) => {
+                        let mut x = [0.0; MAX_MIX];
+                        for (input, value) in x.iter_mut().enumerate().take(sink.width) {
+                            *value = gained(input);
+                        }
+                        for t in 0..mix.to_width() {
+                            let frame = x.get(..sink.width).unwrap_or(&x);
+                            put(mix.trim * mix.row(t, frame), channel);
+                            channel += 1;
+                        }
+                    }
+                    None => {
+                        for input in 0..sink.width {
+                            put(gained(input), channel);
+                            channel += 1;
+                        }
+                    }
                 }
             }
         }

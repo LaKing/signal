@@ -45,6 +45,7 @@ fn full() -> Setup {
             PlayEntry {
                 channels: vec![3, 4],
                 device: None,
+                ..Default::default()
             },
         )]
         .into(),
@@ -58,6 +59,7 @@ fn full() -> Setup {
                     id: Some("coreaudio:at2020".to_owned()),
                     signature: String::new(),
                 }),
+                ..Default::default()
             },
         )]
         .into(),
@@ -361,14 +363,14 @@ fn the_flag_then_the_environment_then_application_support() {
 
 /// ADR 0038 §4 (M4.1): `[play.<role>]` binds a role to device channels
 /// (and a device); a table that does not read is reported and ignored
-/// alone, and the keys of layout adapters (not built yet) are named.
+/// alone (an unknown layout among them).
 #[test]
 fn play_tables_bind_roles_to_device_channels() {
     let (setup, problems) = parse(
         "version = 1\n[play.cue]\nchannels = [3, 4]\n\
          [play.alt]\nchannels = [1, 2]\ndevice = { name = \"Speakers\", id = \"coreaudio:spk\" }\n\
          [play.zero]\nchannels = [0]\n[play.Wide]\nchannels = [1]\n\
-         [play.surround]\nchannels = [1, 2]\nlayout = \"5.1\"\n[play.none]\n",
+         [play.surround]\nchannels = [1, 2]\nlayout = \"hexa\"\n[play.none]\n",
     );
     assert_eq!(
         setup.play.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -386,7 +388,7 @@ fn play_tables_bind_roles_to_device_channels() {
         [
             "setup.toml: play.Wide: a role is [a-z][a-z0-9_]*; ignored",
             "setup.toml: play.none: channels is missing; ignored",
-            "setup.toml: play.surround: unknown key 'layout' (this version reads channels, device; layout adapters are not built yet); ignored",
+            "setup.toml: play.surround: layout is mono, stereo, quad, 5.1 or 7.1; ignored",
             "setup.toml: play.zero: device channels count from 1; ignored",
         ]
     );

@@ -202,3 +202,69 @@ fn the_routed_callback_allocates_and_frees_nothing() {
         "every channel heard: {heard:?}"
     );
 }
+
+/// ADR 0038 §5.7: a 5.1 `main` folded to stereo on a fresh machine (gain,
+/// matrix, trim, clamp per frame): the callback allocates and frees
+/// nothing either.
+#[test]
+fn the_converted_callback_allocates_and_frees_nothing() {
+    assert!(alloc_counter::is_installed());
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let text = "schema_version = 1\n[project]\nname = \"surround\"\nsample_rate = 48000\nseed = 1\n\
+                [instances]\nosc = { module = \"std.sine_osc\", freq = 220 }\nroom = { device = { play = \"5.1\" } }\n\
+                [wiring]\nconnections = [\n  { from = \"osc.out\", to = \"room.c\", scale = 0.25 },\n  { from = \"osc.out\", to = \"room.rs\", scale = 0.25 },\n]\n";
+    let project = Project::from_sources(vec![signal_project::SourceFile {
+        path: "project.toml".to_owned(),
+        text: text.to_owned(),
+    }])
+    .unwrap();
+    let plan = project.plan(&registry).unwrap().plan;
+    let sides = signal_project::device::play_sides(&project, &plan);
+    let mut adapter_main = signal_output::RoleBinding::clock(vec![1, 2]);
+    adapter_main.adapter = signal_output::layouts::Adapter::Itu {
+        lfe: Some(-10.0),
+        trim: -3.0,
+    };
+    let system = signal_output::SoundSystem {
+        roles: [("main".to_owned(), adapter_main)].into(),
+    };
+    let routing = signal_output::route(&sides, &system, Some(2));
+    assert_eq!(routing.targets(), [Some(0), Some(1)]);
+    let config = RealtimeConfig::new(48_000, 1);
+    let (mut runner, mut controller) =
+        signal_output::realtime_routed(&plan, &registry, config, None, &routing.addresses())
+            .unwrap();
+    assert_eq!(runner.convert(routing.mixes()), 2);
+    let stats = Arc::new(CallbackStats::default());
+    let map = ChannelMap::with_routes(2, routing.targets()).unwrap();
+    let (mut callback, _control) =
+        OutputCallback::new(runner, map, 256, 48_000, Arc::clone(&stats));
+    let mut out = vec![0.0f32; 1_024 * 2];
+    let mut sizes = CallbackSizes::new(13);
+    let mut total = Counts::default();
+    let mut heard = [0.0f32; 2];
+    for n in 0..2_000 {
+        let frames = sizes.next_size().min(1_024);
+        let buffer = &mut out[..frames * 2];
+        let guard = Guard::start();
+        callback.fill(buffer);
+        let counts = guard.counts();
+        drop(guard);
+        total.allocations += counts.allocations;
+        total.deallocations += counts.deallocations;
+        for frame in buffer.as_chunks::<2>().0 {
+            for (h, x) in heard.iter_mut().zip(frame) {
+                *h = h.max(x.abs());
+            }
+        }
+        if n % 16 == 0 {
+            controller.poll(&mut ());
+        }
+    }
+    assert!(total.is_zero(), "{total:?}");
+    assert!(
+        heard.iter().all(|&h| h > 0.0),
+        "both channels heard: {heard:?}"
+    );
+}

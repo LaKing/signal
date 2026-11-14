@@ -44,6 +44,7 @@ fn bound_to_at2020() -> Setup {
                 id: Some("coreaudio:at".to_owned()),
                 signature: String::new(),
             }),
+            ..Default::default()
         },
     );
     setup

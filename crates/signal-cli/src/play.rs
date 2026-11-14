@@ -423,7 +423,9 @@ pub(crate) fn run(
     // ADR 0038 (M4.1): every play side, routed with `--route` on the output
     // device; one sink without a route plays as before.
     let sides = signal_project::device::play_sides(&project, &plan);
-    let (width, sinks, routes, secondaries) = if sides.len() > 1 || !args.route.is_empty() {
+    // ADR 0038 §5: a side of another layout than stereo is converted too.
+    let routed = sides.len() > 1 || !args.route.is_empty() || sides.iter().any(|s| s.width != 2);
+    let (width, sinks, routes, secondaries, mixes) = if routed {
         // Listing is read-only: the output device's channels, so that a
         // route past them is refused for that channel, not for the run, and
         // whether another device a route names is present.
@@ -464,6 +466,7 @@ pub(crate) fn run(
                     let binding = RoleBinding {
                         placement,
                         channels: r.channels.clone(),
+                        ..RoleBinding::clock(Vec::new())
                     };
                     (r.role.clone(), binding)
                 })
@@ -496,9 +499,10 @@ pub(crate) fn run(
             routing.addresses(),
             Some(routing.targets()),
             secondaries,
+            routing.mixes(),
         )
     } else {
-        (width, Vec::new(), None, Vec::new())
+        (width, Vec::new(), None, Vec::new(), Vec::new())
     };
     // ADR 0038 §7: every capture side, routed on the inputs `--capture`
     // names (the default input otherwise).
@@ -604,7 +608,7 @@ pub(crate) fn run(
         computation: args.rt_computation,
         trace: args.rt_trace,
     };
-    let (runner, controller) = realtime_routed(
+    let (mut runner, controller) = realtime_routed(
         &plan,
         registry,
         config,
@@ -612,6 +616,8 @@ pub(crate) fn run(
         &sinks,
     )
     .map_err(|e| Failure::Internal(e.to_string()))?;
+    // ADR 0038 §5: each side in its role's layout.
+    runner.convert(mixes);
     if let Some(error) = runner.waiter_error() {
         eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
     }

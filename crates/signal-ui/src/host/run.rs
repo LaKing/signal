@@ -462,7 +462,7 @@ impl Host {
         // (devices.local.toml over it), are routed by `crate::devices`.
         let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.local_dir());
         let sides = signal_project::device::play_sides(&project, &plan);
-        let routed = crate::devices::routed(&setup, sides.len());
+        let routed = crate::devices::routed(&setup, &sides);
         // ADR 0036: the run plays at the rate the output runs at, never
         // switching it (the owner's decision of 2026-10-23).
         let (rate, notice) = match (&self.backend, first) {
@@ -495,6 +495,7 @@ impl Host {
         };
         notes.extend(notice);
         let mut sinks = Vec::new();
+        let mut mixes = Vec::new();
         let mut width = width;
         let (mut output, buffer, threads) = if routed {
             let mut setup = setup.clone();
@@ -520,6 +521,7 @@ impl Host {
                 &mut notes,
             )?;
             sinks = routing.addresses();
+            mixes = routing.mixes();
             width = routing.width();
             let threads = if first {
                 self.first.threads
@@ -598,6 +600,8 @@ impl Host {
             &sinks,
         )
         .map_err(|e| e.to_string())?;
+        // ADR 0038 §5: each side in its role's layout.
+        runner.convert(mixes);
         runner.set_ceiling(self.ceiling);
         let recorder = SessionRecorder::new(
             &project,

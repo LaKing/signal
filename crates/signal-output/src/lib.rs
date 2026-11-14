@@ -54,6 +54,7 @@ mod audio;
 mod driver;
 pub mod fade;
 pub mod inputs;
+pub mod layouts;
 mod render;
 pub mod routing;
 mod runner;

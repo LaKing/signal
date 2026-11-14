@@ -68,7 +68,7 @@ pub struct Local {
     pub capture: BTreeMap<String, LocalPlay>,
 }
 
-/// One role's override in `devices.local.toml`: either key may be absent
+/// One role's override in `devices.local.toml`: any key may be absent
 /// (merged over the Setup's key by key).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalPlay {
@@ -76,6 +76,12 @@ pub struct LocalPlay {
     pub channels: Option<Vec<u16>>,
     /// Its device.
     pub device: Option<DeviceEntry>,
+    /// Its layout (ADR 0038 §4).
+    pub layout: Option<String>,
+    /// Its adapter (ADR 0038 §5.6).
+    pub adapter: Option<crate::setup::AdapterValue>,
+    /// `prefer` (ADR 0038 §5.4).
+    pub prefer: Option<String>,
 }
 
 /// [`read_local`] of the text.
@@ -137,6 +143,26 @@ fn parse_section(
                         "{LOCAL_FILE}: {section}.{role}.device: a device table (name, id, signature); ignored"
                     )),
                 },
+                "layout" => match value.as_str() {
+                    Some(layout) if signal_output::layouts::layout_channels(layout).is_some() => {
+                        local.layout = Some(layout.to_owned());
+                    }
+                    _ => problems.push(format!(
+                        "{LOCAL_FILE}: {section}.{role}.layout: mono, stereo, quad, 5.1 or 7.1; ignored"
+                    )),
+                },
+                "adapter" => match crate::setup::adapter_of(value) {
+                    Ok(_) => local.adapter = Some(crate::setup::AdapterValue(value.clone())),
+                    Err(why) => problems.push(format!(
+                        "{LOCAL_FILE}: {section}.{role}.adapter: {why}; ignored"
+                    )),
+                },
+                "prefer" => match value.as_str() {
+                    Some(prefer @ ("author" | "adapter")) => local.prefer = Some(prefer.to_owned()),
+                    _ => problems.push(format!(
+                        "{LOCAL_FILE}: {section}.{role}.prefer: \"author\" or \"adapter\"; ignored"
+                    )),
+                },
                 other => problems.push(format!(
                     "{LOCAL_FILE}: {section}.{role}: unknown key '{other}'; ignored"
                 )),
@@ -147,6 +173,33 @@ fn parse_section(
     found
 }
 
+/// `over` merged over `base` key by key.
+fn merged_entry(over: &LocalPlay, base: Option<&PlayEntry>) -> PlayEntry {
+    PlayEntry {
+        channels: over
+            .channels
+            .clone()
+            .or_else(|| base.map(|b| b.channels.clone()))
+            .unwrap_or_default(),
+        device: over
+            .device
+            .clone()
+            .or_else(|| base.and_then(|b| b.device.clone())),
+        layout: over
+            .layout
+            .clone()
+            .or_else(|| base.and_then(|b| b.layout.clone())),
+        adapter: over
+            .adapter
+            .clone()
+            .or_else(|| base.and_then(|b| b.adapter.clone())),
+        prefer: over
+            .prefer
+            .clone()
+            .or_else(|| base.and_then(|b| b.prefer.clone())),
+    }
+}
+
 /// The Setup with `devices.local.toml`'s overrides merged over its
 /// `[play.<role>]` and `[capture.<role>]` key by key (ADR 0038 §6: local,
 /// then the Setup, then the defaults). An override of `main`'s channels
@@ -155,17 +208,7 @@ pub fn effective(setup: &Setup, local: &Local) -> Setup {
     let mut merged = setup.clone();
     for (role, over) in &local.capture {
         let base = merged.capture.get(role);
-        let entry = PlayEntry {
-            channels: over
-                .channels
-                .clone()
-                .or_else(|| base.map(|b| b.channels.clone()))
-                .unwrap_or_default(),
-            device: over
-                .device
-                .clone()
-                .or_else(|| base.and_then(|b| b.device.clone())),
-        };
+        let entry = merged_entry(over, base);
         if !entry.channels.is_empty() {
             merged.capture.insert(role.clone(), entry);
         }
@@ -174,20 +217,10 @@ pub fn effective(setup: &Setup, local: &Local) -> Setup {
         let base = merged.play.get(role).cloned().or_else(|| {
             (role == MAIN).then(|| PlayEntry {
                 channels: setup.output_channels.clone().unwrap_or_default(),
-                device: None,
+                ..PlayEntry::default()
             })
         });
-        let entry = PlayEntry {
-            channels: over
-                .channels
-                .clone()
-                .or_else(|| base.as_ref().map(|b| b.channels.clone()))
-                .unwrap_or_default(),
-            device: over
-                .device
-                .clone()
-                .or_else(|| base.as_ref().and_then(|b| b.device.clone())),
-        };
+        let entry = merged_entry(over, base.as_ref());
         if entry.channels.is_empty() {
             continue;
         }
@@ -225,8 +258,9 @@ pub fn effective_setup(setup: &Setup, dir: &Path) -> (Setup, Vec<String>) {
 
 /// Whether the run must route several play sides (or a role the Setup
 /// describes) rather than play its one sink as before.
-pub fn routed(setup: &Setup, sides: usize) -> bool {
-    sides > 1 || !setup.play.is_empty()
+pub fn routed(setup: &Setup, sides: &[signal_output::PlaySide]) -> bool {
+    // ADR 0038 §5: a side of another layout than stereo is converted.
+    sides.len() > 1 || !setup.play.is_empty() || sides.iter().any(|s| s.width != 2)
 }
 
 /// The clock device of `setup` in `devices`: the Setup's output, else the
@@ -293,6 +327,8 @@ pub fn sound_system(setup: &Setup, devices: &[DeviceInfo]) -> SoundSystem {
             RoleBinding {
                 placement,
                 channels: entry.channels.clone(),
+                layout: entry.layout.clone(),
+                adapter: entry.adapter(),
             },
         );
     }
@@ -506,9 +542,8 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
                     notes,
                 });
             }
-            setup
-                .capture
-                .insert(role.clone(), PlayEntry { channels, device });
+            let entry = PlayEntry::rebound(setup.capture.get(&role), channels, device);
+            setup.capture.insert(role.clone(), entry);
             return Ok(Routed {
                 role,
                 scope,
@@ -542,9 +577,8 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
                 // so the binding follows the clock.
                 let device =
                     device.filter(|d| setup.output.as_ref().is_none_or(|o| !same_device(o, d)));
-                setup
-                    .play
-                    .insert(role.clone(), PlayEntry { channels, device });
+                let entry = PlayEntry::rebound(setup.play.get(&role), channels, device);
+                setup.play.insert(role.clone(), entry);
             }
             Ok(Routed {
                 role,
@@ -795,6 +829,7 @@ mod tests {
             PlayEntry {
                 channels: vec![3, 4],
                 device: None,
+                ..PlayEntry::default()
             },
         );
         setup.play.insert(
@@ -802,6 +837,7 @@ mod tests {
             PlayEntry {
                 channels: vec![1, 2],
                 device: Some(entry(&speakers)),
+                ..PlayEntry::default()
             },
         );
         setup.play.insert(
@@ -809,6 +845,7 @@ mod tests {
             PlayEntry {
                 channels: vec![3, 4],
                 device: Some(entry(&ssl())),
+                ..PlayEntry::default()
             },
         );
         setup.play.insert(
@@ -820,6 +857,7 @@ mod tests {
                     id: Some("x".to_owned()),
                     signature: String::new(),
                 }),
+                ..PlayEntry::default()
             },
         );
         let system = sound_system(&setup, &devices);
@@ -897,7 +935,8 @@ mod tests {
             setup.play["cue"],
             PlayEntry {
                 channels: vec![3, 4],
-                device: None
+                device: None,
+                ..PlayEntry::default()
             }
         );
         // The clock device named is written as none.
@@ -951,6 +990,7 @@ mod tests {
             PlayEntry {
                 channels: vec![3, 4],
                 device: None,
+                ..PlayEntry::default()
             },
         );
         let routed = route(
@@ -1000,6 +1040,7 @@ mod tests {
             PlayEntry {
                 channels: vec![1],
                 device: None,
+                ..PlayEntry::default()
             },
         );
         let routed = route(
@@ -1068,7 +1109,8 @@ mod tests {
             merged.play["main"],
             PlayEntry {
                 channels: vec![1, 2],
-                device: None
+                device: None,
+                ..PlayEntry::default()
             }
         );
         assert_eq!(
@@ -1108,5 +1150,54 @@ mod tests {
             "devices.local.toml\n"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// ADR 0038 §4–6: `[play.<role>]`'s `layout` and `adapter` read into the
+    /// role's binding; `devices.local.toml` overrides them key by key; a bad
+    /// adapter makes the table reported; written back as they were.
+    #[test]
+    fn layouts_and_adapters_are_read_merged_and_written() {
+        use signal_output::layouts::Adapter;
+        let path = std::path::Path::new("setup.toml");
+        let text = "version = 1\n[play.main]\nchannels = [1, 2]\nlayout = \"stereo\"\nadapter = { lfe = -10, trim = -3 }\nprefer = \"adapter\"\n";
+        let (setup, problems) = Setup::parse(text, path);
+        assert!(problems.is_empty(), "{problems:?}");
+        let main = &sound_system(&setup, &[]).roles["main"];
+        assert_eq!(main.layout.as_deref(), Some("stereo"));
+        assert_eq!(
+            main.adapter,
+            Adapter::Itu {
+                lfe: Some(-10.0),
+                trim: -3.0
+            }
+        );
+        let (local, problems) = parse_local("[play.main]\nadapter = { kind = \"direct\" }\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        let merged = effective(&setup, &local);
+        let main = &sound_system(&merged, &[]).roles["main"];
+        assert_eq!(main.adapter, Adapter::Direct);
+        assert_eq!(main.channels, [1, 2], "the Setup's channels kept");
+        let (_, problems) = Setup::parse(
+            "version = 1\n[play.main]\nchannels = [1, 2]\nadapter = { kind = \"bass\" }\n",
+            path,
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("adapter: kind `bass`")),
+            "{problems:?}"
+        );
+        let (_, problems) = Setup::parse(
+            "version = 1\n[play.main]\nchannels = [1, 2]\nadapter = [{ kind = \"matrix\", from = \"5.1\", rows = { l = { l = 1, c = 0.5 }, r = { r = 1, c = 0.5 } } }]\n",
+            path,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let written = toml::to_string(&setup.play["main"]).unwrap();
+        assert!(
+            written.contains("layout = \"stereo\"") && written.contains("prefer = \"adapter\""),
+            "{written}"
+        );
+        assert!(
+            written.contains("lfe = -10") && written.contains("trim = -3"),
+            "{written}"
+        );
     }
 }

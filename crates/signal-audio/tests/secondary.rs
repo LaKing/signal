@@ -52,6 +52,7 @@ fn cue_elsewhere() -> (Runner, Routing) {
                 RoleBinding {
                     placement: Placement::Other("Speakers".to_owned()),
                     channels: vec![1, 2],
+                    ..RoleBinding::clock(Vec::new())
                 },
             ),
         ]

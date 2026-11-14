@@ -69,8 +69,9 @@ impl DeviceEntry {
 }
 
 /// ADR 0038 §4 (M4.1): where a role plays on this machine, `[play.<role>]`:
-/// its device (the clock device, the Setup's `output`, without one) and
-/// its device channels from 1, in the play side's port order. `main`'s
+/// its device (the clock device, the Setup's `output`, without one), its
+/// device channels from 1 in its layout's channel order, its layout (else
+/// its channel count's), its adapter (ADR 0038 §5.6) and `prefer`. `main`'s
 /// short form stays `output_channels`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayEntry {
@@ -79,11 +80,150 @@ pub struct PlayEntry {
     /// Its device; the clock device without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceEntry>,
+    /// Its layout (`stereo`, `5.1`, …); its channel count's without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// Its adapter, as written ([`adapter_of`] reads it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterValue>,
+    /// `"author"` or `"adapter"` (ADR 0038 §5.4): which of a role's
+    /// versions plays. One version per role is built, so both play it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer: Option<String>,
 }
 
-/// The keys of a `[play.<role>]` table this version reads; ADR 0038's
-/// `layout`, `adapter` and `prefer` are not built yet.
-const PLAY_KEYS: [&str; 2] = ["channels", "device"];
+impl PlayEntry {
+    /// The entry for `channels` on `device`, keeping `old`'s adapter and
+    /// `prefer`, and its layout while it has as many channels.
+    pub fn rebound(
+        old: Option<&PlayEntry>,
+        channels: Vec<u16>,
+        device: Option<DeviceEntry>,
+    ) -> PlayEntry {
+        let layout = old.and_then(|o| o.layout.clone()).filter(|l| {
+            signal_output::layouts::layout_channels(l).is_some_and(|c| c.len() == channels.len())
+        });
+        PlayEntry {
+            channels,
+            device,
+            layout,
+            adapter: old.and_then(|o| o.adapter.clone()),
+            prefer: old.and_then(|o| o.prefer.clone()),
+        }
+    }
+
+    /// Its adapter (the default, `itu`, without one).
+    pub fn adapter(&self) -> signal_output::layouts::Adapter {
+        self.adapter
+            .as_ref()
+            .and_then(|a| adapter_of(&a.0).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// An `adapter` value as written (a table, or a list of `matrix` tables),
+/// kept to be written back as it was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AdapterValue(pub toml::Value);
+
+// A value read from TOML: NaN cannot be written there, so it is equal to itself.
+impl Eq for AdapterValue {}
+
+/// ADR 0038 §5.6: an `adapter` value read: `{ kind = "itu", lfe = "off" |
+/// <dB>, trim = <dB> }` (the default kind), `{ kind = "direct" }`, or
+/// `{ kind = "matrix", from = "<layout>", rows = { <target> = { <source> =
+/// <coefficient> } }, lfe, trim }`, several of the last as a list (one per
+/// `from`); or why it does not read.
+pub fn adapter_of(value: &toml::Value) -> Result<signal_output::layouts::Adapter, String> {
+    use signal_output::layouts::{Adapter, layout_channels};
+    let tables: Vec<&toml::Table> = match value {
+        toml::Value::Table(table) => vec![table],
+        toml::Value::Array(items) => items
+            .iter()
+            .map(|i| {
+                i.as_table()
+                    .ok_or("a list of tables (one matrix per `from`)")
+            })
+            .collect::<Result<_, _>>()?,
+        _ => return Err("a table (`{ lfe = -10 }`, `{ kind = \"direct\" }`, …)".to_owned()),
+    };
+    let number = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+    let mut lfe = None;
+    let mut trim = 0.0;
+    let mut rows = std::collections::BTreeMap::new();
+    let mut kind_seen = None;
+    for table in &tables {
+        let kind = table.get("kind").map_or(Some("itu"), toml::Value::as_str);
+        let kind = kind.ok_or("kind is \"itu\", \"direct\" or \"matrix\"")?;
+        if !matches!(kind, "itu" | "direct" | "matrix") {
+            return Err(format!(
+                "kind `{kind}` is \"itu\", \"direct\" or \"matrix\""
+            ));
+        }
+        if tables.len() > 1 && kind != "matrix" {
+            return Err("a list holds `matrix` adapters only".to_owned());
+        }
+        kind_seen = Some(kind);
+        for (key, v) in table.iter() {
+            match key.as_str() {
+                "kind" => {}
+                "lfe" if kind != "direct" => {
+                    lfe = match v.as_str() {
+                        Some("off") => None,
+                        Some(other) => return Err(format!("lfe is \"off\" or dB, not `{other}`")),
+                        None => Some(
+                            number(v)
+                                .filter(|x| x.is_finite())
+                                .ok_or("lfe is \"off\" or dB")?,
+                        ),
+                    }
+                }
+                "trim" if kind != "direct" => {
+                    trim = number(v).filter(|x| x.is_finite()).ok_or("trim is in dB")?;
+                }
+                "from" | "rows" if kind == "matrix" => {}
+                other => return Err(format!("unknown key `{other}` for a `{kind}` adapter")),
+            }
+        }
+        if kind == "matrix" {
+            let from = table
+                .get("from")
+                .and_then(toml::Value::as_str)
+                .filter(|f| layout_channels(f).is_some())
+                .ok_or("a matrix names its source layout: from = \"5.1\"")?;
+            let named = table
+                .get("rows")
+                .and_then(toml::Value::as_table)
+                .ok_or("a matrix has rows = { <channel> = { <channel> = <coefficient> } }")?;
+            let mut by_target = std::collections::BTreeMap::new();
+            for (target, row) in named {
+                let row = row
+                    .as_table()
+                    .ok_or("each row is a table of coefficients")?;
+                let mut by_source = std::collections::BTreeMap::new();
+                for (source, c) in row {
+                    let c = number(c)
+                        .filter(|x| x.is_finite())
+                        .ok_or_else(|| format!("{target}.{source} is not a finite number"))?;
+                    by_source.insert(source.clone(), c);
+                }
+                by_target.insert(target.clone(), by_source);
+            }
+            if rows.insert(from.to_owned(), by_target).is_some() {
+                return Err(format!("two matrices from {from}"));
+            }
+        }
+    }
+    Ok(match kind_seen {
+        Some("direct") => Adapter::Direct,
+        Some("matrix") => Adapter::Matrix { rows, lfe, trim },
+        _ => Adapter::Itu { lfe, trim },
+    })
+}
+
+/// The keys of a `[play.<role>]` table this version reads.
+const PLAY_KEYS: [&str; 5] = ["channels", "device", "layout", "adapter", "prefer"];
 
 /// A `[play.<role>]` table, or why it does not read.
 fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
@@ -110,9 +250,23 @@ fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
                 Ok(device) => entry.device = Some(device),
                 Err(error) => return Err(format!("device: {error}")),
             },
+            "layout" => match value.as_str() {
+                Some(layout) if signal_output::layouts::layout_channels(layout).is_some() => {
+                    entry.layout = Some(layout.to_owned());
+                }
+                _ => return Err("layout is mono, stereo, quad, 5.1 or 7.1".to_owned()),
+            },
+            "adapter" => match adapter_of(&value) {
+                Ok(_) => entry.adapter = Some(AdapterValue(value)),
+                Err(why) => return Err(format!("adapter: {why}")),
+            },
+            "prefer" => match value.as_str() {
+                Some(prefer @ ("author" | "adapter")) => entry.prefer = Some(prefer.to_owned()),
+                _ => return Err("prefer is \"author\" or \"adapter\"".to_owned()),
+            },
             other => {
                 return Err(format!(
-                    "unknown key '{other}' (this version reads {}; layout adapters are not built yet)",
+                    "unknown key '{other}' (this version reads {})",
                     PLAY_KEYS.join(", ")
                 ));
             }

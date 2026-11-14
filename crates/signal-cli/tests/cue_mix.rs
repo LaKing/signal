@@ -243,6 +243,7 @@ fn main_and_cue_play_on_out_1_2_and_out_3_4_of_one_device() {
         PlayEntry {
             channels: vec![3, 4],
             device: None,
+            ..Default::default()
         },
     );
     let mut notes = Vec::new();
