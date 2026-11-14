@@ -201,3 +201,38 @@ fn default_levels_stay_within_one() {
         assert!(peak <= 1.0, "lib.{}: default peak {peak}", file.name);
     }
 }
+
+/// ADR 0035 §9: a `lib.mixer` channel at −120 dB, or muted (its 5 ms lag
+/// reaches 1 exactly), is bit-neutral: the outputs equal, as numbers, the
+/// outputs with that channel's inputs unconnected. Balance −1 silences the
+/// right side of its channel and leaves the left as it is.
+#[test]
+fn a_silent_mixer_channel_is_bit_neutral() {
+    let (instances, connections) = common::stimulus("mixer");
+    let without_b: String = connections
+        .lines()
+        .filter(|l| !l.contains("x.b_"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let numbers =
+        |r: &signal_output::Render| -> Vec<f64> { r.samples.iter().map(|&x| x + 0.0).collect() };
+    let reference = numbers(&common::render(&common::project_with(
+        "mixer", "", instances, &without_b,
+    )));
+    let silent = numbers(&common::render(&common::project("mixer", "b_level = -120")));
+    assert_eq!(silent, reference, "at −120 dB");
+    // Muted from the start: the lag starts at 0 and reaches 1 exactly
+    // within the render; from then on the channel adds nothing.
+    let muted = numbers(&common::render(&common::project("mixer", "b_mute = 1")));
+    let settled = muted.len() * 3 / 4;
+    assert_eq!(muted[settled..], reference[settled..], "muted");
+    let audible = numbers(&common::render(&common::project("mixer", "")));
+    assert_ne!(audible, reference, "channel b is heard at 0 dB");
+    // Balance −1 on every channel: the right output is silent.
+    let left = common::render(&common::project(
+        "mixer",
+        "a_balance = -1, b_balance = -1, c_balance = -1, d_balance = -1",
+    ));
+    assert!(left.samples.iter().skip(1).step_by(2).all(|&x| x == 0.0));
+    assert!(left.samples.iter().step_by(2).any(|&x| x != 0.0));
+}

@@ -257,6 +257,7 @@ The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Sign
 | `lib.ar_env` | `envelope` | Attack-release from a gate through `std.lag` |
 | `lib.crossfade` | `core` | `a·(1 − mix) + b·mix`, the mix clamped to [0, 1] |
 | `lib.stereo_width` | `core` | Mid/side width, `width` clamped to [0, 2] |
+| `lib.mixer` | `core` | Four stereo channels (`<c>_level` dB, `<c>_mute` smoothed 5 ms, `<c>_balance`) into a pair, a master `level`; a channel at −120 dB or muted is bit-neutral (ADR 0035 §9) |
 | `lib.transport` | `event` | ADR 0033: the transport as a signal, `std.playhead` with `bpm`, `run`, `rate` and the `seek` input exported, `position`, `running`, `tempo` and `jump` out, for `std.note_seq.follow` and `std.step_seq8.follow`. Not in `projects/library-demo` (`signal_lib::NOT_IN_DEMO`) |
 | `lib.modal_voice` | `generator` | M2.10-8: `std.exciter` into `std.modal` once per rising gate, a loudness contour, velocity to level and brightness; every exciter and bank control exported, and the bank's `mode_freq`, `mode_gain`, `mode_decay` vector inputs (each element `v` a factor `1 + v`, unconnected 1). Not in `projects/library-demo` (`signal_lib::NOT_IN_DEMO`: the demo's golden is never regenerated) |
 

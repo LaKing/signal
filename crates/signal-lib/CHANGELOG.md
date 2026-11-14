@@ -35,6 +35,7 @@ project's text.
 
 The library of Signal 0.4.0. No composite changed its output from 0.3.
 
+- `lib.mixer` (new, ADR 0035 §9): four stereo channels `a`…`d` (inputs `a_l`, `a_r` … `d_l`, `d_r`), each with `<c>_level` (dB, exactly silent at −120), `<c>_mute` (smoothed over 5 ms, reaching its target exactly) and `<c>_balance`, summed in channel order, then a master `level`; outputs `l`, `r`. A channel at −120 dB or muted is bit-neutral. Pinned render hash `b608f416505c7717`
 - `lib.poly_voice` (interface template, ADR 0044 §2): a polyphonic voice, inputs `notes` (events, trigger, `voice = "alloc"`), `hz` (frequency, Hz), `gate` (gate) and `velocity` (control, 0 to 1), the last three `voice = "each"`, output `out` (audio, `voice = "sum"`); text hash `bdc391924b112a10`
 
 ## 0.3

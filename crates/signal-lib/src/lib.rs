@@ -56,7 +56,7 @@ macro_rules! library {
 }
 
 /// Every library composite, in name order.
-static COMPOSITES: [LibraryFile; 22] = library![
+static COMPOSITES: [LibraryFile; 23] = library![
     "adsr_core",
     "analog_clap",
     "analog_cymbal",
@@ -71,6 +71,7 @@ static COMPOSITES: [LibraryFile; 22] = library![
     "ladder_voice",
     "lag_core",
     "lfo_shapes",
+    "mixer",
     "modal_voice",
     "onepole_core",
     "osc_core",
@@ -176,7 +177,7 @@ pub static VALIDATION: [ValidationPair; 7] = [
 /// validation references: its golden render is never regenerated
 /// (`docs/testing-and-evaluation.md`), so a newer composite is shown by its
 /// own pinned render (`tests/pinned.rs`) instead.
-pub static NOT_IN_DEMO: [&str; 2] = ["modal_voice", "transport"];
+pub static NOT_IN_DEMO: [&str; 3] = ["mixer", "modal_voice", "transport"];
 
 /// Whether the library demo leaves `name` (without the `lib.` prefix) out:
 /// a validation reference or a composite in [`NOT_IN_DEMO`].

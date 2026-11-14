@@ -106,6 +106,19 @@ pub fn stimulus(name: &str) -> (&'static str, &'static str) {
             "{ from = \"tone.out\", to = \"x.l\" },\n{ from = \"saw.out\", to = \"x.r\" },\n\
              { from = \"x.out_l\", to = \"out.l\" },\n{ from = \"x.out_r\", to = \"out.r\" },\n",
         ),
+        // ADR 0035 §9: four sources into the four channels, each pair a
+        // sine and a saw at a quarter level (the mix within ±1).
+        "mixer" => (
+            "s1 = { module = \"std.sine_osc\", freq = 220 }\n\
+             s2 = { module = \"std.osc\", shape = 1, freq = 330 }\n\
+             s3 = { module = \"std.sine_osc\", freq = 440 }\n\
+             s4 = { module = \"std.osc\", shape = 1, freq = 110 }\n",
+            "{ from = \"s1.out\", to = \"x.a_l\", scale = 0.25 },\n{ from = \"s2.out\", to = \"x.a_r\", scale = 0.25 },\n\
+             { from = \"s2.out\", to = \"x.b_l\", scale = 0.25 },\n{ from = \"s3.out\", to = \"x.b_r\", scale = 0.25 },\n\
+             { from = \"s3.out\", to = \"x.c_l\", scale = 0.25 },\n{ from = \"s4.out\", to = \"x.c_r\", scale = 0.25 },\n\
+             { from = \"s4.out\", to = \"x.d_l\", scale = 0.25 },\n{ from = \"s1.out\", to = \"x.d_r\", scale = 0.25 },\n\
+             { from = \"x.l\", to = \"out.l\" },\n{ from = \"x.r\", to = \"out.r\" },\n",
+        ),
         // The validation references (M2.10-4): a 220 Hz sine at half level
         // into the filters, the delay and the shaper; a 5 Hz square into the
         // lag; the envelope's 5 Hz gate and 8 Hz trigger; the oscillator's

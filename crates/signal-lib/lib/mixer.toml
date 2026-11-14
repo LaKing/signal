@@ -1,0 +1,171 @@
+# A four-channel stereo mixer (ADR 0035 §9): channels a…d, each a pair of
+# inputs `<c>_l`, `<c>_r` through
+#
+#   level (dB, a std.gain per side, exactly 0 at −120 dB),
+#   mute (0 or 1, through a 5 ms std.lag, which reaches its target exactly,
+#         so a muted channel adds exactly 0 and muting never clicks),
+#   balance (−1…1: the left side times min(1, 1 − b), the right side times
+#            min(1, 1 + b); 0 leaves both as they are),
+#
+# summed by a std.mix per side (ordered operands a, b, c, d, so the sum never
+# depends on what feeds the channels: ADR 0027 §1), then a master `level`.
+# A channel at −120 dB or muted is bit-neutral: the outputs equal, as
+# numbers, the outputs with that channel unconnected.
+schema_version = 1
+
+[composite]
+name = "mixer"
+category = "core"
+description = "Four stereo channels into one pair. Inputs: a_l, a_r, b_l, b_r, c_l, c_r, d_l, d_r. Outputs: l, r. Parameters: a_level, b_level, c_level, d_level (dB, −120 to 24, exactly silent at −120; default 0); a_mute, b_mute, c_mute, d_mute (0 or 1, smoothed over 5 ms); a_balance, b_balance, c_balance, d_balance (−1 to 1, default 0); level (the master, dB). A channel at −120 dB or muted is bit-neutral."
+
+[instances]
+a_gl = { module = "std.gain", db = 0 }
+a_gr = { module = "std.gain", db = 0 }
+a_mute = { module = "std.const", value = 0 }
+a_mute_lag = { module = "std.lag", rise_ms = 5, fall_ms = 5 }
+a_open = { module = "std.scale", mul = -1, add = 1 }
+a_bal = { module = "std.const", value = 0 }
+a_bl = { module = "std.scale", mul = -1, add = 1 }
+a_bl_lim = { module = "std.clamp", lo = 0, hi = 1 }
+a_br = { module = "std.scale", mul = 1, add = 1 }
+a_br_lim = { module = "std.clamp", lo = 0, hi = 1 }
+a_kl = { module = "std.mul" }
+a_kr = { module = "std.mul" }
+a_l = { module = "std.mul" }
+a_r = { module = "std.mul" }
+b_gl = { module = "std.gain", db = 0 }
+b_gr = { module = "std.gain", db = 0 }
+b_mute = { module = "std.const", value = 0 }
+b_mute_lag = { module = "std.lag", rise_ms = 5, fall_ms = 5 }
+b_open = { module = "std.scale", mul = -1, add = 1 }
+b_bal = { module = "std.const", value = 0 }
+b_bl = { module = "std.scale", mul = -1, add = 1 }
+b_bl_lim = { module = "std.clamp", lo = 0, hi = 1 }
+b_br = { module = "std.scale", mul = 1, add = 1 }
+b_br_lim = { module = "std.clamp", lo = 0, hi = 1 }
+b_kl = { module = "std.mul" }
+b_kr = { module = "std.mul" }
+b_l = { module = "std.mul" }
+b_r = { module = "std.mul" }
+c_gl = { module = "std.gain", db = 0 }
+c_gr = { module = "std.gain", db = 0 }
+c_mute = { module = "std.const", value = 0 }
+c_mute_lag = { module = "std.lag", rise_ms = 5, fall_ms = 5 }
+c_open = { module = "std.scale", mul = -1, add = 1 }
+c_bal = { module = "std.const", value = 0 }
+c_bl = { module = "std.scale", mul = -1, add = 1 }
+c_bl_lim = { module = "std.clamp", lo = 0, hi = 1 }
+c_br = { module = "std.scale", mul = 1, add = 1 }
+c_br_lim = { module = "std.clamp", lo = 0, hi = 1 }
+c_kl = { module = "std.mul" }
+c_kr = { module = "std.mul" }
+c_l = { module = "std.mul" }
+c_r = { module = "std.mul" }
+d_gl = { module = "std.gain", db = 0 }
+d_gr = { module = "std.gain", db = 0 }
+d_mute = { module = "std.const", value = 0 }
+d_mute_lag = { module = "std.lag", rise_ms = 5, fall_ms = 5 }
+d_open = { module = "std.scale", mul = -1, add = 1 }
+d_bal = { module = "std.const", value = 0 }
+d_bl = { module = "std.scale", mul = -1, add = 1 }
+d_bl_lim = { module = "std.clamp", lo = 0, hi = 1 }
+d_br = { module = "std.scale", mul = 1, add = 1 }
+d_br_lim = { module = "std.clamp", lo = 0, hi = 1 }
+d_kl = { module = "std.mul" }
+d_kr = { module = "std.mul" }
+d_l = { module = "std.mul" }
+d_r = { module = "std.mul" }
+sum_l = { module = "std.mix" }
+sum_r = { module = "std.mix" }
+master_l = { module = "std.gain", db = 0 }
+master_r = { module = "std.gain", db = 0 }
+
+[wiring]
+connections = [
+  { from = "a_mute.out", to = "a_mute_lag.in" },
+  { from = "a_mute_lag.out", to = "a_open.in" },
+  { from = "a_bal.out", to = "a_bl.in" },
+  { from = "a_bl.out", to = "a_bl_lim.in" },
+  { from = "a_bal.out", to = "a_br.in" },
+  { from = "a_br.out", to = "a_br_lim.in" },
+  { from = "a_bl_lim.out", to = "a_kl.a" },
+  { from = "a_open.out", to = "a_kl.b" },
+  { from = "a_br_lim.out", to = "a_kr.a" },
+  { from = "a_open.out", to = "a_kr.b" },
+  { from = "a_gl.out", to = "a_l.a" },
+  { from = "a_kl.out", to = "a_l.b" },
+  { from = "a_gr.out", to = "a_r.a" },
+  { from = "a_kr.out", to = "a_r.b" },
+  { from = "a_l.out", to = "sum_l.a" },
+  { from = "a_r.out", to = "sum_r.a" },
+  { from = "b_mute.out", to = "b_mute_lag.in" },
+  { from = "b_mute_lag.out", to = "b_open.in" },
+  { from = "b_bal.out", to = "b_bl.in" },
+  { from = "b_bl.out", to = "b_bl_lim.in" },
+  { from = "b_bal.out", to = "b_br.in" },
+  { from = "b_br.out", to = "b_br_lim.in" },
+  { from = "b_bl_lim.out", to = "b_kl.a" },
+  { from = "b_open.out", to = "b_kl.b" },
+  { from = "b_br_lim.out", to = "b_kr.a" },
+  { from = "b_open.out", to = "b_kr.b" },
+  { from = "b_gl.out", to = "b_l.a" },
+  { from = "b_kl.out", to = "b_l.b" },
+  { from = "b_gr.out", to = "b_r.a" },
+  { from = "b_kr.out", to = "b_r.b" },
+  { from = "b_l.out", to = "sum_l.b" },
+  { from = "b_r.out", to = "sum_r.b" },
+  { from = "c_mute.out", to = "c_mute_lag.in" },
+  { from = "c_mute_lag.out", to = "c_open.in" },
+  { from = "c_bal.out", to = "c_bl.in" },
+  { from = "c_bl.out", to = "c_bl_lim.in" },
+  { from = "c_bal.out", to = "c_br.in" },
+  { from = "c_br.out", to = "c_br_lim.in" },
+  { from = "c_bl_lim.out", to = "c_kl.a" },
+  { from = "c_open.out", to = "c_kl.b" },
+  { from = "c_br_lim.out", to = "c_kr.a" },
+  { from = "c_open.out", to = "c_kr.b" },
+  { from = "c_gl.out", to = "c_l.a" },
+  { from = "c_kl.out", to = "c_l.b" },
+  { from = "c_gr.out", to = "c_r.a" },
+  { from = "c_kr.out", to = "c_r.b" },
+  { from = "c_l.out", to = "sum_l.c" },
+  { from = "c_r.out", to = "sum_r.c" },
+  { from = "d_mute.out", to = "d_mute_lag.in" },
+  { from = "d_mute_lag.out", to = "d_open.in" },
+  { from = "d_bal.out", to = "d_bl.in" },
+  { from = "d_bl.out", to = "d_bl_lim.in" },
+  { from = "d_bal.out", to = "d_br.in" },
+  { from = "d_br.out", to = "d_br_lim.in" },
+  { from = "d_bl_lim.out", to = "d_kl.a" },
+  { from = "d_open.out", to = "d_kl.b" },
+  { from = "d_br_lim.out", to = "d_kr.a" },
+  { from = "d_open.out", to = "d_kr.b" },
+  { from = "d_gl.out", to = "d_l.a" },
+  { from = "d_kl.out", to = "d_l.b" },
+  { from = "d_gr.out", to = "d_r.a" },
+  { from = "d_kr.out", to = "d_r.b" },
+  { from = "d_l.out", to = "sum_l.d" },
+  { from = "d_r.out", to = "sum_r.d" },
+  { from = "sum_l.out", to = "master_l.in" },
+  { from = "sum_r.out", to = "master_r.in" },
+]
+
+[exports]
+inputs = { a_l = "a_gl.in", a_r = "a_gr.in", b_l = "b_gl.in", b_r = "b_gr.in", c_l = "c_gl.in", c_r = "c_gr.in", d_l = "d_gl.in", d_r = "d_gr.in" }
+outputs = { l = "master_l.out", r = "master_r.out" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+a_level = { to = ["a_gl.db", "a_gr.db"], min = -120, max = 24 }
+a_mute = { to = "a_mute.value", min = 0, max = 1 }
+a_balance = { to = "a_bal.value", min = -1, max = 1 }
+b_level = { to = ["b_gl.db", "b_gr.db"], min = -120, max = 24 }
+b_mute = { to = "b_mute.value", min = 0, max = 1 }
+b_balance = { to = "b_bal.value", min = -1, max = 1 }
+c_level = { to = ["c_gl.db", "c_gr.db"], min = -120, max = 24 }
+c_mute = { to = "c_mute.value", min = 0, max = 1 }
+c_balance = { to = "c_bal.value", min = -1, max = 1 }
+d_level = { to = ["d_gl.db", "d_gr.db"], min = -120, max = 24 }
+d_mute = { to = "d_mute.value", min = 0, max = 1 }
+d_balance = { to = "d_bal.value", min = -1, max = 1 }
+level = { to = ["master_l.db", "master_r.db"], min = -120, max = 24 }
