@@ -77,9 +77,14 @@ export class SignalMeter extends SignalElement {
    * The meter shown, `{source, channel}`: the one `bind` names (a signal
    * input of the audio sink, `/out.l`), with the `source` and `channel`
    * attributes over it (the Setup's input has no port: `source="input"`).
+   * A bind that names no meter of the described plan (an include's sink,
+   * which plays as a tap in the host: ADR 0035 §3, §10) shows nothing:
+   * null, never the output's first channel.
    */
   target(description) {
-    const bound = findMeter(description, bindAddresses(this)[0]);
+    const address = bindAddresses(this)[0];
+    const bound = findMeter(description, address);
+    if (!bound && address && description && !this.hasAttribute('source')) return null;
     return {
       source: this.getAttribute('source') ?? bound?.source ?? 'output',
       channel: numberAttribute(this, 'channel') ?? bound?.channel ?? 0,
@@ -91,8 +96,13 @@ export class SignalMeter extends SignalElement {
       this.rate = description.sampleRate;
       this.meter = new ChannelMeter(description.sampleRate);
     }
-    // A plan swap can move the bound port to another source or channel.
+    // A plan swap can move the bound port to another source or channel, or to none.
     const target = this.target(description);
+    if (this.streamStops && (target === null) !== (this.subscribed === null)) {
+      this.stopStreams();
+      this.startStreams();
+      return;
+    }
     if (this.subscribed && target.source !== this.subscribed.source) {
       this.attach(this.connection);
       return;
@@ -108,6 +118,10 @@ export class SignalMeter extends SignalElement {
     const target = this.target(connection.description);
     this.subscribed = target;
     this.meter = new ChannelMeter(this.rate ?? 48000);
+    if (!target) {
+      this.update();
+      return [];
+    }
     return [connection.subscribe({ stream: 'meters', source: target.source, rate: 30 }, (frame) => {
       const block = blocksFromFrame(frame)[this.subscribed.channel];
       if (!block) return;

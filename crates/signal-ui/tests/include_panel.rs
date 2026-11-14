@@ -257,3 +257,38 @@ fn the_plane_lists_an_include_by_its_key() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// ADR 0035 §10: an include's panel is checked in the host, rooted at the
+/// include: a bind of a parameter the host overrides is a control; one an
+/// export reaches (its control is the entry's) and one naming nothing are
+/// reported, located in the include's panel.
+#[test]
+fn an_include_s_panel_is_checked_rooted_at_it() {
+    let dir = std::env::temp_dir().join(format!("signal-ui-include-check-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("inc/ui")).unwrap();
+    fs::write(dir.join("project.toml"), HOST).unwrap();
+    fs::write(dir.join("inc/project.toml"), INCLUDED).unwrap();
+    let page = "<signal-panel>\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>tone</h2>\n      <signal-knob bind=\"/osc.freq\"></signal-knob>\n      <signal-knob bind=\"/amp.db\"></signal-knob>\n      <signal-knob bind=\"/nope.freq\"></signal-knob>\n    </section>\n  </div>\n</signal-panel>\n";
+    fs::write(dir.join("inc/ui/main.html"), page).unwrap();
+    let mut registry = signal_core::Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let project = signal_project::Project::load(&dir).unwrap();
+    let checked = signal_ui::bindings::check_project(&dir, &project, &registry).unwrap();
+    let included = checked
+        .iter()
+        .find(|c| c.file == "inc/ui/main.html")
+        .expect("the include's panel is checked");
+    assert_eq!(included.controls, 3);
+    let errors: Vec<(Option<usize>, String)> = included
+        .findings
+        .iter()
+        .map(|f| (f.control, f.diagnostic.message.clone()))
+        .collect();
+    assert_eq!(errors.len(), 2, "{errors:#?}");
+    assert_eq!(errors[0].0, Some(1), "{errors:#?}");
+    assert!(errors[0].1.contains("/inc/amp.db"), "{errors:#?}");
+    assert_eq!(errors[1].0, Some(2), "{errors:#?}");
+    assert!(errors[1].1.contains("/inc/nope.freq"), "{errors:#?}");
+    let _ = fs::remove_dir_all(&dir);
+}

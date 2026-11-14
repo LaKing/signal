@@ -584,6 +584,15 @@ pub enum Scope<'a> {
         /// `/synth`, `/rack1/fx`.
         root: &'a str,
     },
+    /// ADR 0035 §10: the panel of the project the top-level instance `key`
+    /// includes, rendered rooted at `root` (`/studio`): its binds as written
+    /// in its own project (`/<instance>.<port>`), each prefixed with `root`.
+    Include {
+        /// `studio`.
+        key: &'a str,
+        /// `/studio`.
+        root: &'a str,
+    },
     /// ADR 0046 §9: project template `name`'s part
     /// (`ui/interfaces/<name>.html`), rendered for the slot of part key
     /// `key` at `root`: only `.<name>` binds of the slot's interface.
@@ -613,6 +622,14 @@ impl Scope<'_> {
             Scope::Part { root, .. } | Scope::Template { root, .. } => {
                 crate::parts::root_address(address, root)?
             }
+            Scope::Include { key, root } => {
+                if !address.starts_with('/') {
+                    return Err(format!(
+                        "`{address}` is not bound as `{key}`'s own panel binds: /<instance>.<port> in that project, which the host roots at {root}"
+                    ));
+                }
+                format!("{root}{address}")
+            }
         };
         absolute
             .parse()
@@ -627,6 +644,8 @@ impl Targets<'_> {
     fn find_scoped(&self, port: &PortAddress, scope: Scope<'_>) -> Option<Found> {
         let (key, root) = match scope {
             Scope::Host => return self.find(port),
+            // A parameter an export reaches, or none, is no control of the host.
+            Scope::Include { .. } => return self.find(port),
             Scope::Part { key, root } => (key, root),
             Scope::Template { name, key, root } => {
                 if port.instance().as_str() != root {
@@ -790,7 +809,7 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
             let value = part.and_then(|a| a.value.as_ref());
             let place = value.map_or(element.offset, |(_, at)| *at);
             match (scope, value) {
-                (Scope::Host, Some((value, _))) => findings.push(Finding {
+                (Scope::Host | Scope::Include { .. }, Some((value, _))) => findings.push(Finding {
                     control: None,
                     diagnostic: at(
                         place,
@@ -861,7 +880,11 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
                         "<{name}> has no pattern: it needs pattern=\"<name>\", a `{kind}` pattern of the project (patterns/<name>.toml)"
                     ),
                 ),
-                Some((pattern, at)) => match targets.panel.pattern_kind(pattern) {
+                // ADR 0035 §10: an included panel's patterns are its project's.
+                Some((pattern, at)) => match match scope {
+                    Scope::Include { key, .. } => targets.panel.include_pattern_kind(key, pattern),
+                    _ => targets.panel.pattern_kind(pattern),
+                } {
                     None => finding(
                         *at,
                         Severity::Error,
@@ -1167,7 +1190,21 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
                             direction == Direction::Out && matches!(shape, PortShape::Vector(_))
                         }
                     };
-                    if !fits {
+                    // ADR 0035 §3, §10: an include's sink plays as its tap in the host, so its meter
+                    // shows nothing here; its own project is right, so only a warning.
+                    let tapped = matches!(scope, Scope::Include { .. })
+                        && wants == Wants::SinkInput
+                        && direction == Direction::In
+                        && shape == PortShape::Signal;
+                    if tapped {
+                        finding(
+                            offset,
+                            Severity::Warning,
+                            format!(
+                                "{port} is the include's sink, which plays as a tap in the host: <{name}> shows nothing here"
+                            ),
+                        );
+                    } else if !fits {
                         finding(
                             offset,
                             Severity::Error,
@@ -1206,7 +1243,7 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
     }
     if !panel {
         let (severity, message) = match scope {
-            Scope::Host => (
+            Scope::Host | Scope::Include { .. } => (
                 Severity::Warning,
                 format!(
                     "no <{PANEL_ELEMENT}>: nothing connects this page's controls to the project"
@@ -1422,6 +1459,20 @@ pub fn check_project(
             &targets,
         ));
     }
+    // ADR 0035 §10: each top-level include's panel, rooted at it.
+    for key in top_includes(dir) {
+        let Some(folder) = crate::http::include_ui(dir, &key) else {
+            continue;
+        };
+        if let Ok(text) = signal_project::read_regular_to_string(folder.join(MAIN_PANEL)) {
+            // Named as the host reaches it (`../studio/ui/main.html`); a `.signal` include's as `panel.read` names it.
+            let file = folder.strip_prefix(dir).map_or_else(
+                |_| format!("include/{key}/{MAIN_PANEL}"),
+                |ui| format!("{}/{MAIN_PANEL}", ui.display()),
+            );
+            checked.push(check_include(&file, &key, &text, &targets));
+        }
+    }
     // ADR 0051 §4: the plane's Stacks, against the panel's cards and the top-level slots with a part.
     if let Some(plane) = check_plane(&ui, &panel, &plan) {
         checked.push(plane);
@@ -1516,6 +1567,17 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
         bindings: 0,
         findings,
     })
+}
+
+/// ADR 0035 §10: the panel of the project the top-level instance `key`
+/// includes, named `file` (`../studio/ui/main.html`, or `panel.read`'s
+/// `include/<key>/main.html`), checked in the host: each bind rooted at
+/// `/<key>` must be a control of the host (an override in the entry's
+/// `set`), so one a parameter an export reaches is reported (the export's
+/// control is the entry's, `/<key>.<name>`); its patterns are its own.
+pub fn check_include(file: &str, key: &str, text: &str, targets: &Targets<'_>) -> Checked {
+    let root = format!("/{key}");
+    check_scoped(file, text, targets, Scope::Include { key, root: &root })
 }
 
 /// The panel file `name` of the project's `ui/` (`main.html`,

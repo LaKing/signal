@@ -122,6 +122,9 @@ pub struct Panel {
     /// The project's patterns (`patterns/<name>.toml`) and their kinds, for
     /// the pattern controls' check.
     patterns: Vec<(String, &'static str)>,
+    /// ADR 0035 §10: each top-level include's patterns by their names in
+    /// it, for its panel's check.
+    include_patterns: BTreeMap<String, Vec<(String, &'static str)>>,
     /// The values being dragged (each send carries the latest value to all
     /// of a parameter's ports, so only the latest send says what they hold).
     drags: BTreeMap<(String, String), Drag>,
@@ -617,6 +620,15 @@ impl Panel {
                 .patterns()
                 .map(|(name, kind)| (name.to_owned(), kind))
                 .collect(),
+            include_patterns: project
+                .includes()
+                .into_iter()
+                .filter(|i| !i.slot && !i.key.contains('.'))
+                .map(|i| {
+                    let patterns = project.include_patterns(&i.key);
+                    (i.key, patterns)
+                })
+                .collect(),
             drags: BTreeMap::new(),
             corrected: planned.corrected.clone(),
             slot_ports,
@@ -810,6 +822,7 @@ impl Panel {
     pub fn replace(&mut self, other: Panel) {
         self.instances = other.instances;
         self.patterns = other.patterns;
+        self.include_patterns = other.include_patterns;
         self.corrected = other.corrected;
         self.slot_ports = other.slot_ports;
         self.slots = other.slots;
@@ -822,6 +835,16 @@ impl Panel {
     /// it has one.
     pub fn pattern_kind(&self, name: &str) -> Option<&'static str> {
         self.patterns
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, kind)| *kind)
+    }
+
+    /// The kind of pattern `name` of the project the top-level instance
+    /// `key` includes (ADR 0035 §10), if it has one.
+    pub fn include_pattern_kind(&self, key: &str, name: &str) -> Option<&'static str> {
+        self.include_patterns
+            .get(key)?
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, kind)| *kind)

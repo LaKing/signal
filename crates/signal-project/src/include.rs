@@ -688,6 +688,29 @@ impl Project {
             .collect()
     }
 
+    /// ADR 0035 §10: the patterns of the project the top-level instance `key`
+    /// includes, by their names in it (`melody`), with their kinds; empty
+    /// for no such include.
+    pub fn include_patterns(&self, key: &str) -> Vec<(String, &'static str)> {
+        let Some(entry) = self
+            .content
+            .entries
+            .iter()
+            .find(|e| e.def.is_empty() && e.instance == key)
+        else {
+            return Vec::new();
+        };
+        let Some(included) = self.content.projects.get(&entry.canonical) else {
+            return Vec::new();
+        };
+        let prefix = format!("{}/", entry.canonical.display());
+        included
+            .project
+            .patterns()
+            .filter_map(|(name, kind)| Some((name.strip_prefix(&prefix)?.to_owned(), kind)))
+            .collect()
+    }
+
     /// ADR 0035 §8: a note for every include written for another rate than
     /// `rate`, the rate the host plays at. Never an error.
     pub fn rate_notes(&self, rate: u32) -> Vec<String> {

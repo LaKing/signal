@@ -96,7 +96,13 @@ fn every_project_passes_the_check() {
             continue;
         }
         assert!(output.status.success(), "{name}: {stderr}");
-        assert!(!stderr.contains("warning"), "{name}: {stderr}");
+        // ADR 0035 §10: an included panel's meters bind its sink, which plays as a tap in the
+        // host and has no meter there (a known limit, reported, not the host's to fix).
+        let warnings: Vec<&str> = stderr
+            .lines()
+            .filter(|l| l.contains("warning") && !l.contains("plays as a tap in the host"))
+            .collect();
+        assert!(warnings.is_empty(), "{name}: {stderr}");
         assert!(
             stderr.contains(": ok") || stderr.contains("the main panel is generated"),
             "{name}: {stderr}"

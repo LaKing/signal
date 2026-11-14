@@ -617,7 +617,16 @@ impl Host {
         if !name.ends_with(".html") {
             return Err(unknown());
         }
-        let path = crate::http::file(&project_ui(&self.opening.dir), name).ok_or_else(unknown)?;
+        // ADR 0035 §10: an included panel, checked rooted at its include.
+        let include = name
+            .strip_prefix("include/")
+            .and_then(|rest| rest.split_once('/'));
+        let path = match include {
+            Some((key, file)) => crate::http::include_ui(&self.opening.dir, key)
+                .and_then(|folder| crate::http::file(&folder, file)),
+            None => crate::http::file(&project_ui(&self.opening.dir), name),
+        }
+        .ok_or_else(unknown)?;
         let text = signal_project::read_regular_to_string(path).map_err(|_| unknown())?;
         let plan = self
             .plan
@@ -628,7 +637,10 @@ impl Host {
             panel: &self.panel,
         };
         // ADR 0046: a slot's part is checked at its roots.
-        let checked = check_file(name, &text, &targets);
+        let checked = match include {
+            Some((key, _)) => crate::bindings::check_include(name, key, &text, &targets),
+            None => check_file(name, &text, &targets),
+        };
         let diagnostics: Vec<Value> = checked
             .findings
             .iter()
