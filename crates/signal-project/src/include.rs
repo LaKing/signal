@@ -210,7 +210,7 @@ pub(crate) fn root_name(id: &str) -> String {
 }
 
 /// Whether `name` is an included project's root (or a `set` copy of one).
-pub(crate) fn is_root(name: &str) -> bool {
+pub fn is_root(name: &str) -> bool {
     name.ends_with(&format!("/{PROJECT_FILE}")) || name.contains(&format!("/{PROJECT_FILE}@"))
 }
 

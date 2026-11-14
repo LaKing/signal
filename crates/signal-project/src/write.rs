@@ -217,6 +217,100 @@ pub fn parameter_file(files: &[crate::SourceFile], key: &str) -> Option<(String,
     ))
 }
 
+/// ADR 0035 §10: whether the top-level instance `name` includes a project
+/// (`project = "…"`): a control key `<name>/<inner>` then writes the
+/// override into its entry's `set` table (`"<inner>.<p>" = v`).
+pub fn includes_project(files: &[crate::SourceFile], name: &str) -> bool {
+    files
+        .iter()
+        .find(|f| f.path == PROJECT_FILE)
+        .and_then(|f| f.text.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("instances")?.get(name)?.get("project").cloned())
+        .is_some()
+}
+
+/// `text`, a `project.toml`, with the `set` override `key` (`"transport.run"`)
+/// of the top-level `instance` set to `value` (`None`: removed, and the
+/// table with it when it is left empty). The entry may be inline or a table.
+pub fn write_set_parameter(
+    text: &str,
+    instance: &str,
+    key: &str,
+    value: Option<f64>,
+) -> Result<String, WriteError> {
+    if let Some(v) = value
+        && !v.is_finite()
+    {
+        return Err(WriteError::NotFinite(key.to_owned()));
+    }
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| WriteError::Syntax(e.to_string()))?;
+    let entry = doc
+        .get_mut("instances")
+        .and_then(|i| i.get_mut(instance))
+        .ok_or_else(|| WriteError::NoInstance(instance.to_owned()))?;
+    let set_of = |table: &mut dyn toml_edit::TableLike| -> Result<(), WriteError> {
+        match value {
+            Some(v) => {
+                if table.get("set").is_none() {
+                    table.insert("set", Item::Value(Value::InlineTable(InlineTable::new())));
+                }
+                let set = table
+                    .get_mut("set")
+                    .and_then(|s| s.as_table_like_mut())
+                    .ok_or_else(|| WriteError::NoInstance(instance.to_owned()))?;
+                set.insert(key, Item::Value(number(v)));
+            }
+            None => {
+                let empty = match table.get_mut("set").and_then(|s| s.as_table_like_mut()) {
+                    Some(set) => {
+                        set.remove(key);
+                        set.is_empty()
+                    }
+                    None => false,
+                };
+                if empty {
+                    table.remove("set");
+                }
+            }
+        }
+        Ok(())
+    };
+    match entry {
+        // Inline, as the parameter writer spaces an entry's keys.
+        Item::Value(Value::InlineTable(table)) => {
+            let mut set = table
+                .get("set")
+                .and_then(Value::as_inline_table)
+                .cloned()
+                .unwrap_or_default();
+            match value {
+                Some(v) => {
+                    set.insert(key, number(v));
+                }
+                None => {
+                    set.remove(key);
+                }
+            }
+            set.fmt();
+            let written = (!set.is_empty()).then(|| Value::InlineTable(set));
+            // A new `set` goes after the entry's keys.
+            let mut order: Vec<String> = table
+                .iter()
+                .map(|(k, _)| k.to_owned())
+                .filter(|k| k != "set")
+                .collect();
+            order.push("set".to_owned());
+            let order: Vec<&str> = order.iter().map(String::as_str).collect();
+            inline(table, "set", written, &order);
+        }
+        Item::Table(table) => set_of(table)?,
+        _ => return Err(WriteError::NoInstance(instance.to_owned())),
+    }
+    Ok(doc.to_string())
+}
+
 /// ADR 0037 "Editable insides": the name of the project composite the
 /// top-level slot `slot` loads when it is the slot's own inside (its
 /// `inside_of` is `slot`); `None` for any other slot or instance.
@@ -243,6 +337,30 @@ pub fn write_parameters_in(
 ) -> Result<Vec<(String, String, String)>, WriteError> {
     let mut changed: Vec<(String, String, String)> = Vec::new();
     for &(key, parameter, value, order) in edits {
+        // ADR 0035 §10: an include's top-level instance, an override in
+        // the including entry's `set`.
+        if let Some((name, inner)) = key.split_once('/')
+            && !inner.contains('/')
+            && includes_project(files, name)
+        {
+            let at = match changed.iter().position(|(p, _, _)| p == PROJECT_FILE) {
+                Some(at) => at,
+                None => {
+                    let text = files
+                        .iter()
+                        .find(|f| f.path == PROJECT_FILE)
+                        .map(|f| f.text.clone())
+                        .ok_or_else(|| WriteError::NoInstance(key.to_owned()))?;
+                    changed.push((PROJECT_FILE.to_owned(), text.clone(), text));
+                    changed.len() - 1
+                }
+            };
+            if let Some(entry) = changed.get_mut(at) {
+                entry.2 =
+                    write_set_parameter(&entry.2, name, &format!("{inner}.{parameter}"), value)?;
+            }
+            continue;
+        }
         let (path, instance) =
             parameter_file(files, key).ok_or_else(|| WriteError::NoInstance(key.to_owned()))?;
         let at = match changed.iter().position(|(p, _, _)| *p == path) {

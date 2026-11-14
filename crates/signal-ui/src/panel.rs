@@ -291,7 +291,15 @@ impl Panel {
         // parameters that match the content's (written on the slot's entry,
         // by the interface's names); the content's other parameters are
         // `set`'s, which the panel does not write yet.
-        let content_defs = if planned.slots.is_empty() {
+        // ADR 0035 §10: an include's root too, whose exported parameters
+        // are controls on its entry and whose top-level instances' are
+        // overrides in its `set`.
+        let includes = project
+            .root
+            .instances
+            .iter()
+            .any(|i| signal_project::is_included_root(&i.module));
+        let content_defs = if planned.slots.is_empty() && !includes {
             Vec::new()
         } else {
             project.content_definitions(registry)
@@ -322,43 +330,39 @@ impl Panel {
                 parameters: Vec::new(),
                 inner: Vec::new(),
             };
-            let names: Vec<String> = match (registry.get(&def.module), composites.get(&*def.module))
-            {
-                _ if slot.is_some() => slot
-                    .map(|r| {
-                        r.matches
-                            .iter()
-                            .filter(|m| m.role == signal_project::Role::Parameter)
-                            .filter(|m| m.content.is_some())
-                            .map(|m| m.port.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                (Some(module), _) => module
-                    .descriptor
-                    .parameters
-                    .iter()
-                    .map(|p| p.name.to_owned())
-                    .collect(),
-                (None, Some(composite)) => composite
-                    .exports
-                    .parameters
-                    .iter()
-                    .map(|e| e.name.clone())
-                    .collect(),
-                (None, None) => Vec::new(),
-            };
+            let names: Vec<String> =
+                match (registry.get(&def.module), with_content.get(&*def.module)) {
+                    _ if slot.is_some() => slot
+                        .map(|r| {
+                            r.matches
+                                .iter()
+                                .filter(|m| m.role == signal_project::Role::Parameter)
+                                .filter(|m| m.content.is_some())
+                                .map(|m| m.port.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    (Some(module), _) => module
+                        .descriptor
+                        .parameters
+                        .iter()
+                        .map(|p| p.name.to_owned())
+                        .collect(),
+                    (None, Some(composite)) => composite
+                        .exports
+                        .parameters
+                        .iter()
+                        .map(|e| e.name.clone())
+                        .collect(),
+                    (None, None) => Vec::new(),
+                };
             for name in &names {
                 // A slot's parameter reaches the content's matched one.
                 let content = slot
                     .and_then(|r| r.matches.iter().find(|m| m.port == *name))
                     .and_then(|m| m.content.clone())
                     .unwrap_or_else(|| name.clone());
-                let targets = if slot.is_some() {
-                    resolve(&with_content, registry, address, &def.module, &content)
-                } else {
-                    resolve(&composites, registry, address, &def.module, &content)
-                };
+                let targets = resolve(&with_content, registry, address, &def.module, &content);
                 let Some((_, first, inner_value, _)) = targets.first() else {
                     continue;
                 };
@@ -435,6 +439,34 @@ impl Panel {
             let own = slot
                 .and_then(|_| signal_project::own_inside_of(&project.files, &def.name))
                 .and_then(|name| composites.get(name.as_str()).copied());
+            // ADR 0035 §10: an include's top-level instances, overrides in
+            // the entry's `set` (`/studio/transport.bpm`); a parameter an
+            // export reaches is the export's control.
+            if signal_project::is_included_root(&def.module)
+                && let Some(root) = with_content.get(def.module.as_str()).copied()
+            {
+                instances.push(instance);
+                let exported: std::collections::BTreeSet<&str> = root
+                    .exports
+                    .parameters
+                    .iter()
+                    .flat_map(|e| e.to.iter().map(String::as_str))
+                    .collect();
+                for inner_def in &root.instances {
+                    let Ok(inner_address) = address.child(&inner_def.name) else {
+                        continue;
+                    };
+                    let key = format!("{}/{}", def.name, inner_def.name);
+                    let mut rows = rows_of(inner_def, &key, &inner_address, None, None);
+                    rows.parameters.retain(|r| {
+                        !exported.contains(format!("{}.{}", inner_def.name, r.view.name).as_str())
+                    });
+                    if !rows.parameters.is_empty() {
+                        instances.push(rows);
+                    }
+                }
+                continue;
+            }
             if let Some(inside) = own {
                 instances.push(instance);
                 for inner_def in &inside.instances {

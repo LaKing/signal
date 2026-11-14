@@ -670,12 +670,13 @@ fn live_edits_and_tempo_in_a_project_with_includes() {
     );
     assert_eq!(set["outcome"], "scheduled", "{set}");
     assert_eq!(control_base(&mut mcp, "/mix_l.gain_a"), 0.4);
-    let refused = mcp.refused("transport", json!({"action": "tempo", "bpm": 126}));
-    assert!(
-        refused.contains(
-            "no tempo to set: no top-level control reaches /studio/transport.bpm, /studio_transport/transport/playhead.bpm"
-        ),
-        "{refused}"
+    // ADR 0035 §10: an include's top-level parameters are controls (its
+    // `set` overrides), so the tempo reaches both included transports.
+    let tempo = mcp.ok("transport", json!({"action": "tempo", "bpm": 126}));
+    assert_eq!(
+        tempo["addresses"],
+        json!(["/studio/transport.bpm", "/studio_transport/transport.bpm"]),
+        "{tempo}"
     );
     let checked = mcp.ok("check", json!({}));
     assert_eq!(checked["ok"], true, "{checked}");
