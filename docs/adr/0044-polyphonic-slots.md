@@ -476,5 +476,5 @@ The owner's answers are quoted in Hungarian, with translations. The rest are the
 - **studio-poly does not sleep:** its pad's 900 ms exponential release reaches `std.adsr`'s flush level (1e-9) only after about 18 s, and each voice plays again within 4 s, so its render and golden are unchanged with `sleep = true`. A content sleeps sooner only with a shorter release or a higher flush level, which would change renders (the owner's decision).
 - **The flush level stays** (operator's choice, delegated): raising `std.adsr`'s 1e-9 would make voices sleep sooner but change every render with an envelope, goldens included.
 - **The owner's listening check** (test 12's counterpart for `sleep = true`): offered (`renders/poly-sleep/sleep-on` and `sleep-off`); the owner left it to the operator ("Ezekről nem tudok dönteni, rád bízom", 2026-11-14). No verdict is recorded (hard rule 6); `sleep = true` stays the default the owner chose in §11.
-- **Open:** test 15 on the device.
+- **Test 15 on the device** (`docs/benchmarks.md`): 10 minutes of a silent 16-voice studio-poly whose voices sleep between chords, 0 xruns, worst callback 0.596 of its period; at one thread the median load is 0.40 of the period with sleep against 0.52 without. Phase 5 is complete.
 
