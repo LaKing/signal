@@ -51,18 +51,18 @@ export function hasPart(instance) {
  * `instances`, `connections`: `graph.top`'s; `cards`: `panelCards`', keyed
  * by their `entry` (`withEntries`: a slot's card is the slot's).
  * The rules, in order (ADR 0050 §2): a device slot is no instrument's; a
- * slot with a part is its own; by controls, the card most of its bound
+ * slot with a part, or a top-level include (`includes`: their keys), is its own; by controls, the card most of its bound
  * controls sit in (a tie: the earlier card); by flow, a chain of single
  * links goes to its end's instrument, any other to the one most of its
  * neighbours belong to, sinks weighing a hair more, repeated until nothing
  * changes. What is left is in no instrument.
  */
-export function assignInstruments({ instances = [], connections = [], cards = [] } = {}) {
+export function assignInstruments({ instances = [], connections = [], cards = [], includes = [] } = {}) {
   const owner = new Map(instances.map((i) => [i.name, null]));
   const fixed = new Set();
   for (const i of instances) {
     if (roleOf(i)) fixed.add(i.name);
-    else if (hasPart(i)) {
+    else if (hasPart(i) || includes.includes(i.name)) {
       owner.set(i.name, i.name);
       fixed.add(i.name);
     }

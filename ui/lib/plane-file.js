@@ -18,7 +18,10 @@
 // §5). **One identity** (`withEntries`, `canonicalEntry`): a card showing a
 // top-level slot with a part (its open slot card) is that slot's
 // instrument, named by the slot; `card:<id>` of such a card is read as the
-// slot's name. The check, the derived Stack, the instances' assignment
+// slot's name. A top-level include (ADR 0035 §10) is an instrument named
+// by its key, its front panel the include's panel (`<signal-include>`):
+// the plane adds a card of its own for it (`include` set, after the
+// panel's cards), never one of ui/main.html. The check, the derived Stack, the instances' assignment
 // (./plane-instruments.js), the rendering and the boundaries all key an
 // instrument so (crates/signal-ui/src/plane.rs has the same rule). Here:
 // parsing (the TOML subset of ./pattern-text.js), the check (`plane.check`'s
@@ -116,6 +119,7 @@ export function panelCards(tree) {
  * (`slots`: their names; the card's `slot`, an open slot card's or one in
  * it) is that slot's instrument, its entry the slot's name (the full form);
  * only the first card showing a slot is, a later one is a card of its own.
+ * An include's card (`include`: its key) is the include's instrument.
  * Every other card's entry is `card:<id>`.
  */
 export function withEntries(cards = [], slots = []) {
@@ -124,7 +128,7 @@ export function withEntries(cards = [], slots = []) {
   return cards.map((card) => {
     const slot = card.slot && parts.has(card.slot) && !taken.has(card.slot) ? card.slot : null;
     if (slot) taken.add(slot);
-    return { ...card, entry: slot ?? `${CARD_PREFIX}${card.id}` };
+    return { ...card, entry: slot ?? card.include ?? `${CARD_PREFIX}${card.id}` };
   });
 }
 
@@ -141,7 +145,8 @@ export function cardOfEntry(entry, cards = []) {
 /** Entry `entry` of a file under the one identity rule: `card:<id>` of a card that is a slot's instrument is the slot's name; any other as written. */
 export function canonicalEntry(entry, cards = []) {
   if (!isCardEntry(entry)) return entry;
-  const card = cards.find((c) => c.id === entry.slice(CARD_PREFIX.length));
+  // An include's card is the plane's own, never one of ui/main.html: `card:<id>` never names it.
+  const card = cards.find((c) => !c.include && c.id === entry.slice(CARD_PREFIX.length));
   return card ? entryOf(card) : entry;
 }
 
@@ -209,7 +214,7 @@ export function isCardEntry(entry) {
 /**
  * `plane.check` (ADR 0051 §4) of a parsed plane against the project:
  * `cards` (the panel's card ids), `slots` (the top-level slots with a
- * part), `unstacked` (the top-level instances in no instrument of any
+ * part, and the top-level includes), `unstacked` (the top-level instances in no instrument of any
  * Stack, as `stackMembers` finds them). Errors: a Stack's name twice, an
  * unknown entry, an entry listed twice (in one Stack or two). Warning: an
  * instance in no instrument (drawn in the "unstacked" tray). Problems in
@@ -230,7 +235,7 @@ export function checkPlane(plane, { cards = [], slots = [], unstacked = [] } = {
       if (isCardEntry(entry)) {
         if (!cardSet.has(entry.slice(CARD_PREFIX.length))) problems.push(problem('error', `plane.toml: "${entry}" names no card of ui/main.html${cards.length ? ` (cards: ${cards.join(', ')})` : ''}`));
       } else if (!slotSet.has(entry)) {
-        problems.push(problem('error', `plane.toml: "${entry}" names no top-level slot with a part (a card is "card:<id>")`));
+        problems.push(problem('error', `plane.toml: "${entry}" names no top-level slot with a part or include (a card is "card:<id>")`));
       }
     }
   }
@@ -286,7 +291,7 @@ export function planeOf(text, cards, plateWidth = null, context = {}) {
   const problems = [...read.problems];
   if (read.plane) {
     for (const stack of read.plane.stacks) stack.instruments = stack.instruments.map((e) => canonicalEntry(e, known));
-    problems.push(...checkPlane(read.plane, { cards: cards.map((c) => c.id), ...context }));
+    problems.push(...checkPlane(read.plane, { cards: cards.filter((c) => !c.include).map((c) => c.id), ...context }));
   }
   if (!read.plane || problems.some((p) => p.severity === 'error')) return { plane: derivePlane(known, plateWidth), derived: true, problems };
   return { plane: read.plane, derived: false, problems };

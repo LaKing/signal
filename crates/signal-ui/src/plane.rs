@@ -404,7 +404,7 @@ pub fn check(file: &str, text: &str, panel: &[Card], slots: &[String]) -> Vec<Fi
                 say(
                     offset,
                     format!(
-                        "\"{entry}\" names no top-level slot with a part (a card is \"card:<id>\")"
+                        "\"{entry}\" names no top-level slot with a part or include (a card is \"card:<id>\")"
                     ),
                 );
             }
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(
             messages("\"deck_a\""),
             [
-                "plane.toml: \"deck_a\" names no top-level slot with a part (a card is \"card:<id>\")"
+                "plane.toml: \"deck_a\" names no top-level slot with a part or include (a card is \"card:<id>\")"
             ],
             "a slot without a part is drawn by its card"
         );
@@ -669,7 +669,7 @@ mod tests {
             ),
             [
                 "plane.toml: \"card:nope\" names no card of ui/main.html (cards: x)",
-                "plane.toml: \"ghost\" names no top-level slot with a part (a card is \"card:<id>\")",
+                "plane.toml: \"ghost\" names no top-level slot with a part or include (a card is \"card:<id>\")",
                 "plane.toml: \"card:x\" is listed twice (in \"a\")",
                 "plane.toml: the Stack \"a\" is named twice",
                 "plane.toml: stack 2: at must be two whole numbers of pu, [x, y], each within ±1000",

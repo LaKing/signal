@@ -222,3 +222,38 @@ fn an_include_s_panel_is_read_and_served() {
     assert!(get("/include/out/main.html").starts_with("HTTP/1.1 404"));
     rig.finish();
 }
+
+/// ADR 0035 §10: a top-level include is an instrument of the plane named by
+/// its key, so `ui/plane.toml` may list it (`plane.check`); a name that is
+/// neither a slot with a part nor an include is an error naming both.
+#[test]
+fn the_plane_lists_an_include_by_its_key() {
+    let dir = std::env::temp_dir().join(format!("signal-ui-include-plane-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("inc")).unwrap();
+    fs::create_dir_all(dir.join("ui")).unwrap();
+    fs::write(dir.join("project.toml"), HOST).unwrap();
+    fs::write(dir.join("inc/project.toml"), INCLUDED).unwrap();
+    fs::write(
+        dir.join("ui/plane.toml"),
+        "schema_version = 1\n\n[[stack]]\nname = \"primary\"\nwidth = 160\ninstruments = [\"inc\", \"ghost\"]\n",
+    )
+    .unwrap();
+    let mut registry = signal_core::Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let project = signal_project::Project::load(&dir).unwrap();
+    let checked = signal_ui::bindings::check_project(&dir, &project, &registry).unwrap();
+    let findings: Vec<String> = checked
+        .iter()
+        .filter(|c| c.file == "ui/plane.toml")
+        .flat_map(|c| c.findings.iter().map(|f| f.diagnostic.message.clone()))
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            "plane.toml: \"ghost\" names no top-level slot with a part or include (a card is \"card:<id>\")"
+        ],
+        "{findings:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

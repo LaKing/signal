@@ -1433,6 +1433,29 @@ pub fn check_project(
 /// entries against the cards of `ui/main.html` (without one, the generated
 /// panel's: a card per instance with parameters, one per top-level slot,
 /// and `output` when an audio sink has signal inputs) and the top-level slots with a part.
+/// The top-level instances of the project in `dir` that include a project
+/// (`project = …`; not a slot's load), in file order.
+fn top_includes(dir: &Path) -> Vec<String> {
+    let Ok(text) = signal_project::read_regular_to_string(dir.join(signal_project::PROJECT_FILE))
+    else {
+        return Vec::new();
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .get("instances")
+        .and_then(toml::Value::as_table)
+        .map(|instances| {
+            instances
+                .iter()
+                .filter(|(_, entry)| entry.get("project").is_some())
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked> {
     let path = ui.join(crate::plane::PLANE_FILE);
     let text = signal_project::read_regular_to_string(&path).ok()?;
@@ -1472,7 +1495,7 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
             ids
         }
     };
-    let slots: Vec<String> = panel
+    let mut slots: Vec<String> = panel
         .part_keys()
         .filter(|k| {
             !k.contains('.')
@@ -1483,6 +1506,8 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
         })
         .map(str::to_owned)
         .collect();
+    // ADR 0035 §10: a top-level include is an instrument named by its key.
+    slots.extend(top_includes(ui.parent().unwrap_or(ui)));
     let file = format!("ui/{}", crate::plane::PLANE_FILE);
     let findings = crate::plane::check(&file, &text, &cards, &slots);
     Some(Checked {

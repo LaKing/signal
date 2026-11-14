@@ -140,3 +140,15 @@ test('Make instrument: the card’s engine into a slot named after its title', a
   assert.match(makeInstrumentOp('card:empty', owner, instances).error, /binds no instance/);
   assert.equal(makeInstrumentOp('card:x1', new Map([['kick', 'card:x1']]), instances, '909 Kit').slot, 'i_909_kit');
 });
+
+// ADR 0035 §10: a top-level include is its own instrument, as a slot with a part is; what feeds it alone follows it by flow.
+test('an include owns itself', () => {
+  const instances = [{ name: 'lfo', module: 'std.lfo' }, { name: 'drums', module: '/x/project.toml' }, { name: 'out', module: 'std.audio_out' }];
+  const connections = [
+    { from: '/lfo.out', to: '/drums.level' },
+    { from: '/drums.l', to: '/out.l' },
+  ];
+  const owner = assignInstruments({ instances, connections, cards: [], includes: ['drums'] });
+  assert.deepEqual([...owner], [['lfo', 'drums'], ['drums', 'drums'], ['out', null]]);
+  assert.equal(assignInstruments({ instances, connections, cards: [] }).get('drums'), null, 'not without the key');
+});

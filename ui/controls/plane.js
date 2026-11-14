@@ -97,6 +97,7 @@ import { addConnection, connectTargets, defaultName, instanceCount, nameError, n
 import { EXPANDED, browserEntries } from '../lib/module-browser.js';
 import { projectKey } from '../lib/schematic-palette.js';
 import { levelData, loadable } from '../lib/slot.js';
+import { includeTitle, panelIncludes } from '../lib/include.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import { formatValue } from '../lib/format.js';
 import { toPosition } from '../lib/taper.js';
@@ -701,6 +702,17 @@ export class SignalPlane extends HTMLElement {
 
   described(description) {
     if (this.panelPending || this.panel?.generated) this.generatedFrom(description);
+    // ADR 0035 §10: another set of top-level includes, other instruments.
+    const keys = panelIncludes(description).map((i) => `${i.key}\t${i.name ?? ''}`).join('\n');
+    if (keys !== this.includeKeys) {
+      this.includeKeys = keys;
+      this.recompute();
+    }
+  }
+
+  /** ADR 0035 §10: a card of the plane's own per top-level include (after the panel's), its instrument the include's key, its front panel the include's panel. */
+  includeCards() {
+    return panelIncludes(this.connection?.description ?? null).map((i) => ({ id: `include-${i.key}`, index: null, heading: includeTitle(i.key, i), place: null, slot: null, binds: [], include: i.key }));
   }
 
   /** `ui/plane.toml`, read again with every graph (a hand edit of it shows): the text, or null without one. */
@@ -850,18 +862,20 @@ export class SignalPlane extends HTMLElement {
     const connections = this.graph?.top?.connections ?? [];
     const slots = this.slotsWithParts();
     const plateWidth = parsePlate(this.panel.plate)?.w ?? null;
-    // The one identity rule (ui/lib/plane-file.js): a card showing a slot with a part is that slot's instrument.
-    const cards = withEntries(this.panelCards ?? [], slots);
+    // The one identity rule (ui/lib/plane-file.js): a card showing a slot with a part is that slot's instrument; an include's card, the include's.
+    const includes = this.includeCards();
+    const cards = withEntries([...(this.panelCards ?? []), ...includes], slots);
     this.cards = cards;
-    const assigned = assignInstruments({ instances, connections, cards });
+    const keys = includes.map((c) => c.include);
+    const assigned = assignInstruments({ instances, connections, cards, includes: keys });
     // An instance added from an instrument's Engine stays in it until it is joined to one (view state, `placedOwners`).
     const { owner, forget, seen } = placedOwners(assigned, this.placed, instances, new Set([...cards.map((c) => entryOf(c)), ...slots]));
     for (const name of forget) this.placed.delete(name);
     for (const name of seen) this.placed.get(name).seen = true;
     // The unstacked warning needs the plane: computed on the plane read (or derived), then checked with it.
-    let shown = planeOf(this.planeText, cards, plateWidth, { slots });
+    let shown = planeOf(this.planeText, cards, plateWidth, { slots: [...slots, ...keys] });
     const members = stackMembers(shown.plane, owner, instances);
-    if (!shown.derived) shown = planeOf(this.planeText, cards, plateWidth, { slots, unstacked: members.unstacked });
+    if (!shown.derived) shown = planeOf(this.planeText, cards, plateWidth, { slots: [...slots, ...keys], unstacked: members.unstacked });
     const { stackOf, unstacked } = stackMembers(shown.plane, owner, instances);
     const pins = new Map(shown.plane.stacks.map((s) => [s.name, edgePins(s, owner, stackOf, connections)]));
     const endpoints = roleEndpoints(instances);
@@ -974,7 +988,11 @@ export class SignalPlane extends HTMLElement {
     const grid = container.querySelector(':scope > .signal-cards');
     const elements = [...(grid?.children ?? [])];
     const byId = new Map();
-    (this.cards ?? []).forEach((card, i) => elements[card.index ?? i] && byId.set(entryOf(card), { element: elements[card.index ?? i], card }));
+    (this.cards ?? []).forEach((card, i) => {
+      // ADR 0035 §10: an include's front panel is its own panel, rooted at it.
+      if (card.include) byId.set(entryOf(card), { element: Object.assign(document.createElement('signal-include'), { id: `include-${card.include}` }), card });
+      else if (elements[card.index ?? i]) byId.set(entryOf(card), { element: elements[card.index ?? i], card });
+    });
     // The cards as the app names them across windows (ADR 0032, `cardsOf`: in the whole panel's order, so before the Stack keeps its own).
     s.named = new Map(cardsOf(container).map((c) => [c.raw, c]));
     for (const element of elements) element.remove();
@@ -982,6 +1000,7 @@ export class SignalPlane extends HTMLElement {
       const found = byId.get(entry);
       if (!found) continue;
       grid.append(found.element);
+      if (found.card.include) found.element.setAttribute('bind', `/${found.card.include}`);
       s.cards.set(entry, found.element);
       this.cardResize.observe(found.element);
     }

@@ -132,7 +132,7 @@ test('plane.check: an unknown entry or one listed twice is an error; an instance
       'error: plane.toml: "card:nope" names no card of ui/main.html (cards: x)',
       'error: plane.toml: "card:x" is listed twice (in "a")',
       'error: plane.toml: "deck" is listed twice (in "a" and "b")',
-      'error: plane.toml: "ghost" names no top-level slot with a part (a card is "card:<id>")',
+      'error: plane.toml: "ghost" names no top-level slot with a part or include (a card is "card:<id>")',
       'error: plane.toml: the Stack "a" is named twice',
       'warning: plane.toml: the instance "bus" is in no instrument of any Stack: it is drawn in the unstacked tray',
     ],
@@ -167,4 +167,18 @@ test('one identity: a card showing a slot with a part is the slot’s instrument
   assert.deepEqual(written.plane.stacks[0].instruments, ['synth', 'card:melody']);
   // Without the part, the slot's card is a card like any other.
   assert.deepEqual(planeOf(null, cards).plane.stacks[0].instruments, ['card:melody', 'card:synth', 'card:deck-a', 'card:synth-2']);
+});
+
+// ADR 0035 §10: a top-level include is an instrument named by its key; its card is the plane's own, never one of ui/main.html.
+test('an include is an instrument named by its key', () => {
+  const cards = withEntries([{ id: 'mixer', index: 0, heading: 'Mixer', slot: null, binds: [] }, { id: 'include-drums', index: null, heading: 'DRUMS (linked)', slot: null, binds: [], include: 'drums' }], []);
+  assert.deepEqual(cards.map((c) => c.entry), ['card:mixer', 'drums']);
+  assert.deepEqual(derivePlane(cards).stacks[0].instruments, ['card:mixer', 'drums']);
+  const written = 'schema_version = 1\n\n[[stack]]\nname = "primary"\nwidth = 160\ninstruments = ["drums", "card:include-drums"]\n';
+  const shown = planeOf(written, cards, null, { slots: ['drums'] });
+  assert.deepEqual(
+    shown.problems.map((p) => p.message),
+    ['plane.toml: "card:include-drums" names no card of ui/main.html (cards: mixer)'],
+    'the include by its key; its card is no card of the panel',
+  );
 });
