@@ -130,6 +130,14 @@ test("the host's controls leave out a part's; one history across the files; a pa
   const before = steps.length;
   shared.step(1);
   assert.equal(steps.length, before, 'a new write drops the redo');
+  // ADR 0046 §5: a control moved across a slot card's boundary writes both files, one step.
+  shared.wrote(part);
+  shared.wrote(host);
+  shared.joinLast();
+  shared.step(-1);
+  assert.deepEqual(steps.slice(before), ['host -1', 'part -1'], 'both undone at once, the last written first');
+  shared.step(1);
+  assert.deepEqual(steps.slice(before + 2), ['part 1', 'host 1'], 'and redone in their order');
 
   const panel = { nodeType: 1 };
   const tools = { nodeType: 1, dataset: { partTools: '' }, localName: 'div', parentElement: null };

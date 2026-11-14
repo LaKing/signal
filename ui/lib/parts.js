@@ -236,3 +236,57 @@ export function slotTemplate(description, slot) {
   const from = found?.interface?.from ?? null;
   return typeof from === 'string' && /^[a-z][a-z0-9_]*$/.test(from) ? from : null;
 }
+
+/** A control or group (a panel tree node) copied, every control's address attributes mapped by `map(name, value)` (`{value}` or `{error}`). */
+function mapNode(node, map) {
+  if (node.kind === 'control') {
+    const attributes = {};
+    for (const [name, value] of Object.entries(node.attributes ?? {})) {
+      const mapped = ADDRESS_ATTRIBUTES.includes(name) ? map(name, value) : { value };
+      if (mapped.error) return { error: mapped.error };
+      attributes[name] = mapped.value;
+    }
+    return { node: { ...node, attributes } };
+  }
+  const children = [];
+  for (const child of node.children ?? []) {
+    const mapped = mapNode(child, map);
+    if (mapped.error) return mapped;
+    children.push(mapped.node);
+  }
+  return { node: { ...node, classes: [...(node.classes ?? [])], children } };
+}
+
+/**
+ * ADR 0046 §5: a host panel's control (or group) dragged into the part of
+ * the slot at `root`: every address made relative (`/synth.cutoff` →
+ * `.cutoff`, `/synth/vcf.q` → `/vcf.q`); `{node}`, or `{error}` naming an
+ * address outside the slot, which a part cannot bind.
+ */
+export function intoPart(node, root) {
+  return mapNode(node, (name, value) => {
+    if (name === 'audition' && String(value).trim() === 'none') return { value };
+    const out = [];
+    for (const address of bindList(value)) {
+      const relative = relativeAddress(address, root);
+      if (relative === null) return { error: `${address} lies outside the slot ${root}: a part binds only inside its slot; bind it from the host's panel` };
+      out.push(relative);
+    }
+    return { value: out.join(' ') };
+  });
+}
+
+/** ADR 0046 §5: a part's control (or group) dragged out to the host panel: every address rooted at `root`, absolute. `{node}` or `{error}`. */
+export function outOfPart(node, root) {
+  return mapNode(node, (name, value) => {
+    if (name === 'audition' && String(value).trim() === 'none') return { value };
+    const out = [];
+    for (const address of bindList(value)) {
+      const absolute = rootAddress(address, root);
+      if (absolute === null) return { error: `${address} is no address of the part of ${root}` };
+      out.push(absolute);
+    }
+    return { value: out.join(' ') };
+  });
+}
+

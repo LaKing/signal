@@ -27,6 +27,7 @@ import {
   editLabels,
   find,
   growCards,
+  insertNode,
   insertionIndex,
   isPlateCard,
   makeGroup,
@@ -39,6 +40,7 @@ import {
   removeCard,
   removeCardStep,
   removeControl,
+  removeNode,
   renameCard,
   searchPalette,
   setAttributes,
@@ -49,6 +51,7 @@ import {
   ungroup,
 } from '../lib/panel-edit.js';
 import { defaultPanel } from '../lib/panel.js';
+import { intoPart, outOfPart } from '../lib/parts.js';
 import { generationOf } from '../lib/opening.js';
 import { GUTTER, MAX_PLATE, PU, blocked, drawnBox, freeze, moved as movedPlace, parsePlate, placeText, plateText, resized, snap, tooLarge } from '../lib/plate.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
@@ -232,20 +235,27 @@ export class SharedHistory {
 
   /** `editor` wrote a new version. */
   wrote(editor) {
-    this.done.push(editor);
+    this.done.push([editor]);
     this.undone = [];
     this.used = true;
   }
 
-  /** Undo (-1) or redo (+1) across the files. */
+  /** The last two writes are one step (ADR 0046 §5: a control moved across a slot card's boundary writes two files). */
+  joinLast() {
+    if (this.done.length < 2) return;
+    const last = this.done.pop();
+    this.done.push([...this.done.pop(), ...last]);
+  }
+
+  /** Undo (-1) or redo (+1) across the files: a step's writes undone last first. */
   step(direction) {
     const from = direction < 0 ? this.done : this.undone;
     const to = direction < 0 ? this.undone : this.done;
-    while (from.length && !from[from.length - 1].editing) from.pop();
-    const editor = from.pop();
-    if (editor) {
-      to.push(editor);
-      editor.stepOwn(direction);
+    while (from.length && !from[from.length - 1].some((e) => e.editing)) from.pop();
+    const entry = from.pop();
+    if (entry) {
+      to.push(entry);
+      for (const editor of direction < 0 ? [...entry].reverse() : entry) if (editor.editing) editor.stepOwn(direction);
       return;
     }
     // Nothing written across the files in this session: the host's own history.
@@ -922,33 +932,33 @@ export class PanelEditor {
    * the session's writing is stopped (`EditSession.blocked`).
    */
   async write(tree, step, version = null) {
-    if (!this.editing) return;
+    if (!this.editing) return false;
     // ADR 0047: a placed card is never shorter than its content.
     if (step === 0) tree = this.refitted(tree);
     // ADR 0047: a plate is at most MAX_PLATE units on a side (the server refuses more).
     if (tree.plate && !parsePlate(tree.plate)) {
       this.say(`Not written: the plate would be ${tree.plate.replace(' ', ' × ')} units, more than ${MAX_PLATE} (${MAX_PLATE * PU} px) on a side`);
       this.draw();
-      return;
+      return false;
     }
     const checked = checkTree(tree, this.rules);
     if (checked.error) {
       this.say(`Not written: ${checked.error}`);
       // The refit drew it: the version shown again.
       this.draw();
-      return;
+      return false;
     }
     const html = version ?? this.remember(tree);
     if (html === this.session.history.current && step === 0) {
       this.tree = tree;
       this.draw();
-      return;
+      return false;
     }
     const request = this.session.request(html);
     if (request.refused) {
       this.say(request.refused);
       this.draw();
-      return;
+      return false;
     }
     const previous = this.tree;
     this.tree = tree;
@@ -975,10 +985,13 @@ export class PanelEditor {
       } else {
         if (outcome.blocked) this.tree = previous;
         this.changed(outcome, 'The file changed elsewhere: shown as it is now; nothing was written');
-        return;
+        return false;
       }
+      if (this.editing) this.draw();
+      return false;
     }
     if (this.editing) this.draw();
+    return true;
   }
 
   // Pointer and keys.
@@ -1054,13 +1067,60 @@ export class PanelEditor {
         return;
       }
       const drop = this.dropFor(subject, e);
-      if (!drop) return;
+      if (!drop) {
+        // ADR 0046 §5: across a slot card's boundary, into the other file.
+        if (subject.kind !== 'card') this.dropAcross(subject, e);
+        return;
+      }
       this.selected = [subject.id];
       if (subject.kind === 'card') this.apply(moveCard(this.tree, subject.id, { cards: drop.into, index: drop.index }));
       else this.apply(moveControl(this.tree, subject.id, drop));
     };
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
+  }
+
+  /**
+   * The other editor under the pointer of `event` (ADR 0046 §5): from the
+   * host, an open slot card's part editor; from a part, the host's (or
+   * another slot's part). Null when none is editing there.
+   */
+  editorAt(event) {
+    const root = this.panel.getRootNode?.();
+    const under = (typeof root?.elementsFromPoint === 'function' ? root : this.panel.ownerDocument).elementsFromPoint(event.clientX, event.clientY);
+    for (const el of under) {
+      const slot = el.localName === 'signal-slot' ? el : el.closest?.('signal-slot');
+      if (slot && slot !== this.panel && slot.partEditor?.editing && slot.partEditor !== this) return slot.partEditor;
+    }
+    const host = this.host();
+    return this.panel.isPart && host?.editor?.editing ? host.editor : null;
+  }
+
+  /** Moves `subject` (a control or group) into the editor under the pointer, its addresses made relative or absolute; one undo step. */
+  async dropAcross(subject, event) {
+    const other = this.editorAt(event);
+    if (!other) return;
+    const target = other.dropFor({ id: null, kind: subject.kind, children: [] }, event);
+    if (!target) return;
+    // Out of a part to the host: absolute; into a part (from the host or another part): relative there.
+    let node = subject;
+    if (this.panel.isPart) {
+      const out = outOfPart(node, this.panel.root);
+      if (out.error) return this.say(`Not moved: ${out.error}`);
+      node = out.node;
+    }
+    if (other.panel.isPart) {
+      const into = intoPart(node, other.panel.root);
+      if (into.error) return this.say(`Not moved: ${into.error}`);
+      node = into.node;
+    }
+    const inserted = insertNode(other.tree, node, target);
+    if (inserted.error) return this.say(`Not moved: ${inserted.error}`);
+    const removed = removeNode(this.tree, subject.id);
+    if (removed.error) return this.say(`Not moved: ${removed.error}`);
+    if (!(await other.write(inserted.tree, 0))) return;
+    if (await this.write(removed.tree, 0)) this.shared?.joinLast();
+    else other.say('Moved in, but not taken out of the other file: undo to take it back');
   }
 
   select(id, extend) {

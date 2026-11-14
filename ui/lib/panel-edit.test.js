@@ -413,3 +413,17 @@ test('a control dropped just before the group of one it leaves keeps that place'
   const m = ok(moveControl(t, control(t, '/out.l'), { into: row, index: 1 }));
   assert.deepEqual(binds(find(m, row).node), ['/a.x', '/out.l', '/a.z']);
 });
+
+test('ADR 0046 §5: a node from another file goes in with fresh ids; removeNode takes a control or a group out', async () => {
+  const { insertNode, removeNode } = await import('./panel-edit.js');
+  const tree = { kind: 'panel', next: 4, children: [{ id: 'n1', kind: 'cards', classes: [], children: [{ id: 'n2', kind: 'card', classes: [], children: [{ id: 'n3', kind: 'row', classes: [], children: [] }] }] }] };
+  const group = { id: 'n1', kind: 'group', classes: [], children: [{ id: 'n2', kind: 'control', tag: 'signal-knob', attributes: { bind: '.a', place: '0 0 1 1' } }] };
+  const { tree: added, id } = insertNode(tree, group, { into: 'n3', index: 0 });
+  assert.equal(id, 'n4');
+  const row = added.children[0].children[0].children[0];
+  assert.deepEqual(row.children[0].children.map((c) => c.id), ['n5']);
+  assert.equal(row.children[0].children[0].attributes.place, undefined);
+  // Into a card: its row, as moveControl places one.
+  assert.equal(insertNode(tree, group, { into: 'n2' }).tree.children[0].children[0].children[0].children.length, 1);
+  assert.deepEqual(removeNode(added, 'n4').tree.children[0].children[0].children[0].children, []);
+});

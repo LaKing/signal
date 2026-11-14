@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseContent, serialize } from './panel-tree.js';
-import { emptyPartTree, opensAsCard, slotTemplate, templatePartFile, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
+import { emptyPartTree, intoPart, opensAsCard, outOfPart, slotTemplate, templatePartFile, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
 
 const ui = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, ui), 'utf8');
@@ -136,4 +136,19 @@ test('ADR 0046 §9: a slot from a project template finds its template part; a li
   assert.equal(slotTemplate(description, 'fx'), null);
   assert.equal(slotTemplate(description, 'none'), null);
   assert.equal(slotTemplate(null, 'lead'), null);
+});
+
+test('ADR 0046 §5: a control dragged into a part binds relative, out of it absolute; outside the slot it is refused', () => {
+  const knob = { id: 'n4', kind: 'control', tag: 'signal-knob', attributes: { bind: '/synth.cutoff', label: 'cutoff' } };
+  assert.deepEqual(intoPart(knob, '/synth').node.attributes, { bind: '.cutoff', label: 'cutoff' });
+  const scope = { id: 'n5', kind: 'control', tag: 'signal-scope', attributes: { bind: '/synth/vcf.lp' } };
+  assert.equal(intoPart(scope, '/synth').node.attributes.bind, '/vcf.lp');
+  assert.match(intoPart({ ...knob, attributes: { bind: '/echo.mix' } }, '/synth').error, /outside the slot \/synth/);
+  const group = { id: 'n6', kind: 'group', classes: ['signal-group'], children: [knob, scope] };
+  const inside = intoPart(group, '/synth').node;
+  assert.deepEqual(inside.children.map((c) => c.attributes.bind), ['.cutoff', '/vcf.lp']);
+  assert.equal(group.children[0].attributes.bind, '/synth.cutoff', 'the original is left as it was');
+  assert.deepEqual(outOfPart(inside, '/synth').node.children.map((c) => c.attributes.bind), ['/synth.cutoff', '/synth/vcf.lp']);
+  const roll = { id: 'n7', kind: 'control', tag: 'signal-piano-roll', attributes: { pattern: 'melody', 'position-bind': '/melody.position', audition: 'none' } };
+  assert.match(intoPart(roll, '/synth').error, /\/melody.position lies outside/);
 });

@@ -359,6 +359,15 @@ export function removeControl(tree, id) {
   return { tree: copy };
 }
 
+/** Removes control or group `id` (moved into another file, ADR 0046 §5); a group left empty goes with it. */
+export function removeNode(tree, id) {
+  const copy = edit(tree);
+  const found = find(copy, id);
+  if (!found || (found.node.kind !== 'control' && found.node.kind !== 'group')) return missing(id);
+  take(copy, id);
+  return { tree: copy };
+}
+
 /** Sets attributes of control `id` (`null` or `undefined` removes one). */
 export function setAttributes(tree, id, patch) {
   const copy = edit(tree);
@@ -391,6 +400,31 @@ export function addControl(tree, { tag, attributes }, { into, index = Infinity }
   const id = fresh(copy);
   container.children.splice(Math.min(index, container.children.length), 0, { id, kind: 'control', tag, attributes: { ...attributes } });
   return { tree: copy, id };
+}
+
+/**
+ * Puts `node`, a control or group from another file's tree (ADR 0046 §5:
+ * dragged across a slot card's boundary), into `into` as `moveControl`
+ * places one, with ids fresh in this tree. `{tree, id}`.
+ */
+export function insertNode(tree, node, { into, index = Infinity }) {
+  const copy = edit(tree);
+  const container = target(copy, into);
+  if (!container) return missing(into);
+  if (node.kind !== 'control' && node.kind !== 'group') return { error: 'only a control or a group moves across' };
+  if (node.kind === 'group' && container.kind !== 'row') return { error: 'a group goes only into a row' };
+  const renumber = (n) => {
+    const out = { ...n, id: fresh(copy) };
+    if (n.kind === 'control') {
+      out.attributes = { ...n.attributes };
+      delete out.attributes.place;
+    }
+    if (n.children) out.children = n.children.map(renumber);
+    return out;
+  };
+  const placed = renumber(node);
+  container.children.splice(Math.min(index, container.children.length), 0, placed);
+  return { tree: copy, id: placed.id };
 }
 
 // The palette.
