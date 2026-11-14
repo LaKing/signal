@@ -24,6 +24,8 @@ import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/
 import { GUTTER, PU, REFERENCE_PX, defaultPlate, fitScale, pack, plateText, tooLarge, zoomed } from '../lib/plate.js';
 import { PLATE_CSS, layOutCards, overflowing } from './plate.js';
 import { unsavedLine } from '../lib/unsaved.js';
+import { panelIncludes } from '../lib/include.js';
+import './include.js';
 import { EDITOR_CSS, PanelEditor, SharedHistory, showWritten } from './panel-editor.js';
 
 /** The generated panel's grid of cards (`generatedSections`), also the Add module browser's panel preview. */
@@ -104,7 +106,7 @@ export class SignalPanel extends HTMLElement {
 <div class="bar" part="bar"><button type="button" class="edit" role="switch" aria-checked="false" aria-disabled="true" title="Edit layout: arrange the cards and controls, written to the panel file">Edit layout</button><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" style="visibility: hidden"><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
 <div class="tools" part="tools" hidden></div>
 <ol class="problems" part="problems" role="alert" hidden></ol>
-<div class="viewport" part="viewport"><div class="plate" part="plate"><div class="generated" part="generated"></div><slot></slot><div class="plate-overlay"></div></div></div>`;
+<div class="viewport" part="viewport"><div class="plate" part="plate"><div class="generated" part="generated"></div><slot></slot><div class="plate-overlay"></div></div></div><div class="includes" part="includes"></div>`;
     this.connection = null;
     this.stops = [];
     /** The structure of the generated panel shown (`defaultPanel`), with `generated`. */
@@ -459,6 +461,7 @@ export class SignalPanel extends HTMLElement {
     // bar still when Play and Stop set and clear it ("Stable layout").
     this.$('.title').textContent = description.project ?? '';
     if (description.unsaved) this.showUnsaved(description.unsaved);
+    this.showIncludes(description);
     this.editable(description);
     if (this.hasAttribute('generated')) {
       // While it is edited the editor draws it.
@@ -481,6 +484,20 @@ export class SignalPanel extends HTMLElement {
       return;
     }
     this.binding.described(description, file);
+  }
+
+  /**
+   * ADR 0035 §10: each top-level include's panel after the host's own
+   * cards, rooted at it (`<signal-include>`), kept while the includes stay.
+   */
+  showIncludes(description) {
+    const keys = panelIncludes(description).map((i) => i.key);
+    const box = this.$('.includes');
+    if (!box?.children || typeof document === 'undefined') return;
+    const shown = [...box.children].map((el) => el.getAttribute('bind'));
+    if (JSON.stringify(shown) === JSON.stringify(keys.map((k) => `/${k}`))) return;
+    box.replaceChildren(...keys.map((key) => Object.assign(document.createElement('signal-include'), { id: `include-${key}` })));
+    [...box.children].forEach((el, i) => el.setAttribute('bind', `/${keys[i]}`));
   }
 
   /** The binding check's reply (or its refusal): shown in the page. */

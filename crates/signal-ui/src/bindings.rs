@@ -1448,7 +1448,7 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
             let mut ids: Vec<crate::plane::Card> = panel
                 .view(&std::collections::BTreeMap::new())
                 .into_iter()
-                .filter(|i| !panel.is_slot(&i.name))
+                .filter(|i| !panel.is_slot(&i.name) && !i.name.contains('/'))
                 .map(|i| card(crate::plane::card_slug(&i.name), None))
                 .collect();
             // The generated panel's slot cards show their slots.

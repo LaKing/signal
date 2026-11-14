@@ -900,6 +900,10 @@ impl Host {
     /// as `exists: false` with `base: null`: the generated panel.
     pub(super) fn panel_read(&self, message: &Value) -> Result<Value, Failure> {
         let name = message.get("file").and_then(Value::as_str).unwrap_or("");
+        // ADR 0035 §10: an include's panel, read-only here.
+        if let Some(rest) = name.strip_prefix("include/") {
+            return self.include_panel_read(name, rest);
+        }
         let (path, exists) = self.panel_path(name)?;
         let planned = self.plan.is_some();
         if !exists {
@@ -925,6 +929,43 @@ impl Host {
             "editable": reason.is_null(),
             "reason": reason,
             "planned": planned,
+        }))
+    }
+
+    /// ADR 0035 §10: `panel.read` of `include/<key>/<file>.html`, the panel
+    /// of the project the top-level instance `key` includes (or its slot
+    /// loads), from that project's `ui/` by the static files' rules: never
+    /// editable here ("linked project: open <name> to edit it").
+    fn include_panel_read(&self, name: &str, rest: &str) -> Result<Value, Failure> {
+        let unknown = || fail("unknown-panel", format!("no included panel '{name}'"));
+        let (key, file) = rest.split_once('/').ok_or_else(unknown)?;
+        if !file.ends_with(".html") {
+            return Err(unknown());
+        }
+        let folder = crate::http::include_ui(&self.opening.dir, key).ok_or_else(unknown)?;
+        let linked = fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_symlink());
+        let path = (!linked)
+            .then(|| crate::http::file(&folder, file))
+            .flatten()
+            .ok_or_else(unknown)?;
+        let text = signal_project::read_regular_to_string(&path)
+            .map_err(|e| fail("unknown-panel", format!("{name}: {e}")))?;
+        let html = panel_content(&text).map_or(Value::Null, |(start, end)| json!(text[start..end]));
+        let project = folder
+            .parent()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| key.to_owned(), |n| n.to_string_lossy().into_owned());
+        Ok(json!({
+            "type": "panel.read",
+            "file": name,
+            "exists": true,
+            "base": sha256_hex(text.as_bytes()),
+            "plate": crate::plate::panel_plate(&text),
+            "text": text,
+            "html": html,
+            "editable": false,
+            "reason": format!("linked project: open {project} to edit it"),
+            "planned": self.plan.is_some(),
         }))
     }
 

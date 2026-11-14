@@ -131,3 +131,75 @@ fn an_include_s_parameters_write_its_entry_and_set(transport: Transport) {
 }
 
 both!(an_include_s_parameters_write_its_entry_and_set);
+
+/// ADR 0035 §10: an include's panel is read (`panel.read` of
+/// `include/<key>/main.html`, never editable here) and served with what it
+/// loads under `/include/<key>/` (TCP: the operator's HTTP).
+#[test]
+fn an_include_s_panel_is_read_and_served() {
+    use std::io::{Read, Write};
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-include-served-source-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(source.join("inc/ui")).unwrap();
+    fs::write(source.join("project.toml"), HOST).unwrap();
+    fs::write(source.join("inc/project.toml"), INCLUDED).unwrap();
+    let page = "<!doctype html>\n<link rel=\"stylesheet\" href=\"inc.css\">\n<signal-panel>\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>tone</h2>\n      <signal-knob bind=\"/osc.freq\"></signal-knob>\n    </section>\n  </div>\n</signal-panel>\n";
+    fs::write(source.join("inc/ui/main.html"), page).unwrap();
+    fs::write(
+        source.join("inc/ui/inc.css"),
+        ".signal-card { color: red; }\n",
+    )
+    .unwrap();
+    let mut rig = rig(
+        "include-served",
+        Options {
+            transport: Transport::Tcp,
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let _ = fs::remove_dir_all(&source);
+    let (mut ws, _) = rig.client();
+    let read = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "panel.read", "file": "include/inc/main.html"}),
+        "panel.read",
+    );
+    assert_eq!(read["exists"], true, "{read}");
+    assert_eq!(read["editable"], false);
+    assert!(
+        read["html"]
+            .as_str()
+            .unwrap()
+            .contains("bind=\"/osc.freq\"")
+    );
+    let missing = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "panel.read", "file": "include/out/main.html"}),
+        "error",
+    );
+    assert_eq!(missing["code"], "unknown-panel", "{missing}");
+    let addr = rig.host().http_addr();
+    let get = |path: &str| {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            addr.port()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    assert!(get("/include/inc/inc.css").contains("color: red"));
+    assert!(get("/include/inc/main.html").starts_with("HTTP/1.1 200"));
+    assert!(get("/include/inc/../project.toml").starts_with("HTTP/1.1 404"));
+    assert!(get("/include/out/main.html").starts_with("HTTP/1.1 404"));
+    rig.finish();
+}

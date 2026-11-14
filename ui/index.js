@@ -100,6 +100,7 @@ import './controls/keyboard.test.js';
 import './controls/plane.test.js';
 import './lib/schematic-controls.test.js';
 import './lib/parts.test.js';
+import './lib/include.test.js';
 import './lib/schematic-parts.test.js';
 import './controls/slot.test.js';
 import './lib/schematic-face.test.js';

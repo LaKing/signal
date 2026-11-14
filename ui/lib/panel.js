@@ -67,6 +67,9 @@ export function defaultPanel(description) {
   const slots = Object.keys(topSlots(d));
   for (const control of d.controls ?? []) {
     if (slots.includes(control.instance)) continue;
+    // An instance inside an include or an own inside (`studio/clap`,
+    // ADR 0035 §10, ADR 0046 §4): its include's panel or its slot shows it.
+    if (String(control.instance ?? '').includes('/')) continue;
     let group = groups.find((g) => g.instance === control.instance);
     if (!group) {
       group = { instance: control.instance, module: control.module, controls: [] };

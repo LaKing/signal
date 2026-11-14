@@ -356,7 +356,19 @@ impl Files {
                                 .flatten()
                         })
                 }
-                _ => None,
+                // ADR 0035 §10: an include's panel and what it loads.
+                _ => path.strip_prefix("/include/").and_then(|rest| {
+                    let (key, rest) = rest.split_once('/')?;
+                    let project = self
+                        .project
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    let folder = include_ui(project.parent()?, key)?;
+                    let linked =
+                        fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_symlink());
+                    (!linked).then(|| file(&folder, rest)).flatten()
+                }),
             },
         };
         let opened = found.and_then(|path| {
@@ -465,6 +477,31 @@ fn waits(error: &io::Error) -> bool {
 
 /// `relative` inside `root`, an existing file: no `..`, no hidden or empty
 /// segment, no escape through a link.
+/// ADR 0035 §10: the `ui/` folder of the project the top-level instance
+/// `key` of the project in `dir` includes (`project = "…"`) or loads into
+/// its slot (a project `load`), read from its `project.toml` as it is now;
+/// `None` for anything else (a `.signal` archive is not served).
+pub(crate) fn include_ui(dir: &Path, key: &str) -> Option<PathBuf> {
+    let text =
+        signal_project::read_regular_to_string(dir.join(signal_project::PROJECT_FILE)).ok()?;
+    let table: toml::Table = text.parse().ok()?;
+    let entry = table.get("instances")?.get(key)?;
+    let written = entry
+        .get("project")
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            entry.get("slot")?;
+            entry
+                .get("load")
+                .and_then(toml::Value::as_str)
+                .filter(|load| signal_project::is_project_path(load))
+        })?;
+    if written.ends_with(".signal") {
+        return None;
+    }
+    Some(dir.join(written).join("ui"))
+}
+
 pub(crate) fn file(root: &Path, relative: &str) -> Option<PathBuf> {
     let clean = !relative.is_empty()
         && !relative.contains(['%', '\\', '\0'])
