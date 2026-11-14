@@ -94,7 +94,9 @@ fn pack_folder(ctx: &WriteCtx, dir: &Path, file: &Path, id: &str) -> (Result<(),
     let mut last = folder_look(dir);
     for _ in 0..FOLDER_SAVE_TRIES {
         let packed = match ctx.lock() {
-            Ok(_lock) => archive::pack_identified(dir, Some(id)),
+            // ADR 0035 §13: Save As embeds the projects included from
+            // outside the folder (the same archive as `pack` without any).
+            Ok(_lock) => archive::pack_embedded(dir, Some(id)),
             Err(error) => {
                 return (
                     Err(format!(

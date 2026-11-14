@@ -498,3 +498,68 @@ fn vendoring_the_includes_renders_the_same() {
     assert_eq!(after["audio_fnv1a64"], before["audio_fnv1a64"]);
     assert_eq!(after["log_fnv1a64"], before["log_fnv1a64"]);
 }
+
+/// ADR 0035 test 11 (its `pack --embed` half) and test 8's pack refusal: a
+/// copy of two-studios (its `../studio` outside the folder, its
+/// `studio-transport` inside) is refused by `signal pack`, and packed with
+/// `--embed` it renders, unpacked and as the `.signal` file itself, the
+/// folder's audio and log bit for bit.
+#[test]
+fn packing_with_embedded_includes_renders_the_same() {
+    let base = scratch("pack-embed");
+    copy_folder(&host(), &base.join("two-studios"));
+    copy_folder(&studio(), &base.join("studio"));
+    let dir = base.join("two-studios");
+    let signal = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let file = base.join("two.signal");
+    let (dir_text, file_text) = (dir.display().to_string(), file.display().to_string());
+    let refused = signal(&["pack", &dir_text, &file_text]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--embed"),
+        "{refused:?}"
+    );
+    assert!(
+        signal(&["pack", "--embed", &dir_text, &file_text])
+            .status
+            .success()
+    );
+    let unpacked = base.join("unpacked");
+    let unpacked_text = unpacked.display().to_string();
+    assert!(
+        signal(&["unpack", &file_text, &unpacked_text])
+            .status
+            .success()
+    );
+    let text = fs::read_to_string(unpacked.join("project.toml")).unwrap();
+    assert!(
+        text.contains("studio = { project = \"includes/studio\" }"),
+        "{text}"
+    );
+    let render = |project: &str, out: &str| -> Value {
+        let out = base.join(out);
+        let output = signal(&[
+            "render",
+            project,
+            "--frames",
+            "24000",
+            "--threads",
+            "1",
+            "--out",
+            &out.display().to_string(),
+        ]);
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap()
+    };
+    let folder = render(&dir_text, "folder");
+    for (project, out) in [(&unpacked_text, "unpacked"), (&file_text, "file")] {
+        let other = render(project, out);
+        assert_eq!(other["audio_fnv1a64"], folder["audio_fnv1a64"], "{out}");
+        assert_eq!(other["log_fnv1a64"], folder["log_fnv1a64"], "{out}");
+    }
+}

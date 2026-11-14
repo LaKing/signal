@@ -1468,19 +1468,22 @@ fn reserved_keys_cannot_be_exported() {
     }
 }
 
-/// ADR 0035 §13 (phase 4 not yet): `signal pack` refuses a project with
-/// includes rather than writing an archive that does not load.
+/// ADR 0035 §13 (phase 4): an include inside the host's folder is packed
+/// at its path, so the archive loads (one outside is refused without
+/// `--embed`: `crates/signal-cli/tests/two_studios.rs`).
 #[test]
-fn pack_refuses_a_project_with_includes() {
+fn pack_takes_an_include_inside_the_folder() {
     let host = noisy_host("pack", "", false, 48_000);
-    let error = signal_project::archive::pack(&host).unwrap_err();
+    let packed = signal_project::archive::pack(&host).unwrap();
+    let into = scratch("pack-unpacked");
+    let _ = std::fs::remove_dir_all(&into);
+    let unpacked = signal_project::archive::unpack(&packed, &into).unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("includes other projects (noisy)"),
-        "{error}"
+        unpacked.files.iter().any(|f| f == "noisy/project.toml"),
+        "{:?}",
+        unpacked.files
     );
-    signal_project::archive::pack(&host.join("noisy")).unwrap();
+    signal_project::Project::load(&into).unwrap();
 }
 
 /// ADR 0051 §5: `seed = "run"` on a slot loading a module makes it a scope

@@ -18,6 +18,11 @@ pub(crate) struct PackArgs {
     folder: PathBuf,
     /// The .signal file to write (replaced atomically if it exists).
     file: PathBuf,
+    /// ADR 0035 §13: embed the projects it includes from outside its
+    /// folder under `includes/<key>/`, their paths rewritten in the archive
+    /// only, so the archive renders as the folder does.
+    #[arg(long)]
+    embed: bool,
 }
 
 /// Arguments of `signal unpack`.
@@ -39,7 +44,12 @@ pub(crate) fn archive_failure(file: &Path) -> impl FnOnce(ArchiveError) -> Failu
 
 /// `signal pack`.
 pub(crate) fn pack(args: &PackArgs, json: bool) -> Result<(), Failure> {
-    let bytes = archive::pack(&args.folder).map_err(archive_failure(&args.folder))?;
+    let bytes = if args.embed {
+        archive::pack_embedded(&args.folder, None)
+    } else {
+        archive::pack(&args.folder)
+    }
+    .map_err(archive_failure(&args.folder))?;
     archive::write_atomic(&args.file, &bytes).map_err(archive_failure(&args.file))?;
     if json {
         print_stdout(

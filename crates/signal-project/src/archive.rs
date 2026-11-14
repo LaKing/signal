@@ -74,9 +74,9 @@ pub enum ArchiveError {
     },
     /// The folder has no `project.toml`, or the archive none at its root.
     NoProjectFile,
-    /// The project includes other projects (ADR 0035), which a `.signal`
-    /// file cannot hold yet (`pack --embed` is phase 4's): their paths as
-    /// written.
+    /// The project includes projects from outside its folder (ADR 0035
+    /// §13), which [`pack`] cannot hold ([`pack_embedded`] embeds them), or
+    /// a `.signal` include: their paths as written.
     Includes(Vec<String>),
     /// The bytes are not a zip archive (or one this reader cannot read).
     NotAnArchive(String),
@@ -116,7 +116,7 @@ impl fmt::Display for ArchiveError {
             ArchiveError::NoProjectFile => write!(f, "no {PROJECT_FILE} at the project's root"),
             ArchiveError::Includes(paths) => write!(
                 f,
-                "the project includes other projects ({}), which a .signal file cannot hold yet (ADR 0035, phase 4): keep it as a folder",
+                "the project includes projects from outside its folder ({}): pack it with --embed (ADR 0035 §13), or keep it as a folder",
                 paths.join(", ")
             ),
             ArchiveError::NotAnArchive(reason) => write!(f, "not a .signal archive: {reason}"),
@@ -252,11 +252,46 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
     Ok(files)
 }
 
+/// ADR 0035 §13: the files of the projects `dir`'s project includes (or
+/// loads into slots) from inside its own folder, and theirs in turn, by
+/// their names in the archive (their paths relative to `root`).
+fn inside_includes(dir: &Path, root: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> {
+    let mut found = BTreeMap::new();
+    let mut todo = vec![dir.to_owned()];
+    let mut seen: Vec<PathBuf> = Vec::new();
+    while let Some(folder) = todo.pop() {
+        let Ok(sources) = crate::read_sources(&folder) else {
+            continue;
+        };
+        for written in crate::include::included_paths(&sources) {
+            let Ok(canonical) = fs::canonicalize(folder.join(&written)) else {
+                continue;
+            };
+            if !canonical.starts_with(root) || canonical == root || seen.contains(&canonical) {
+                continue;
+            }
+            seen.push(canonical.clone());
+            let Ok(relative) = canonical.strip_prefix(root) else {
+                continue;
+            };
+            let prefix = relative.to_string_lossy().replace('\\', "/");
+            for (name, path) in project_files(&canonical)? {
+                found.insert(format!("{prefix}/{name}"), path);
+            }
+            todo.push(canonical);
+        }
+    }
+    Ok(found)
+}
+
 /// The files [`pack`] would take from `dir`, by their paths: what a
 /// project reads, never hidden files, `.git` or anything else in the
 /// folder.
 pub fn project_file_paths(dir: &Path) -> Result<Vec<PathBuf>, ArchiveError> {
-    Ok(project_files(dir)?.into_values().collect())
+    let mut files = project_files(dir)?;
+    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
+    files.extend(inside_includes(dir, &root)?);
+    Ok(files.into_values().collect())
 }
 
 /// The project folder `dir` as a `.signal` archive.
@@ -275,19 +310,165 @@ pub fn valid_project_id(id: &str) -> bool {
 /// makes; only the comment differs. An id that is not
 /// [`valid_project_id`] is left out.
 pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
-    let files = project_files(dir)?;
-    // ADR 0035 §13: an include's files are not the folder's; packing the
-    // folder alone would make an archive that does not load.
+    let mut files = project_files(dir)?;
+    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
+    files.extend(inside_includes(dir, &root)?);
+    // ADR 0035 §13: an include outside the folder is not the folder's;
+    // packing the folder alone would make an archive that does not load
+    // ([`pack_embedded`] embeds it). One inside is packed at its path.
     if let Ok(sources) = crate::read_sources(dir) {
-        let included = crate::include::included_paths(&sources);
-        if !included.is_empty() {
-            return Err(ArchiveError::Includes(included));
+        let outside: Vec<String> = crate::include::included_paths(&sources)
+            .into_iter()
+            .filter(|written| {
+                written.ends_with(".signal")
+                    || !fs::canonicalize(dir.join(written)).is_ok_and(|f| f.starts_with(&root))
+            })
+            .collect();
+        if !outside.is_empty() {
+            return Err(ArchiveError::Includes(outside));
         }
     }
+    let mut entries = Vec::with_capacity(files.len());
+    for (name, path) in &files {
+        entries.push((name.clone(), fs::read(path).map_err(io_error(path))?));
+    }
+    write_zip(entries, id)
+}
+
+/// ADR 0035 §13: the project folder `dir` as a `.signal` archive with every
+/// project it includes (or loads into a slot) from outside the folder
+/// **embedded**, under `includes/<key>/` (`<key>` the including instance,
+/// `<composite>_<instance>` in a composite's file, numbered when taken),
+/// and the `project` (or `load`) values naming them rewritten to that path
+/// (only those values, with `toml_edit`), so the archive renders as the
+/// folder does. One folder included twice is embedded once. An include
+/// inside the folder is packed as it is; an outside include of an embedded
+/// project, or a `.signal` include, is refused (not built yet).
+pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
+    let mut files = project_files(dir)?;
+    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
+    files.extend(inside_includes(dir, &root)?);
+    let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (name, path) in &files {
+        entries.insert(name.clone(), fs::read(path).map_err(io_error(path))?);
+    }
+    let mut embedded: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut refused: Vec<String> = Vec::new();
+    let definitions: Vec<String> = entries
+        .keys()
+        .filter(|n| {
+            n.as_str() == crate::PROJECT_FILE
+                || (n.starts_with("composites/") && n.ends_with(".toml"))
+        })
+        .cloned()
+        .collect();
+    for name in definitions {
+        let Some(text) = entries
+            .get(&name)
+            .and_then(|b| String::from_utf8(b.clone()).ok())
+        else {
+            continue;
+        };
+        let Ok(mut document) = text.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let prefix = name
+            .strip_prefix("composites/")
+            .and_then(|n| n.strip_suffix(".toml"))
+            .map(|c| format!("{c}_"))
+            .unwrap_or_default();
+        let mut changed = false;
+        if let Some(instances) = document
+            .get_mut("instances")
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            for (instance, entry) in instances.iter_mut() {
+                let Some(entry) = entry.as_table_like_mut() else {
+                    continue;
+                };
+                let key = if entry.get("project").is_some() {
+                    "project"
+                } else if entry.get("slot").is_some() && entry.get("load").is_some() {
+                    "load"
+                } else {
+                    continue;
+                };
+                let Some(written) = entry.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+                else {
+                    continue;
+                };
+                if !crate::is_project_path(&written) && key == "load" {
+                    continue;
+                }
+                if written.ends_with(".signal") {
+                    refused.push(written);
+                    continue;
+                }
+                let Ok(folder) = fs::canonicalize(dir.join(&written)) else {
+                    continue;
+                };
+                if folder.starts_with(&root) {
+                    continue;
+                }
+                let at = match embedded.get(&folder) {
+                    Some(at) => at.clone(),
+                    None => {
+                        let base = format!("includes/{prefix}{}", instance.get());
+                        let mut at = base.clone();
+                        let mut n = 2;
+                        while embedded.values().any(|v| *v == at)
+                            || files.keys().any(|f| f.starts_with(&format!("{at}/")))
+                        {
+                            at = format!("{base}_{n}");
+                            n += 1;
+                        }
+                        embedded.insert(folder.clone(), at.clone());
+                        at
+                    }
+                };
+                if let Some(value) = entry.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+                    let decor = value.decor().clone();
+                    *value = toml_edit::Value::from(at.as_str());
+                    *value.decor_mut() = decor;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            entries.insert(name, document.to_string().into_bytes());
+        }
+    }
+    for (folder, at) in &embedded {
+        // Its own outside includes would need their paths rewritten too.
+        if let Ok(sources) = crate::read_sources(folder) {
+            for written in crate::include::included_paths(&sources) {
+                let inside =
+                    fs::canonicalize(folder.join(&written)).is_ok_and(|f| f.starts_with(folder));
+                if !inside {
+                    refused.push(format!("{} (in {at})", written));
+                }
+            }
+        }
+        for (name, path) in project_files(folder)? {
+            entries.insert(
+                format!("{at}/{name}"),
+                fs::read(&path).map_err(io_error(&path))?,
+            );
+        }
+    }
+    if !refused.is_empty() {
+        return Err(ArchiveError::Includes(refused));
+    }
+    write_zip(entries.into_iter().collect(), id)
+}
+
+/// The archive of `entries` (name, bytes), in order, with the library
+/// version (and project id `id`, when valid) in its comment.
+fn write_zip(entries: Vec<(String, Vec<u8>)>, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
     let limits = Limits::DEFAULT;
-    if files.len() > limits.entries {
+    if entries.len() > limits.entries {
         return Err(ArchiveError::TooManyEntries {
-            count: files.len(),
+            count: entries.len(),
             max: limits.entries,
         });
     }
@@ -308,14 +489,13 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
         })
         .map_err(zip_error)?;
     let mut total = 0u64;
-    for (name, path) in &files {
-        let bytes = fs::read(path).map_err(io_error(path))?;
+    for (name, bytes) in &entries {
         total += bytes.len() as u64;
         if total > limits.bytes {
             return Err(ArchiveError::TooLarge { max: limits.bytes });
         }
         writer.start_file(name, options).map_err(zip_error)?;
-        writer.write_all(&bytes).map_err(io_error(path))?;
+        writer.write_all(bytes).map_err(io_error(Path::new(name)))?;
     }
     Ok(writer.finish().map_err(zip_error)?.into_inner())
 }
@@ -327,7 +507,9 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
 /// `.signal` document's edited state). A folder that would not pack is an
 /// error, as from [`pack`].
 pub fn packs_to(dir: &Path, packed: &[u8]) -> Result<bool, ArchiveError> {
-    let files = project_files(dir)?;
+    let mut files = project_files(dir)?;
+    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
+    files.extend(inside_includes(dir, &root)?);
     let mut archive = ZipArchive::new(Cursor::new(packed)).map_err(zip_error)?;
     if archive.len() != files.len() {
         return Ok(false);
