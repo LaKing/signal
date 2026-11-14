@@ -139,6 +139,41 @@ fn key(def: &str, instance: &str) -> String {
     }
 }
 
+/// `text`, the file of definition `def`, with the `project` (or a slot's
+/// `load`) value of each instance whose key is in `folders` set to its
+/// folder there; `None` when nothing changes.
+fn rewrite_includes(text: &str, def: &str, folders: &BTreeMap<String, String>) -> Option<String> {
+    let mut document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let instances = document
+        .get_mut("instances")
+        .and_then(toml_edit::Item::as_table_like_mut)?;
+    let mut changed = false;
+    for (instance, entry) in instances.iter_mut() {
+        let Some(at) = folders.get(&key(def, instance.get())) else {
+            continue;
+        };
+        let Some(entry) = entry.as_table_like_mut() else {
+            continue;
+        };
+        let name = if entry.get("project").is_some() {
+            "project"
+        } else {
+            "load"
+        };
+        let Some(value) = entry.get_mut(name).and_then(toml_edit::Item::as_value_mut) else {
+            continue;
+        };
+        if value.as_str() == Some(at.as_str()) {
+            continue;
+        }
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(at.as_str());
+        *value.decor_mut() = decor;
+        changed = true;
+    }
+    changed.then(|| document.to_string())
+}
+
 /// `path` with `.` and `a/..` removed, lexically (`../a/../b` is `../b`).
 fn normalize(path: &str) -> String {
     let absolute = path.starts_with('/');
@@ -673,6 +708,53 @@ impl Project {
             .collect();
         hashes.extend(self.include_file_hashes());
         hashes
+    }
+
+    /// ADR 0035 §13: the files of a self-contained copy of the project, as
+    /// a session's plan version holds them (`session-format.md` §3): its
+    /// own files, with each include's `project` (or a slot's `load`) value
+    /// rewritten to `includes/<key>` (only those values, with `toml_edit`),
+    /// and each included project's copy under `includes/<key>/`, nested the
+    /// same way. Without includes, the project's files as they are. A copy
+    /// of a copy is the same files, so a loaded copy checks itself.
+    pub fn session_copy(&self) -> Vec<SourceFile> {
+        let mut folders: BTreeMap<String, String> = BTreeMap::new();
+        for entry in &self.content.entries {
+            let key = key(&entry.def, &entry.instance);
+            folders.insert(key.clone(), format!("includes/{key}"));
+        }
+        let mut files = Vec::new();
+        for file in &self.files {
+            let def = if file.path == PROJECT_FILE {
+                Some(String::new())
+            } else {
+                file.path
+                    .strip_prefix("composites/")
+                    .and_then(|n| n.strip_suffix(".toml"))
+                    .map(str::to_owned)
+            };
+            let text = def
+                .filter(|_| !folders.is_empty())
+                .and_then(|def| rewrite_includes(&file.text, &def, &folders))
+                .unwrap_or_else(|| file.text.clone());
+            files.push(SourceFile {
+                path: file.path.clone(),
+                text,
+            });
+        }
+        for entry in &self.content.entries {
+            let Some(included) = self.content.projects.get(&entry.canonical) else {
+                continue;
+            };
+            let at = &folders[&key(&entry.def, &entry.instance)];
+            for file in included.project.session_copy() {
+                files.push(SourceFile {
+                    path: format!("{at}/{}", file.path),
+                    text: file.text,
+                });
+            }
+        }
+        files
     }
 
     /// ADR 0035 §13: the manifest's `included_projects`, one per include

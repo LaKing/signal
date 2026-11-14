@@ -12,6 +12,7 @@ Edit commands come from project changes through `signal_project::diff` (§5).
   projects/v0/project.toml           version 0: the project the engine was built from
   projects/v0/composites/<name>.toml
   projects/v0/patterns/<name>.toml   its pattern files (`project-format.md` §12)
+  projects/v0/includes/<key>/…       the files of each project it includes (ADR 0035 §13)
   projects/v1/…                      one folder per plan version swapped in
   edits.jsonl                        every command, with its effective frame
   boundaries.jsonl                   latent modules only: each due block's outcome (§4a)
@@ -82,7 +83,7 @@ Unknown keys are errors.
 
 ## 3. `projects/v<N>/`
 
-An exact copy of the project files (`project-format.md` §1) of plan version *N*, its pattern files included: a pattern edit is a swap (`semantics.md` §12), so it starts a version whose copy holds the new pattern, and replay plans each version from its copy. Version 0 is the project the engine was built from; version *N* ≥ 1 is the one the *N*-th swap put in. Every file must be listed in `[versions.files]` with its hash, and every listed file must exist; a changed copy is an error. The run settings of the copies are not read: the session's `sample_rate` and `seed` apply.
+An exact copy of the project files (`project-format.md` §1) of plan version *N*, its pattern files included: a pattern edit is a swap (`semantics.md` §12), so it starts a version whose copy holds the new pattern, and replay plans each version from its copy. Version 0 is the project the engine was built from; version *N* ≥ 1 is the one the *N*-th swap put in. A host with includes (ADR 0035 §13) is copied self-contained: each included project's own copy under `includes/<key>/` (`<key>` the including instance, `<composite>.<instance>` for one named in a composite's file), nested the same way for an include's own includes, and in the copy's files each such `project` (or a slot's `load`) value rewritten to `includes/<key>` (only those values); `signal_project::Project::session_copy` makes it, and a copy of a copy is the same files. Replay plans from the copy, so it needs nothing outside the session. `[provenance]` still records the includes as recorded (`included_projects`, the `include:<key>/<path>` hashes). Every file must be listed in `[versions.files]` with its hash, and every listed file must exist; a changed copy is an error. The run settings of the copies are not read: the session's `sample_rate` and `seed` apply.
 
 Every version must have exactly one audio sink (`semantics.md` §8), at the same address and with as many signal inputs as version 0's.
 

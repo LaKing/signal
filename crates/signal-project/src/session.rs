@@ -880,7 +880,8 @@ pub struct SessionRecorder {
     /// The machine (M2.7-8): this one, with the devices the driver sets
     /// ([`set_devices`](SessionRecorder::set_devices)).
     machine: Machine,
-    /// The files and plan of every version (none without history).
+    /// The files (`Project::session_copy`) and plan of every version (none
+    /// without history).
     versions: Vec<(Vec<SourceFile>, ExecutionPlan)>,
     /// How many versions there have been: the next version's number.
     version_count: u64,
@@ -915,8 +916,8 @@ impl SessionRecorder {
         provenance.project_file_hashes = file_hashes(&initial.files);
         // Version 0's; every swap adds its version's (`applied_swap_as`).
         provenance.library_composite_hashes = initial.library_hashes();
-        // ADR 0035 §13: a session of a host with includes records them, and
-        // is not replayable until phase 4 copies their files too.
+        // ADR 0035 §13: a session of a host with includes records them; each
+        // version's copy holds their files (`Project::session_copy`).
         provenance
             .project_file_hashes
             .extend(initial.include_file_hashes());
@@ -935,7 +936,7 @@ impl SessionRecorder {
             provenance,
             machine: Machine::here(Vec::new()),
             state: State::new(&plan, 0),
-            versions: vec![(initial.files.clone(), plan)],
+            versions: vec![(initial.session_copy(), plan)],
             version_count: 1,
             history: true,
             edits: Vec::new(),
@@ -1132,7 +1133,7 @@ impl SessionRecorder {
         if !self.history {
             return Ok(version);
         }
-        self.versions.push((project.files.clone(), plan));
+        self.versions.push((project.session_copy(), plan));
         // ADR 0027 §4: the library composites of every version, so a swap
         // that brings one in is recorded too (`Session::library_hashes`).
         self.provenance
@@ -1793,21 +1794,6 @@ impl Session {
         if file.versions.is_empty() {
             diagnostics.push(at(0, "the session lists no versions".to_owned()));
         }
-        if !file.provenance.included_projects.is_empty() {
-            let keys: Vec<&str> = file
-                .provenance
-                .included_projects
-                .iter()
-                .map(|p| p.key.as_str())
-                .collect();
-            diagnostics.push(at(
-                0,
-                format!(
-                    "the session was recorded from a project that includes others ({}); a session with includes cannot be replayed yet (ADR 0035, phase 4)",
-                    keys.join(", ")
-                ),
-            ));
-        }
         let conversion = file.conversion.as_ref().map(|name| {
             let found = Conversion::from_name(name.get_ref());
             if found.is_none() {
@@ -1852,7 +1838,8 @@ impl Session {
                 }
                 Err(error) => return Err(error),
             };
-            let present = file_hashes(&project.files);
+            // ADR 0035 §13: with its includes' files under `includes/`.
+            let present = file_hashes(&project.session_copy());
             for (path, hash) in &present {
                 match entry.files.get(path) {
                     Some(recorded) if recorded == hash => {}
