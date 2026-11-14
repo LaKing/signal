@@ -194,6 +194,11 @@ impl Registry {
         self.taps.get(sink).copied()
     }
 
+    /// Whether `type_name` is registered as some sink type's tap.
+    pub fn is_sink_tap(&self, type_name: &str) -> bool {
+        self.taps.values().any(|tap| *tap == type_name)
+    }
+
     /// Declares that instances of `type_name` take a table (ADR 0028 §3, §4):
     /// the data of `rule.kind` a project names for the instance, compiled by
     /// `rule.compile` when the plan is built. A type without a rule takes none.

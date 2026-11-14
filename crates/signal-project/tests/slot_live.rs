@@ -1001,10 +1001,68 @@ fn added_voices_take_the_survivors_live_values() {
         .map(|e| format!("{:?}", e.command))
         .filter(|c| c.contains("/deck/v2/g.db"))
         .collect();
-    assert_eq!(ramp.len(), 1, "{ramp:?}");
+    // The survivor's value at the swap, then the rest of its ramp (the
+    // audit of 2026-11-14: the ramp alone started from the planned value).
+    assert_eq!(ramp.len(), 2, "{ramp:?}");
+    assert!(ramp[0].contains("Set("), "{ramp:?}");
     assert!(
-        ramp[0].contains("Ramp") && ramp[0].contains("to: -40.0"),
+        ramp[1].contains("Ramp") && ramp[1].contains("to: -40.0"),
         "{ramp:?}"
+    );
+}
+
+#[test]
+fn audit_added_voice_matches_current_ramp_value() {
+    use signal_core::{EventPayload, PortAddress};
+    use signal_engine::{ControlSink, ParameterValue};
+    use signal_project::live::{Both, send_edit_with_bases};
+    #[derive(Default)]
+    struct Values(std::collections::BTreeMap<String, f64>);
+    impl ControlSink for Values {
+        fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
+            self.0.insert(port.to_string(), value.base);
+        }
+    }
+    let registry = registry();
+    let two = poly_host(2);
+    let mut run = Run::start(&two, &registry, 1, 62);
+    run.play(1_000);
+    for voice in 0..2 {
+        run.controller
+            .send_event(
+                format!("/deck/v{voice}/g.db").parse().unwrap(),
+                EventPayload::Ramp {
+                    to: -40.0,
+                    frames: 48_000,
+                    curve: signal_core::Curve::Linear,
+                },
+                Stamp::Default,
+            )
+            .unwrap();
+    }
+    run.play(20_000);
+    send_edit_with_bases(
+        &mut run.controller,
+        &mut run.live,
+        &mut (),
+        &two,
+        poly_host(3),
+        &registry,
+        &|_| Some(-12.0),
+    )
+    .unwrap();
+    let mut values = Values::default();
+    run.driver
+        .run(12_000, || {
+            run.controller.poll(&mut Both(&mut run.live, &mut values))
+        })
+        .unwrap();
+    run.controller.poll(&mut Both(&mut run.live, &mut values));
+    let old = values.0["/deck/v0/g.db"];
+    let added = values.0["/deck/v2/g.db"];
+    assert!(
+        (old - added).abs() < 0.01,
+        "survivor={old}, newly added={added}"
     );
 }
 

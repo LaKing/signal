@@ -289,6 +289,58 @@ fn inside_includes(dir: &Path, root: &Path) -> Result<BTreeMap<String, PathBuf>,
     Ok(found)
 }
 
+/// `dir` and the folders of the projects it includes (or loads into slots)
+/// from inside `root`, and theirs in turn: each folder whose own includes a
+/// pack must hold.
+fn inside_folders(dir: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut folders = vec![dir.to_owned()];
+    let mut todo = vec![dir.to_owned()];
+    while let Some(folder) = todo.pop() {
+        let Ok(sources) = crate::read_sources(&folder) else {
+            continue;
+        };
+        for written in crate::include::included_paths(&sources) {
+            let Ok(canonical) = fs::canonicalize(folder.join(&written)) else {
+                continue;
+            };
+            if canonical.is_dir()
+                && canonical.starts_with(root)
+                && !folders.contains(&canonical)
+                && canonical != *root
+            {
+                folders.push(canonical.clone());
+                todo.push(canonical);
+            }
+        }
+    }
+    folders
+}
+
+/// The includes of `dir`'s project and of its inside includes (the audit of
+/// 2026-11-14: a child's own includes too) that lie outside `root`: their
+/// paths as written, the folder naming one other than `dir` shown after it.
+fn outside_includes(dir: &Path, root: &Path) -> Vec<String> {
+    let mut outside = Vec::new();
+    for folder in inside_folders(dir, root) {
+        let Ok(sources) = crate::read_sources(&folder) else {
+            continue;
+        };
+        for written in crate::include::included_paths(&sources) {
+            let inside = fs::canonicalize(folder.join(&written)).is_ok_and(|f| f.starts_with(root));
+            if !inside {
+                let canonical_dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
+                outside.push(match folder.strip_prefix(&canonical_dir) {
+                    Ok(rel) if !rel.as_os_str().is_empty() => {
+                        format!("{written} (in {})", rel.display())
+                    }
+                    _ => written,
+                });
+            }
+        }
+    }
+    outside
+}
+
 /// The files [`pack`] would take from `dir`, by their paths: what a
 /// project reads, never hidden files, `.git` or anything else in the
 /// folder.
@@ -321,16 +373,9 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
     // ADR 0035 §13: an include outside the folder is not the folder's;
     // packing the folder alone would make an archive that does not load
     // ([`pack_embedded`] embeds it). One inside is packed at its path.
-    if let Ok(sources) = crate::read_sources(dir) {
-        let outside: Vec<String> = crate::include::included_paths(&sources)
-            .into_iter()
-            .filter(|written| {
-                !fs::canonicalize(dir.join(written)).is_ok_and(|f| f.starts_with(&root))
-            })
-            .collect();
-        if !outside.is_empty() {
-            return Err(ArchiveError::Includes(outside));
-        }
+    let outside = outside_includes(dir, &root);
+    if !outside.is_empty() {
+        return Err(ArchiveError::Includes(outside));
     }
     let mut entries = Vec::with_capacity(files.len());
     for (name, path) in &files {
@@ -454,17 +499,15 @@ pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveErr
         }
     }
     for (folder, at) in &embedded {
-        // Its own outside includes would need their paths rewritten too.
-        if let Ok(sources) = crate::read_sources(folder) {
-            for written in crate::include::included_paths(&sources) {
-                let inside =
-                    fs::canonicalize(folder.join(&written)).is_ok_and(|f| f.starts_with(folder));
-                if !inside {
-                    refused.push(format!("{} (in {at})", written));
-                }
-            }
+        // Its own outside includes (and its inside includes') would need
+        // their paths rewritten too.
+        for written in outside_includes(folder, folder) {
+            refused.push(format!("{written} (in {at})"));
         }
-        for (name, path) in project_files(folder)? {
+        // Its files and its inside includes', at their paths under it.
+        let mut files = project_files(folder)?;
+        files.extend(inside_includes(folder, folder)?);
+        for (name, path) in files {
             entries.insert(
                 format!("{at}/{name}"),
                 fs::read(&path).map_err(io_error(&path))?,

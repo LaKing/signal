@@ -83,18 +83,34 @@ pub fn export_slot(
     doc.remove("schema_version");
     doc.remove("composite");
 
-    // The slot's values on the instances its exports reach.
+    // The slot's values on the instances its exports reach: an export is
+    // `"g.db"`, a list of them, or a table whose `to` is either (ADR 0042:
+    // `{ to = "g.db", min = -40, max = 0 }`).
     let exported = |name: &str| -> Vec<String> {
+        let targets = |value: &Value| -> Vec<String> {
+            match value {
+                Value::String(s) => vec![s.value().clone()],
+                Value::Array(a) => a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
         match doc
             .get("exports")
             .and_then(|e| e.get("parameters"))
             .and_then(|p| p.get(name))
         {
-            Some(Item::Value(Value::String(s))) => vec![s.value().clone()],
-            Some(Item::Value(Value::Array(a))) => a
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect(),
+            Some(Item::Value(Value::InlineTable(t))) => {
+                t.get("to").map(targets).unwrap_or_default()
+            }
+            Some(Item::Table(t)) => t
+                .get("to")
+                .and_then(Item::as_value)
+                .map(targets)
+                .unwrap_or_default(),
+            Some(Item::Value(value)) => targets(value),
             _ => Vec::new(),
         }
     };
@@ -176,12 +192,18 @@ pub fn export_slot(
         }
     }
 
+    // Its random streams: the slot's own seed when it has one (it drew from
+    // it in the host), else the host's (the audit of 2026-11-14).
+    let seed = entry
+        .get("seed")
+        .and_then(toml::Value::as_integer)
+        .and_then(|s| u64::try_from(s).ok())
+        .unwrap_or(project.seed);
     let header = format!(
-        "schema_version = 1\n\n# Saved from slot `{slot}` of `{}` (ADR 0046 §9).\n[project]\nname = {}\nsample_rate = {}\nseed = {}\n\n",
+        "schema_version = 1\n\n# Saved from slot `{slot}` of `{}` (ADR 0046 §9).\n[project]\nname = {}\nsample_rate = {}\nseed = {seed}\n\n",
         project.name,
         Value::from(slot),
         project.sample_rate,
-        project.seed,
     );
     let mut files = vec![SourceFile {
         path: "project.toml".to_owned(),

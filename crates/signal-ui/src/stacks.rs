@@ -197,11 +197,14 @@ pub fn export_stack(dir: &Path, stack: &str, out: &Path) -> Result<Vec<(String, 
                     format!("`{slot}`'s link cannot be written from the new folder")
                 })?;
                 value.insert("load", Value::from(relative));
-            } else if let Some(text) = files.get(&format!("composites/{load}.toml"))
-                && inside_of(text).as_deref() == Some(slot.as_str())
-            {
+            } else if let Some(text) = files.get(&format!("composites/{load}.toml")) {
+                // Its own inside, or a project composite it shares with
+                // others (the audit of 2026-11-14): copied with what it uses.
+                let path = format!("composites/{load}.toml");
                 insides.push(text.clone());
-                out_files.push((format!("composites/{load}.toml"), text.clone()));
+                if !out_files.iter().any(|(p, _)| *p == path) {
+                    out_files.push((path, text.clone()));
+                }
             }
         }
         lines.push(format!("{slot} = {}", value.to_string().trim()));
@@ -503,6 +506,10 @@ pub fn import_stack(dir: &Path, source: &Path) -> Result<Imported, String> {
 
     // The slots, their parts and the connections among them.
     let canonical_dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let host_seed = host
+        .get("project")
+        .and_then(|p| p.get("seed"))
+        .and_then(Item::as_integer);
     let instances = host
         .get_mut("instances")
         .and_then(Item::as_table_like_mut)
@@ -526,6 +533,18 @@ pub fn import_stack(dir: &Path, source: &Path) -> Result<Imported, String> {
             } else if let Some(m) = modules.get(&load) {
                 value.insert("load", Value::from(m.as_str()));
             }
+        }
+        // `seed = "run"` drew from the source project's seed: written as that
+        // seed when the host's differs, so it keeps its random streams (the
+        // audit of 2026-11-14; ADR 0051 §5).
+        if value.get("seed").and_then(Value::as_str) == Some("run")
+            && let Some(from_seed) = src_table
+                .get("project")
+                .and_then(|p| p.get("seed"))
+                .and_then(toml::Value::as_integer)
+            && host_seed != Some(from_seed)
+        {
+            value.insert("seed", Value::from(from_seed));
         }
         instances.insert(new, Item::Value(Value::InlineTable(value)));
         if let Some(part) = from.get(&format!("ui/parts/{slot}.html")) {

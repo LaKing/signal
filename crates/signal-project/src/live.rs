@@ -80,41 +80,57 @@ impl ProjectWatcher {
             .collect();
         // A changed definition may include another project: the folders
         // watched are read again (each one's files as they are now).
-        if changed.iter().any(|p| {
-            p.as_path() == Path::new(crate::PROJECT_FILE) || p.starts_with(crate::COMPOSITES)
-        }) {
-            let known: BTreeMap<PathBuf, Snapshot> = self
-                .includes
-                .drain(..)
-                .map(|(shown, _, files)| (shown, files))
-                .collect();
-            self.includes = include_dirs(&self.dir)
-                .into_iter()
-                .map(|(shown, folder)| {
-                    let files = known
-                        .get(&shown)
-                        .cloned()
-                        .unwrap_or_else(|| snapshot(&folder).unwrap_or_default());
-                    (shown, folder, files)
-                })
-                .collect();
+        let definition = |p: &Path| {
+            p.as_os_str().is_empty()
+                || p == Path::new(crate::PROJECT_FILE)
+                || p.starts_with(crate::COMPOSITES)
+        };
+        if changed.iter().any(|p| definition(p)) {
+            self.rediscover();
         }
         // ADR 0035 §7: an included project's files, by the path the host
         // reaches them by (`../studio/patterns/drums.toml`).
+        let mut included_definition = false;
         for (shown, folder, last) in &mut self.includes {
             let now = snapshot(folder).unwrap_or_default();
-            changed.extend(
-                now.iter()
-                    .filter(|(path, state)| last.get(*path) != Some(*state))
-                    .map(|(path, _)| path.clone())
-                    .chain(last.keys().filter(|path| !now.contains_key(*path)).cloned())
-                    .map(|path| under(shown, path)),
-            );
+            let found: Vec<PathBuf> = now
+                .iter()
+                .filter(|(path, state)| last.get(*path) != Some(*state))
+                .map(|(path, _)| path.clone())
+                .chain(last.keys().filter(|path| !now.contains_key(*path)).cloned())
+                .collect();
+            included_definition |= found.iter().any(|p| definition(p));
+            changed.extend(found.into_iter().map(|path| under(shown, path)));
             *last = now;
+        }
+        // An include's own definition changed (the audit of 2026-11-14): it
+        // may include another project, watched from now on.
+        if included_definition {
+            self.rediscover();
         }
         changed.sort();
         self.last = now;
         Ok(changed)
+    }
+
+    /// The included folders read again ([`include_dirs`]), each known one
+    /// keeping its last snapshot, a new one taken as it is now.
+    fn rediscover(&mut self) {
+        let known: BTreeMap<PathBuf, Snapshot> = self
+            .includes
+            .drain(..)
+            .map(|(shown, _, files)| (shown, files))
+            .collect();
+        self.includes = include_dirs(&self.dir)
+            .into_iter()
+            .map(|(shown, folder)| {
+                let files = known
+                    .get(&shown)
+                    .cloned()
+                    .unwrap_or_else(|| snapshot(&folder).unwrap_or_default());
+                (shown, folder, files)
+            })
+            .collect();
     }
 
     /// `file` (relative to the folder) as it is now, for [`accept`](Self::accept).
@@ -722,7 +738,7 @@ fn voice_catch_up(
             else {
                 continue;
             };
-            let latest = history
+            let events: Vec<(Frame, EventPayload)> = history
                 .iter()
                 .filter_map(|e| match &e.command {
                     crate::session::Command::Event { target, payload } if *target == source => {
@@ -730,10 +746,24 @@ fn voice_catch_up(
                     }
                     _ => None,
                 })
-                .next_back();
-            if let Some((frame, EventPayload::Ramp { to, frames, curve })) = latest {
+                .collect();
+            if let Some(&(frame, EventPayload::Ramp { to, frames, curve })) = events.last() {
                 let end = frame.0.saturating_add(frames);
                 if end > now.0 {
+                    // The survivor's value now (`semantics.md` §6's ramp
+                    // values), then the rest of its ramp: the added voice
+                    // starts where the survivor is, not at its planned value.
+                    let start = before
+                        .instances
+                        .iter()
+                        .find(|i| i.address.as_str() == reference)
+                        .and_then(|i| i.parameters.get(name))
+                        .copied()
+                        .unwrap_or(*planned);
+                    sends.push(crate::ParameterChange {
+                        port: port.clone(),
+                        payload: EventPayload::Set(base_at(start, &events, now)),
+                    });
                     sends.push(crate::ParameterChange {
                         port,
                         payload: EventPayload::Ramp {
@@ -756,6 +786,47 @@ fn voice_catch_up(
         }
     }
     sends
+}
+
+/// A parameter's base at frame `at`, from `start` (its planned value) and
+/// the `set`s and `ramp`s it was sent, in order (`semantics.md` §6: a ramp
+/// of *N* frames from base *b* at *n₀* is *b* + (*to* − *b*)·*c*(*i*/*N*)
+/// *i* frames on, exactly *to* from *N* on).
+fn base_at(start: f64, events: &[(Frame, signal_core::EventPayload)], at: Frame) -> f64 {
+    use signal_core::EventPayload;
+    let value =
+        |ramp: Option<(f64, f64, u64, u64, signal_core::Curve)>, base: f64, n: u64| match ramp {
+            Some((b, to, frames, n0, curve)) => {
+                let i = n.saturating_sub(n0);
+                if i >= frames {
+                    to
+                } else {
+                    b + (to - b) * curve.eval(i as f64 / frames as f64)
+                }
+            }
+            None => base,
+        };
+    let mut base = start;
+    let mut ramp = None;
+    for (frame, payload) in events.iter().filter(|(f, _)| *f <= at) {
+        let now = value(ramp, base, frame.0);
+        match *payload {
+            EventPayload::Set(v) => {
+                base = v;
+                ramp = None;
+            }
+            EventPayload::Ramp { to, frames: 0, .. } => {
+                base = to;
+                ramp = None;
+            }
+            EventPayload::Ramp { to, frames, curve } => {
+                base = now;
+                ramp = Some((now, to, frames, frame.0, curve));
+            }
+            _ => {}
+        }
+    }
+    value(ramp, base, at.0)
 }
 
 /// One swap of a structural edit: the project it plays, the instances it

@@ -218,15 +218,26 @@ pub fn parameter_file(files: &[crate::SourceFile], key: &str) -> Option<(String,
 }
 
 /// ADR 0035 §10: whether the top-level instance `name` includes a project
-/// (`project = "…"`): a control key `<name>/<inner>` then writes the
+/// (`project = "…"`, or a slot loading one): a control key `<name>/<inner>` then writes the
 /// override into its entry's `set` table (`"<inner>.<p>" = v`).
 pub fn includes_project(files: &[crate::SourceFile], name: &str) -> bool {
-    files
+    let Some(table) = files
         .iter()
         .find(|f| f.path == PROJECT_FILE)
         .and_then(|f| f.text.parse::<toml::Table>().ok())
-        .and_then(|t| t.get("instances")?.get(name)?.get("project").cloned())
-        .is_some()
+    else {
+        return false;
+    };
+    let Some(entry) = table.get("instances").and_then(|i| i.get(name)) else {
+        return false;
+    };
+    // `project = …`, or a slot loading a project (ADR 0037: `load` a path).
+    entry.get("project").is_some()
+        || (entry.get("slot").is_some()
+            && entry
+                .get("load")
+                .and_then(toml::Value::as_str)
+                .is_some_and(crate::is_project_path))
 }
 
 /// `text`, a `project.toml`, with the `set` override `key` (`"transport.run"`)

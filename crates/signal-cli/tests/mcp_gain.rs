@@ -16,6 +16,18 @@ use serde_json::{Value, json};
 const HEAD: &str =
     "schema_version = 1\n\n[project]\nname = \"gain\"\nsample_rate = 48000\nseed = 1\n\n";
 
+#[test]
+fn audit_quad_gain_respects_max_gain() {
+    let text = tone("0.2").replace("std.audio_out", "std.audio_out_quad");
+    let mut mcp = Mcp::started(&project(&text, "audit-quad-gain"), &[]);
+    refused(
+        &mut mcp,
+        "set_parameter",
+        json!({"address": "/out.gain", "value": 2.0}),
+    );
+    assert!(mcp.finish().success());
+}
+
 /// A sine into a sink at `gain` (static: nothing into the gain).
 fn tone(gain: &str) -> String {
     format!(

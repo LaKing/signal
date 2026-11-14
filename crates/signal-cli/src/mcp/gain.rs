@@ -32,12 +32,17 @@ use std::path::Path;
 use signal_core::Registry;
 use signal_project::{Project, SourceFile};
 
-/// The parameter every `std.audio_out` gain is.
-const SINK: &str = "std.audio_out";
-/// ADR 0035 §3: an included project's sink is planned as its tap, whose
-/// `gain` (range `[0, 4]`, as the sink's) reaches the host's sink through
-/// the include's outputs, so the ceiling bounds it too (phase 1's note).
-const TAP: &str = "std.audio_tap";
+/// The guarded gains are every audio sink's (`std.audio_out` and every
+/// other layout's, ADR 0038 §2) and, ADR 0035 §3, every sink tap's: an
+/// included project's sink is planned as its tap, whose `gain` (range
+/// `[0, 4]`, as the sink's) reaches the host's sink through the include's
+/// outputs, so the ceiling bounds it too (phase 1's note). Both are read
+/// from the plan and the registry, never by type name, so a new layout is
+/// guarded as it is registered.
+fn guarded(instance: &signal_graph::PlanInstance, registry: &Registry) -> bool {
+    instance.descriptor.sink == Some(signal_core::SinkKind::Audio)
+        || registry.is_sink_tap(instance.type_name)
+}
 const GAIN: &str = "gain";
 /// The gain's declared range ends at 4: the effective gain never exceeds it.
 const CLAMP: f64 = 4.0;
@@ -112,11 +117,7 @@ impl Gains {
             }
         }
         let mut ports = BTreeMap::new();
-        for sink in plan
-            .instances
-            .iter()
-            .filter(|i| i.type_name == SINK || i.type_name == TAP)
-        {
+        for sink in plan.instances.iter().filter(|i| guarded(i, registry)) {
             let address = format!("{}.{GAIN}", sink.address);
             let gain_sources: Vec<_> = plan
                 .sources
