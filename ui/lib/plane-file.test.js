@@ -54,7 +54,7 @@ test('the derived default Stack of every example panel: one primary Stack of its
     kick: ['kick', 'kick-2', 'output', 'scope'],
     'physical-av': ['physical-av', 'membrane-seen', 'sparks', 'bodies', 'strike', 'out', 'membrane-heard'],
     pulse: ['pulse', 'filter', 'delay', 'sequence', 'output', 'scope'],
-    studio: ['studio', 'transport', 'mono-synth', 'rhythm-composer', 'tape-echo', 'master'],
+    studio: ['studio', 'transport', 'mono-synth', 'rhythm-composer', 'tape-echo', 'mixer', 'master'],
     'studio-transport': ['studio-transport', 'transport', 'mono-synth', 'rhythm-composer', 'tape-echo', 'master'],
     'two-decks': ['two-decks', 'transport', 'deck-a', 'deck-b', 'mix'],
   };
@@ -84,7 +84,7 @@ test('the studio’s ui/plane.toml reads, checks clean against its panel and wri
   const { cards } = cardsOf('studio');
   const parsed = parsePlane(text);
   assert.deepEqual(parsed.problems, []);
-  assert.deepEqual(parsed.plane.stacks, [{ name: 'primary', at: [0, 0], width: 160, instruments: ['card:transport', 'card:mono-synth', 'card:rhythm-composer', 'card:tape-echo', 'card:master'] }]);
+  assert.deepEqual(parsed.plane.stacks, [{ name: 'primary', at: [0, 0], width: 160, instruments: ['card:transport', 'card:mono-synth', 'card:rhythm-composer', 'card:tape-echo', 'card:mixer', 'card:master'] }]);
   assert.deepEqual(checkPlane(parsed.plane, { cards: cards.map((c) => c.id) }), []);
   assert.equal(writePlane(parsed.plane), text);
   const shown = planeOf(text, cards);

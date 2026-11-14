@@ -14,7 +14,7 @@ import { junctions } from './board-net.js';
 import { LEG_LANE, PARAMS, layout } from './schematic-layout.js';
 import { exportFacts } from './schematic-groups.js';
 
-const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
+const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/board/studio.json', import.meta.url), 'utf8'));
 const VOICES = ['moog_voice', 'kick909', 'snare909', 'clap909', 'hat909', 'tom909', 'rim909', 'cymbal909', 'tape_delay'];
 const die = (name, positions = {}) => layout(STUDIO.composites[name], positions, { factsOf: (m) => exportFacts(STUDIO.composites?.[m] ?? null), board: { die: true } });
 const intersects = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;

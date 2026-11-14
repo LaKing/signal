@@ -454,16 +454,20 @@ test('through modules: the tree is the chain in order; a short trace stays open'
 /** The studio's `graph` structure (crates/signal-project/tests/structure.rs keeps it equal to `Project::structure`). */
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
 
-test('the studio: through modules from the synth’s hz reaches the oscillators, the filter, the VCA and the audio output', () => {
+test('the studio: through modules from the synth’s hz reaches the oscillators, the filter, the VCA and the mixer', () => {
   const t = trace(STUDIO, { kind: 'pin', address: '/synth.hz' }, 'down', through);
-  assert.ok(has(t, '/synth/osc1.out', '/synth/osc2.out', '/synth/osc3.out', '/synth/ladder.lp', '/synth/vca.out', '/synth.out', '/echo.in', '/out.l', '/out.r'));
-  const sinks = t.down.endpoints.filter((e) => e.kind === 'sink').map((e) => e.address);
-  assert.ok(sinks.includes('/out.l') && sinks.includes('/out.r'), sinks.join(', '));
+  assert.ok(has(t, '/synth/osc1.out', '/synth/osc2.out', '/synth/osc3.out', '/synth/ladder.lp', '/synth/vca.out', '/synth.out', '/echo.in', '/bus.c_l', '/bus.c_r'));
+  // The mixer is a library composite (lib.mixer, ADR 0051 §13): the trace stops at its pins.
+  const library = t.down.endpoints.filter((e) => e.kind === 'library').map((e) => e.address);
+  assert.deepEqual(library, ['/bus.c_l', '/bus.c_r']);
+  // From the mixer's output on, it reaches the audio output, a sink.
+  const sinks = trace(STUDIO, { kind: 'pin', address: '/bus.r' }, 'down', through).down.endpoints.filter((e) => e.kind === 'sink').map((e) => e.address);
+  assert.deepEqual(sinks, ['/out.r']);
   // To the next module, it stops where the voice's export leads.
   const next = trace(STUDIO, { kind: 'pin', address: '/synth.hz' }, 'down');
   assert.deepEqual(next.down.endpoints.map((e) => e.address).sort(), ['/synth/glide.in', '/synth/hz_prev.in']);
   // A parameter of the voice crosses its filter to the output as well.
-  assert.ok(has(trace(STUDIO, { kind: 'pin', address: '/synth.cutoff' }, 'down', through), '/synth/ladder.cutoff_hz', '/synth/ladder.lp', '/out.l'));
+  assert.ok(has(trace(STUDIO, { kind: 'pin', address: '/synth.cutoff' }, 'down', through), '/synth/ladder.cutoff_hz', '/synth/ladder.lp', '/bus.c_l'));
   // The chain in order; long, so every level but the start's is collapsed.
   const tree = traceTree(STUDIO, t);
   assert.ok(t.pins.size > COLLAPSE_PINS);
@@ -528,13 +532,13 @@ test('through modules, an output leading nowhere is an open end, never a sink (t
   const kinds = new Map([...t.down.endpoints, ...t.up.endpoints].map((e) => [e.address, e.kind]));
   assert.equal(kinds.get('/synth/ladder.lp12'), 'unconnected');
   assert.equal(kinds.get('/echo/tone.hp'), 'unconnected');
-  assert.equal(kinds.get('/out.l'), 'sink');
+  assert.equal(kinds.get('/bus.c_l'), 'library');
   // Upstream, an input with nothing connected is an open end too; a parameter left to its value is not.
   assert.equal(kinds.get('/melody.reset'), 'unconnected');
   assert.equal(kinds.get('/transport.bpm'), 'source');
   const roles = new Map(traceTree(studio, t).flatMap((l) => l.children.flatMap((i) => i.children.map((p) => [p.address, p.role]))));
   assert.equal(roles.get('/synth/ladder.lp12'), 'open');
-  assert.equal(roles.get('/out.l'), 'endpoint');
+  assert.equal(roles.get('/bus.c_l'), 'endpoint');
   // Behind a composite's output, inside, its source is a module's output: a real end, not an open one.
   assert.deepEqual(
     behind(studio, '/synth.out', 'inside').endpoints.map((e) => `${e.address} ${e.kind}`),

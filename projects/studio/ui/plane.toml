@@ -9,5 +9,6 @@ instruments = [
   "card:mono-synth",
   "card:rhythm-composer",
   "card:tape-echo",
+  "card:mixer",
   "card:master",
 ]

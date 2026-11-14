@@ -34,7 +34,7 @@ function studio(graph = STUDIO) {
   const stack = parsePlane(read('projects/studio/ui/plane.toml')).plane.stacks[0];
   const { stackOf } = stackMembers({ stacks: [stack] }, owner, instances);
   const pins = edgePins(stack, owner, stackOf, connections);
-  const heights = { 'card:transport': 120, 'card:mono-synth': 420, 'card:rhythm-composer': 400, 'card:tape-echo': 140, 'card:master': 200 };
+  const heights = { 'card:transport': 120, 'card:mono-synth': 420, 'card:rhythm-composer': 400, 'card:tape-echo': 140, 'card:mixer': 260, 'card:master': 200 };
   const layout = stackLayout(stack, stack.instruments.map((entry) => ({ entry, w: stack.width * PU, h: heights[entry], x: null })));
   const model = wiringModel(stack, owner, stackOf, instances, connections, pins);
   const pinYs = new Map(pinPlaces(pins, layout.rects).map((p) => [`${p.side} ${p.address}`, p.y]));
@@ -222,7 +222,8 @@ test('odd graphs: a port inside an instance is not its own, two wires entering f
 
 test('two nets on one track are more than a pin’s row apart (else they read as one line, through the other’s branch dot)', () => {
   const { engines } = studio();
-  const levels = engines.flatMap((e) => [e, ...e.cards.filter((c) => c.composite).map((card) => insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale }))]);
+  // A library composite's inside (the mixer, lib.mixer) is not in `graph`: it has none to lay.
+  const levels = engines.flatMap((e) => [e, ...e.cards.filter((c) => c.composite).map((card) => insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale })).filter(Boolean)]);
   for (const laid of levels) {
     const row = 16 * laid.scale;
     const runs = laid.wires.flatMap((w) => w.points.slice(1).map((q, i) => [w.points[i], q]).filter(([p, q]) => Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) > 1e-9).map(([p, q]) => ({ net: w.from, x: p.x, lo: Math.min(p.y, q.y), hi: Math.max(p.y, q.y), w })));
@@ -239,6 +240,11 @@ test('a chip’s inside: every inner instance inside the card’s body, apart; t
   const { engines } = studio();
   let chips = 0;
   for (const e of engines) for (const card of e.cards.filter((c) => c.composite)) {
+    if (!STUDIO.composites[card.module]) {
+      // A library composite (the mixer): no inside in `graph`, none laid.
+      assert.equal(insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale }), null, `${card.name}: no inside`);
+      continue;
+    }
     chips++;
     const inside = insideOf({ graph: STUDIO, card, pins: e.pins, scale: e.scale });
     const def = STUDIO.composites[card.module];

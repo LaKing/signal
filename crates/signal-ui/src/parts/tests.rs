@@ -88,7 +88,7 @@ fn the_tree_is_read_and_written_as_the_page_writes_it() {
         .unwrap();
     assert_eq!(canonical, page);
     assert_eq!(serialize(&parse(&canonical).unwrap()), canonical);
-    assert_eq!(controls(&tree).len(), 65);
+    assert_eq!(controls(&tree).len(), 79);
     assert!(parse("<div class=\"signal-cards\"><script></script></div>").is_err());
     assert!(parse("<div class=\"signal-cards\">text</div>").is_err());
     // ADR 0046 §5: the open slot card stands among the cards.
@@ -130,7 +130,7 @@ fn grouping_the_studios_synth_moves_its_knobs_into_its_part() {
     // Every control of the host and the part, and no more.
     let host_controls = controls(&parse(&host).unwrap()).len();
     let part_controls = controls(&parse(&part).unwrap()).len();
-    assert_eq!(host_controls + part_controls, 65 + 1);
+    assert_eq!(host_controls + part_controls, 79 + 1);
 }
 
 #[test]

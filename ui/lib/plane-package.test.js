@@ -44,7 +44,7 @@ function studio(controlsOf = () => []) {
   const stack = parsePlane(read('projects/studio/ui/plane.toml')).plane.stacks[0];
   const { stackOf } = stackMembers({ stacks: [stack] }, owner, instances);
   const pins = edgePins(stack, owner, stackOf, connections);
-  const heights = { 'card:transport': 120, 'card:mono-synth': 520, 'card:rhythm-composer': 400, 'card:tape-echo': 200, 'card:master': 260 };
+  const heights = { 'card:transport': 120, 'card:mono-synth': 520, 'card:rhythm-composer': 400, 'card:tape-echo': 200, 'card:mixer': 320, 'card:master': 260 };
   const layout = stackLayout(stack, stack.instruments.map((entry) => ({ entry, w: stack.width * PU, h: heights[entry], x: null })));
   const model = wiringModel(stack, owner, stackOf, instances, connections, pins);
   const fronts = new Map();
@@ -178,7 +178,7 @@ test('the Wiring’s cables end on the package’s pins, run from them across th
       for (const [entry, box] of boxOf) if (entry !== c.a.entry && entry !== c.b.entry) assert.ok(!inner(box), `${c.id} passes over ${entry}`);
     }
   }
-  assert.equal(s.wiring.cables.length, 7);
+  assert.equal(s.wiring.cables.length, 13);
 });
 
 test('the Engine’s inside lies in the package’s body, its edges at the package’s pins; the package is the top-level chip (Layer 1), a composite in it Layer 2', () => {

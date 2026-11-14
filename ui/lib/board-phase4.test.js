@@ -27,7 +27,7 @@ import { rounded } from './schematic-wire.js';
 
 const root = new URL('../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
-const STUDIO = JSON.parse(read('ui/lib/fixtures/studio-graph.json'));
+const STUDIO = JSON.parse(read('ui/lib/fixtures/board/studio.json'));
 
 /** The studio as the page lays it out: the board on its measured plate, each inside a die (once, in its package's order). */
 function studio(graph = STUDIO) {

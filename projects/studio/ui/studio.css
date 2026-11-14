@@ -94,6 +94,10 @@ body { margin: 0; padding: 0.75rem; background: #1b1a18; color: var(--signal-fg)
 /* The six knobs spread across the face, as on the original's front. */
 .tape-echo .row { justify-content: space-around; align-items: flex-start; padding: 0.8rem 0 0.4rem; }
 
+/* The mixer: a strip per channel, then the master level. */
+.mixer .row { justify-content: space-around; align-items: flex-start; }
+.mixer .strip { flex-direction: column; align-items: center; }
+
 /* The master bus: scope and meters, as the controls draw them. */
 .master-bus signal-scope { flex: 1 1 20rem; }
 

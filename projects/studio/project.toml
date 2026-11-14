@@ -4,10 +4,16 @@
 #
 # Signal flow:
 #
-#   transport.tick ─► melody (note_seq, patterns/melody.toml) ─ hz, gate, velocity ─► synth ─► echo ─► bus.c
+#   transport.tick ─► melody (note_seq, patterns/melody.toml) ─ hz, gate, velocity ─► synth ─► echo ─► bus.c_l, c_r
 #   transport.tick ─► drums (step_seq8, patterns/drums.toml) ─ t1 … t8 ─► kick, snare, clap, hats, tom, rim, cymbal
-#   kick, snare, clap, hats ─► drum_a ─► bus.a        tom, rim, cymbal ─► drum_b ─► bus.b
-#   bus ─► dc (DC blocker) ─► limiter (tanh) ─► out (gain 0.25) ─► l, r
+#   kick, snare, clap, hats ─► drum_a ─► bus.a_l, a_r    tom, rim, cymbal ─► drum_b ─► bus.b_l, b_r
+#   bus (lib.mixer) ─ l ─► dc ─► limiter ─► out.l
+#                   ─ r ─► dc_r ─► limiter_r ─► out.r   (out gain 0.25)
+#
+# The mixer (ADR 0051 §13, the owner's decision of 2026-11-14) replaced a
+# mono std.mix at gains 0.45, 0.45 and 0.55, kept here as dB; its channel d
+# is the spare. Each mono source feeds both sides of its channel, so at
+# balance 0 the two sides are equal.
 #
 # Each drum lane goes to its voice's trigger and to its `velocity` parameter:
 # the lane's Set(level) sets the velocity (an accent multiplies it by
@@ -45,9 +51,11 @@ drum_a = { module = "std.mix" }
 drum_b = { module = "std.mix" }
 # Drums on a and b, the echoed voice on c, levelled so that the limiter
 # only rounds off the loudest hits.
-bus = { module = "std.mix", gain_a = 0.45, gain_b = 0.45, gain_c = 0.55 }
+bus = { module = "lib.mixer", a_level = -6.93575, b_level = -6.93575, c_level = -5.192746 }
 dc = { module = "std.dc_block" }
 limiter = { module = "std.tanh_shaper", drive = 1 }
+dc_r = { module = "std.dc_block" }
+limiter_r = { module = "std.tanh_shaper", drive = 1 }
 out = { module = "std.audio_out", gain = 0.25 }
 
 [wiring]
@@ -59,7 +67,8 @@ connections = [
   { from = "melody.gate", to = "synth.gate" },
   { from = "melody.velocity", to = "synth.velocity" },
   { from = "synth.out", to = "echo.in" },
-  { from = "echo.out", to = "bus.c" },
+  { from = "echo.out", to = "bus.c_l" },
+  { from = "echo.out", to = "bus.c_r" },
   # The drums: each lane triggers its voice and sets its velocity.
   { from = "drums.t1", to = "kick.trigger" },
   { from = "drums.t1", to = "kick.velocity" },
@@ -84,11 +93,15 @@ connections = [
   { from = "tom.out", to = "drum_b.a" },
   { from = "rim.out", to = "drum_b.b" },
   { from = "cymbal.out", to = "drum_b.c" },
-  { from = "drum_a.out", to = "bus.a" },
-  { from = "drum_b.out", to = "bus.b" },
-  # The master bus.
-  { from = "bus.out", to = "dc.in" },
+  { from = "drum_a.out", to = "bus.a_l" },
+  { from = "drum_a.out", to = "bus.a_r" },
+  { from = "drum_b.out", to = "bus.b_l" },
+  { from = "drum_b.out", to = "bus.b_r" },
+  # The master bus, one chain per side.
+  { from = "bus.l", to = "dc.in" },
   { from = "dc.out", to = "limiter.in" },
   { from = "limiter.out", to = "out.l" },
-  { from = "limiter.out", to = "out.r" },
+  { from = "bus.r", to = "dc_r.in" },
+  { from = "dc_r.out", to = "limiter_r.in" },
+  { from = "limiter_r.out", to = "out.r" },
 ]

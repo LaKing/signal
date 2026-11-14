@@ -1149,14 +1149,14 @@ fn a_scripted_session_on_studio_lands_in_text_and_replays_bit_identically() {
     let mut mcp = Mcp::started(&dir, &[]);
     mcp.ok("session_start", json!({}));
 
-    // A knob: the bus's first level, set live, then committed into the text.
+    // A knob: the mixer's first level, set live, then committed into the text.
     mcp.ok(
         "set_parameter",
-        json!({"address": "/bus.gain_a", "value": 0.4}),
+        json!({"address": "/bus.a_level", "value": -8}),
     );
-    mcp.ok("commit", json!({"address": "/bus.gain_a"}));
+    mcp.ok("commit", json!({"address": "/bus.a_level"}));
     assert!(
-        mcp.file("project.toml").contains("gain_a = 0.4"),
+        mcp.file("project.toml").contains("a_level = -8"),
         "{}",
         mcp.file("project.toml")
     );
@@ -1230,7 +1230,7 @@ fn a_scripted_session_on_studio_lands_in_text_and_replays_bit_identically() {
 
     // Every change is in the text: what the files hold now.
     let text = fs::read_to_string(dir.join("project.toml")).unwrap();
-    assert!(text.contains("gain_a = 0.4") && text.contains("air = {"));
+    assert!(text.contains("a_level = -8") && text.contains("air = {"));
     assert_eq!(
         fs::read_to_string(dir.join("patterns/melody.toml")).unwrap(),
         edited

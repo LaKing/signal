@@ -1,8 +1,11 @@
 {
-  "audio_fnv1a64": "ae83d794a40b6941",
+  "audio_fnv1a64": "4acad25ddbd56c51",
   "frames": 5760000,
   "log_fnv1a64": "c4920d6570c2a66b",
   "provenance": {
+    "library_composite_hashes": {
+      "lib.mixer": "fc24a678d84583f7"
+    },
     "project_file_hashes": {
       "composites/clap909.toml": "2f6e22d11586da8e",
       "composites/cymbal909.toml": "0ba56cff3a798efb",
@@ -15,7 +18,7 @@
       "composites/tom909.toml": "bb9017ac69810491",
       "patterns/drums.toml": "bc929ae84981ba3b",
       "patterns/melody.toml": "59a9561e0b85b3e2",
-      "project.toml": "8dc10070eec67261"
+      "project.toml": "27488611de2df19a"
     }
   },
   "sample_rate": 48000,

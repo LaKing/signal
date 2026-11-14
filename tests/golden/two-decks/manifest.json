@@ -1,5 +1,5 @@
 {
-  "audio_fnv1a64": "b06a1b70320c1059",
+  "audio_fnv1a64": "46ac6481c0965e69",
   "frames": 768000,
   "log_fnv1a64": "e6d65b70193e7ce8",
   "provenance": {
@@ -12,7 +12,7 @@
         "seed": 11
       },
       {
-        "files_fnv1a64": "d85c5ebb9039fbe6",
+        "files_fnv1a64": "ae9879f041fb0481",
         "key": "deck_b",
         "name": "studio",
         "path": "../studio",
@@ -20,6 +20,7 @@
       }
     ],
     "library_composite_hashes": {
+      "lib.mixer": "fc24a678d84583f7",
       "lib.transport": "743310655b13c16b"
     },
     "library_interface_hashes": {
@@ -50,7 +51,7 @@
       "include:deck_b/composites/tom909.toml": "bb9017ac69810491",
       "include:deck_b/patterns/drums.toml": "bc929ae84981ba3b",
       "include:deck_b/patterns/melody.toml": "59a9561e0b85b3e2",
-      "include:deck_b/project.toml": "8dc10070eec67261",
+      "include:deck_b/project.toml": "27488611de2df19a",
       "project.toml": "7b69b28e58e4496c"
     }
   },

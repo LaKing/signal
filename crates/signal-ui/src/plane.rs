@@ -580,6 +580,7 @@ mod tests {
                 "mono-synth",
                 "rhythm-composer",
                 "tape-echo",
+                "mixer",
                 "master"
             ]
         );

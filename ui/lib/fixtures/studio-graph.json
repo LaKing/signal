@@ -12201,7 +12201,13 @@
         "converters": [],
         "from": "/echo.out",
         "scale": null,
-        "to": "/bus.c"
+        "to": "/bus.c_l"
+      },
+      {
+        "converters": [],
+        "from": "/echo.out",
+        "scale": null,
+        "to": "/bus.c_r"
       },
       {
         "converters": [],
@@ -12345,17 +12351,29 @@
         "converters": [],
         "from": "/drum_a.out",
         "scale": null,
-        "to": "/bus.a"
+        "to": "/bus.a_l"
+      },
+      {
+        "converters": [],
+        "from": "/drum_a.out",
+        "scale": null,
+        "to": "/bus.a_r"
       },
       {
         "converters": [],
         "from": "/drum_b.out",
         "scale": null,
-        "to": "/bus.b"
+        "to": "/bus.b_l"
       },
       {
         "converters": [],
-        "from": "/bus.out",
+        "from": "/drum_b.out",
+        "scale": null,
+        "to": "/bus.b_r"
+      },
+      {
+        "converters": [],
+        "from": "/bus.l",
         "scale": null,
         "to": "/dc.in"
       },
@@ -12373,7 +12391,19 @@
       },
       {
         "converters": [],
-        "from": "/limiter.out",
+        "from": "/bus.r",
+        "scale": null,
+        "to": "/dc_r.in"
+      },
+      {
+        "converters": [],
+        "from": "/dc_r.out",
+        "scale": null,
+        "to": "/limiter_r.in"
+      },
+      {
+        "converters": [],
+        "from": "/limiter_r.out",
         "scale": null,
         "to": "/out.r"
       }
@@ -14365,109 +14395,276 @@
       },
       {
         "address": "/bus",
-        "composite": false,
-        "module": "std.mix",
+        "composite": true,
+        "module": "lib.mixer",
         "name": "bus",
         "parameters": [
           {
-            "address": "/bus.gain_a",
-            "combine": "multiply",
-            "default": 1.0,
-            "kind": "gain",
-            "name": "gain_a",
+            "address": "/bus.a_balance",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "a_balance",
             "range": {
-              "max": 4.0,
+              "max": 1.0,
+              "min": -1.0
+            },
+            "rate": 1,
+            "unit": null
+          },
+          {
+            "address": "/bus.a_level",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "control",
+            "name": "a_level",
+            "range": {
+              "max": 24.0,
+              "min": -120.0
+            },
+            "rate": 1,
+            "unit": "dB"
+          },
+          {
+            "address": "/bus.a_mute",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "a_mute",
+            "range": {
+              "max": 1.0,
               "min": 0.0
             },
             "rate": 1,
             "unit": null
           },
           {
-            "address": "/bus.gain_b",
-            "combine": "multiply",
-            "default": 1.0,
-            "kind": "gain",
-            "name": "gain_b",
+            "address": "/bus.b_balance",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "b_balance",
             "range": {
-              "max": 4.0,
+              "max": 1.0,
+              "min": -1.0
+            },
+            "rate": 1,
+            "unit": null
+          },
+          {
+            "address": "/bus.b_level",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "control",
+            "name": "b_level",
+            "range": {
+              "max": 24.0,
+              "min": -120.0
+            },
+            "rate": 1,
+            "unit": "dB"
+          },
+          {
+            "address": "/bus.b_mute",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "b_mute",
+            "range": {
+              "max": 1.0,
               "min": 0.0
             },
             "rate": 1,
             "unit": null
           },
           {
-            "address": "/bus.gain_c",
-            "combine": "multiply",
-            "default": 1.0,
-            "kind": "gain",
-            "name": "gain_c",
+            "address": "/bus.c_balance",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "c_balance",
             "range": {
-              "max": 4.0,
+              "max": 1.0,
+              "min": -1.0
+            },
+            "rate": 1,
+            "unit": null
+          },
+          {
+            "address": "/bus.c_level",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "control",
+            "name": "c_level",
+            "range": {
+              "max": 24.0,
+              "min": -120.0
+            },
+            "rate": 1,
+            "unit": "dB"
+          },
+          {
+            "address": "/bus.c_mute",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "c_mute",
+            "range": {
+              "max": 1.0,
               "min": 0.0
             },
             "rate": 1,
             "unit": null
           },
           {
-            "address": "/bus.gain_d",
-            "combine": "multiply",
-            "default": 1.0,
-            "kind": "gain",
-            "name": "gain_d",
+            "address": "/bus.d_balance",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "d_balance",
             "range": {
-              "max": 4.0,
+              "max": 1.0,
+              "min": -1.0
+            },
+            "rate": 1,
+            "unit": null
+          },
+          {
+            "address": "/bus.d_level",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "control",
+            "name": "d_level",
+            "range": {
+              "max": 24.0,
+              "min": -120.0
+            },
+            "rate": 1,
+            "unit": "dB"
+          },
+          {
+            "address": "/bus.d_mute",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "generic",
+            "name": "d_mute",
+            "range": {
+              "max": 1.0,
               "min": 0.0
             },
             "rate": 1,
             "unit": null
+          },
+          {
+            "address": "/bus.level",
+            "combine": "add",
+            "default": 0.0,
+            "kind": "control",
+            "name": "level",
+            "range": {
+              "max": 24.0,
+              "min": -120.0
+            },
+            "rate": 1,
+            "unit": "dB"
           }
         ],
         "ports": [
           {
-            "address": "/bus.a",
+            "address": "/bus.a_l",
             "direction": "in",
             "kind": "audio",
-            "name": "a",
+            "name": "a_l",
             "range": null,
             "rate": 1,
             "shape": "signal",
             "unit": null
           },
           {
-            "address": "/bus.b",
+            "address": "/bus.a_r",
             "direction": "in",
             "kind": "audio",
-            "name": "b",
+            "name": "a_r",
             "range": null,
             "rate": 1,
             "shape": "signal",
             "unit": null
           },
           {
-            "address": "/bus.c",
+            "address": "/bus.b_l",
             "direction": "in",
             "kind": "audio",
-            "name": "c",
+            "name": "b_l",
             "range": null,
             "rate": 1,
             "shape": "signal",
             "unit": null
           },
           {
-            "address": "/bus.d",
+            "address": "/bus.b_r",
             "direction": "in",
             "kind": "audio",
-            "name": "d",
+            "name": "b_r",
             "range": null,
             "rate": 1,
             "shape": "signal",
             "unit": null
           },
           {
-            "address": "/bus.out",
+            "address": "/bus.c_l",
+            "direction": "in",
+            "kind": "audio",
+            "name": "c_l",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/bus.c_r",
+            "direction": "in",
+            "kind": "audio",
+            "name": "c_r",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/bus.d_l",
+            "direction": "in",
+            "kind": "audio",
+            "name": "d_l",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/bus.d_r",
+            "direction": "in",
+            "kind": "audio",
+            "name": "d_r",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/bus.l",
             "direction": "out",
             "kind": "audio",
-            "name": "out",
+            "name": "l",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/bus.r",
+            "direction": "out",
+            "kind": "audio",
+            "name": "r",
             "range": null,
             "rate": 1,
             "shape": "signal",
@@ -14551,6 +14748,95 @@
           },
           {
             "address": "/limiter.out",
+            "direction": "out",
+            "kind": "audio",
+            "name": "out",
+            "range": {
+              "max": 1.0,
+              "min": -1.0
+            },
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          }
+        ]
+      },
+      {
+        "address": "/dc_r",
+        "composite": false,
+        "module": "std.dc_block",
+        "name": "dc_r",
+        "parameters": [
+          {
+            "address": "/dc_r.cutoff_hz",
+            "combine": "add",
+            "default": 10.0,
+            "kind": "frequency",
+            "name": "cutoff_hz",
+            "range": {
+              "max": 200.0,
+              "min": 1.0
+            },
+            "rate": 1,
+            "unit": "Hz"
+          }
+        ],
+        "ports": [
+          {
+            "address": "/dc_r.in",
+            "direction": "in",
+            "kind": "audio",
+            "name": "in",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/dc_r.out",
+            "direction": "out",
+            "kind": "audio",
+            "name": "out",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          }
+        ]
+      },
+      {
+        "address": "/limiter_r",
+        "composite": false,
+        "module": "std.tanh_shaper",
+        "name": "limiter_r",
+        "parameters": [
+          {
+            "address": "/limiter_r.drive",
+            "combine": "add",
+            "default": 1.0,
+            "kind": "gain",
+            "name": "drive",
+            "range": {
+              "max": 20.0,
+              "min": 0.1
+            },
+            "rate": 1,
+            "unit": null
+          }
+        ],
+        "ports": [
+          {
+            "address": "/limiter_r.in",
+            "direction": "in",
+            "kind": "audio",
+            "name": "in",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": null
+          },
+          {
+            "address": "/limiter_r.out",
             "direction": "out",
             "kind": "audio",
             "name": "out",

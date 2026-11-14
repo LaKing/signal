@@ -123,13 +123,13 @@ test('the same wires at the same fan give back the same bundle (a drawing keyed 
   assert.notEqual(bundleWires(drawn.wires, at(5), { cache })[0], a);
 });
 
-test('the studio: melody → synth is one bundle of 3, drums → kick one of 2, at the top level zoomed out', () => {
+test('the studio: melody → synth is one bundle of 3, drums → kick and drum_a → bus one of 2 each, at the top level zoomed out', () => {
   const drawn = layout(STUDIO.top);
   const bundles = bundleWires(drawn.wires, 0.1, { bottom: drawn.bottom }).filter((i) => i.kind === 'bundle');
   const pair = (from, to) => bundles.find((b) => b.from === from && b.to === to);
   assert.equal(pair('melody', 'synth')?.count, 3);
   assert.equal(pair('drums', 'kick')?.count, 2);
-  assert.equal(pair('limiter', 'out')?.count, 2);
+  assert.equal(pair('drum_a', 'bus')?.count, 2);
 });
 
 /** Two 20-port boxes far apart, wired p0 → p0 and p19 → p19: a bundle whose wires part far from its folded curve. */

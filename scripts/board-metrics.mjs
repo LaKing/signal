@@ -26,7 +26,7 @@ export const FIXTURES = {
   pulse: 'ui/lib/fixtures/board/pulse.json',
   physical: 'ui/lib/fixtures/board/physical.json',
   'physical-av': 'ui/lib/fixtures/board/physical-av.json',
-  studio: 'ui/lib/fixtures/studio-graph.json',
+  studio: 'ui/lib/fixtures/board/studio.json',
   'studio-transport': 'ui/lib/fixtures/board/studio-transport.json',
   'library-demo': 'ui/lib/fixtures/board/library-demo.json',
   'two-decks': 'ui/lib/fixtures/board/two-decks.json',

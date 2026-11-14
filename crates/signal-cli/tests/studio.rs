@@ -445,7 +445,7 @@ fn golden_studio_120_seconds() {
     );
     assert_eq!(
         keys(&manifest["provenance"]),
-        names(&["project_file_hashes"])
+        names(&["project_file_hashes", "library_composite_hashes"])
     );
 
     let golden = repository().join("tests/golden/studio/manifest.json");
@@ -880,7 +880,7 @@ fn the_studio_panel_passes_and_names_no_brand() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("ui/main.html: 65 controls, 65 bindings: ok"),
+        stderr.contains("ui/main.html: 79 controls, 79 bindings: ok"),
         "{stderr}"
     );
     assert!(!stderr.contains("warning"), "{stderr}");

@@ -4,8 +4,10 @@
 // snapshots, every connection drawn, nothing over a control, its measures
 // under thresholds, and the budgets (layout under 50 ms, at most 5 000
 // drawn elements). The structures are `graph`'s (ui/lib/fixtures/board/
-// *.json and studio-graph.json, checked against the projects by
-// crates/signal-project/tests/structure.rs). The plate is the projects'
+// *.json, checked against the projects by
+// crates/signal-project/tests/structure.rs; the studio's, board/studio.json,
+// is its M2.11 structure, frozen with its panel when ADR 0051 §13 gave it a
+// mixer). The plate is the projects'
 // panels laid out as the page lays them at 1280 px, approximated by their
 // structure (ui/lib/fixtures/board/plate-approx.js: the real cards, rows,
 // the piano roll and the step grid; no browser here). Snapshots are
@@ -27,7 +29,7 @@ const root = new URL('../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
 const PROJECTS = {
   kick: 'ui/lib/fixtures/board/kick.json',
-  studio: 'ui/lib/fixtures/studio-graph.json',
+  studio: 'ui/lib/fixtures/board/studio.json',
   'studio-transport': 'ui/lib/fixtures/board/studio-transport.json',
   'physical-av': 'ui/lib/fixtures/board/physical-av.json',
   'library-demo': 'ui/lib/fixtures/board/library-demo.json',

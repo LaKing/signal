@@ -20,7 +20,7 @@ import { boundaryLinks, drawnInside, scene } from './schematic-scene.js';
 import { DIE_TEXT, FADE_FROM_PX } from './board-zoom.js';
 
 const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
-const STUDIO = read('./fixtures/studio-graph.json');
+const STUDIO = read('./fixtures/board/studio.json');
 const KICK = read('./fixtures/board/kick.json');
 const VOICES = ['moog_voice', 'kick909', 'snare909', 'clap909', 'hat909', 'tom909', 'rim909', 'cymbal909', 'tape_delay'];
 

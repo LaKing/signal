@@ -1495,8 +1495,8 @@ mod tests {
         let studio = base.join("studio/project.toml");
         let text = signal_project::read_regular_to_string(&studio).unwrap();
         let edited = text.replace(
-            "bus = { module = \"std.mix\", gain_a = 0.45,",
-            "bus = { module = \"std.mix\", gain_a = 0.4,",
+            "bus = { module = \"lib.mixer\", a_level = -6.93575,",
+            "bus = { module = \"lib.mixer\", a_level = -8,",
         );
         assert_ne!(edited, text);
         fs::write(&studio, edited).unwrap();
@@ -1520,7 +1520,7 @@ mod tests {
                 let ports: Vec<String> = changes.iter().map(|c| c.port.to_string()).collect();
                 assert!(
                     ports.contains(&"/mix_l.gain_a".to_owned())
-                        && ports.contains(&"/studio/bus.gain_a".to_owned()),
+                        && ports.contains(&"/studio/bus/a_gl.db".to_owned()),
                     "the reload applies the commit and the include's change: {ports:?}"
                 );
             }

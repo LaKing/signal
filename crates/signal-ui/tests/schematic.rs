@@ -129,6 +129,8 @@ fn studio_is_described_and_laid_out(transport: Transport) {
             "bus",
             "dc",
             "limiter",
+            "dc_r",
+            "limiter_r",
             "out"
         ]
     );
@@ -148,7 +150,7 @@ fn studio_is_described_and_laid_out(transport: Transport) {
         ]
     );
     let connections = g["top"]["connections"].as_array().unwrap();
-    assert_eq!(connections.len(), 36);
+    assert_eq!(connections.len(), 41);
     assert!(connections.iter().all(|c| c["converters"] == json!([])));
     assert_eq!(
         g["layout"],

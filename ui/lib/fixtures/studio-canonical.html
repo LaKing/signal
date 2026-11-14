@@ -115,6 +115,34 @@
         <signal-knob bind="/echo.tone" taper="log" min="300" max="4999" label="tone" skin="svg:assets/chicken-head.svg"></signal-knob>
       </div>
     </section>
+    <section class="signal-card wide mixer">
+      <h2>MIXER</h2>
+      <div class="row">
+        <div class="signal-group strip">
+          <signal-fader bind="/bus.a_level" taper="db" min="-60" max="12" label="drums"></signal-fader>
+          <signal-knob bind="/bus.a_balance" min="-1" max="1" label="balance"></signal-knob>
+          <signal-toggle bind="/bus.a_mute" min="0" max="1" label="mute"></signal-toggle>
+        </div>
+        <div class="signal-group strip">
+          <signal-fader bind="/bus.b_level" taper="db" min="-60" max="12" label="toms"></signal-fader>
+          <signal-knob bind="/bus.b_balance" min="-1" max="1" label="balance"></signal-knob>
+          <signal-toggle bind="/bus.b_mute" min="0" max="1" label="mute"></signal-toggle>
+        </div>
+        <div class="signal-group strip">
+          <signal-fader bind="/bus.c_level" taper="db" min="-60" max="12" label="synth"></signal-fader>
+          <signal-knob bind="/bus.c_balance" min="-1" max="1" label="balance"></signal-knob>
+          <signal-toggle bind="/bus.c_mute" min="0" max="1" label="mute"></signal-toggle>
+        </div>
+        <div class="signal-group strip">
+          <signal-fader bind="/bus.d_level" taper="db" min="-60" max="12" label="spare"></signal-fader>
+          <signal-knob bind="/bus.d_balance" min="-1" max="1" label="balance"></signal-knob>
+          <signal-toggle bind="/bus.d_mute" min="0" max="1" label="mute"></signal-toggle>
+        </div>
+        <div class="signal-group strip">
+          <signal-fader bind="/bus.level" taper="db" min="-60" max="12" label="master"></signal-fader>
+        </div>
+      </div>
+    </section>
     <section class="signal-card wide master-bus">
       <h2>master</h2>
       <div class="row">
@@ -123,7 +151,8 @@
           <signal-meter bind="/out.l" label="L"></signal-meter>
           <signal-meter bind="/out.r" label="R"></signal-meter>
         </div>
-        <signal-scope bind="/limiter.out" rate="24000" label="master"></signal-scope>
+        <signal-scope bind="/limiter.out" rate="24000" label="left"></signal-scope>
+        <signal-scope bind="/limiter_r.out" rate="24000" label="right"></signal-scope>
       </div>
     </section>
   </div>

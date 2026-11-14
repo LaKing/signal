@@ -38,7 +38,7 @@ function studio() {
 
 /** The studio's instruments at plausible measured heights. */
 function studioLayout(stack) {
-  const heights = { 'card:transport': 120, 'card:mono-synth': 420, 'card:rhythm-composer': 400, 'card:tape-echo': 140, 'card:master': 200 };
+  const heights = { 'card:transport': 120, 'card:mono-synth': 420, 'card:rhythm-composer': 400, 'card:tape-echo': 140, 'card:mixer': 260, 'card:master': 200 };
   return stackLayout(stack, stack.instruments.map((entry) => ({ entry, w: stack.width * PU, h: heights[entry], x: null })));
 }
 
@@ -52,7 +52,8 @@ test('the studio’s Wiring: each instrument’s ports derived from the connecti
     'card:mono-synth': { ins: ['/melody.tick events'], outs: ['/synth.out audio'] },
     'card:rhythm-composer': { ins: ['/drums.tick events'], outs: ['/drum_a.out audio', '/drum_b.out audio'] },
     'card:tape-echo': { ins: ['/echo.in audio'], outs: ['/echo.out audio'] },
-    'card:master': { ins: ['/bus.c audio', '/bus.a audio', '/bus.b audio'], outs: ['/limiter.out audio'] },
+    'card:mixer': { ins: ['/bus.c_l audio', '/bus.c_r audio', '/bus.a_l audio', '/bus.a_r audio', '/bus.b_l audio', '/bus.b_r audio'], outs: ['/bus.l audio', '/bus.r audio'] },
+    'card:master': { ins: ['/dc.in audio', '/dc_r.in audio'], outs: ['/limiter.out audio', '/limiter_r.out audio'] },
   });
   // Two outputs of one instrument named alike both say their instance.
   assert.deepEqual(model.ports.get('card:rhythm-composer').outs.map((p) => p.label), ['drum_a.out', 'drum_b.out']);
@@ -63,14 +64,20 @@ test('the studio’s Wiring: each instrument’s ports derived from the connecti
       '/transport.tick → /melody.tick events',
       '/transport.tick → /drums.tick events',
       '/synth.out → /echo.in audio',
-      '/echo.out → /bus.c audio',
-      '/drum_a.out → /bus.a audio',
-      '/drum_b.out → /bus.b audio',
+      '/echo.out → /bus.c_l audio',
+      '/echo.out → /bus.c_r audio',
+      '/drum_a.out → /bus.a_l audio',
+      '/drum_a.out → /bus.a_r audio',
+      '/drum_b.out → /bus.b_l audio',
+      '/drum_b.out → /bus.b_r audio',
+      '/bus.l → /dc.in audio',
       '/limiter.out → edge /limiter.out audio',
+      '/bus.r → /dc_r.in audio',
+      '/limiter_r.out → edge /limiter_r.out audio',
     ],
   );
   // Nothing inside an instrument is drawn here (the drum lanes, the master chain): those are its Engine's.
-  assert.ok(!model.cables.some((c) => c.from.startsWith('/drums.t') || c.from === '/bus.out'));
+  assert.ok(!model.cables.some((c) => c.from.startsWith('/drums.t') || c.from === '/dc.out'));
 });
 
 test('a cable’s kind: events, vector, control (into a parameter, or a signal that is no audio), audio', () => {
@@ -203,7 +210,7 @@ test('an instrument not measured yet has no rectangle: its cables are left out, 
   const model = wiringModel(s.stack, s.owner, s.stackOf, s.instances, s.connections, s.pins);
   const w = wiringLayout(model, layout, new Map());
   assert.ok(!w.cables.some((c) => c.from === '/echo.out' || c.to === '/echo.in'));
-  assert.equal(w.cables.length, 5);
+  assert.equal(w.cables.length, 10);
   // Edge cables and the Stack's edge pins never share an id.
   assert.ok(w.cables.filter((c) => c.a.edge || c.b.edge).every((c) => c.id.startsWith('cable ')));
 });

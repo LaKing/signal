@@ -265,14 +265,14 @@ test('a trace’s open ends are listed after its real ends, counted apart and ma
   assert.deepEqual(
     down.endpoints.map((e) => [e.label, e.open]),
     [
-      ['/out.l', false],
-      ['/out.r', false],
+      ['/bus.c_l', false],
+      ['/bus.c_r', false],
       ['/synth/ladder.lp12', true],
       ['/echo/tone.hp', true],
     ],
   );
   assert.match(down.endpoints[2].note, /^open end/);
-  assert.match(down.endpoints[0].note, /sink$/);
+  assert.match(down.endpoints[0].note, /library/);
 });
 
 /** The studio's `graph` (the owner's repro of 2026-10-20: /synth.gate selected at the top level). */

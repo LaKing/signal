@@ -40,7 +40,8 @@ test('the studio’s instruments: each card takes what its controls bind, the re
     'card:mono-synth': ['melody', 'synth'],
     'card:rhythm-composer': ['drums', 'kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal', 'drum_a', 'drum_b'],
     'card:tape-echo': ['echo'],
-    'card:master': ['bus', 'dc', 'limiter'],
+    'card:mixer': ['bus'],
+    'card:master': ['dc', 'limiter', 'dc_r', 'limiter_r'],
     '-': ['out'],
   });
   assert.deepEqual(roleEndpoints(STUDIO.top.instances), [{ name: 'out', role: 'main', layout: 'stereo', ports: ['/out.l', '/out.r'] }]);
@@ -50,14 +51,17 @@ test('the studio’s instruments: each card takes what its controls bind, the re
   assert.deepEqual(roleEndpoints([input, cue]).map((e) => e.role), ['cue']);
 });
 
-test('the primary Stack’s boundary: one edge pin, master’s out, joined to the role endpoint’s two channels', () => {
+test('the primary Stack’s boundary: master’s two outs, each joined to its channel of the role endpoint', () => {
   const instances = STUDIO.top.instances;
   const owner = assignInstruments({ instances, connections: STUDIO.top.connections, cards: studioCards() });
   const plane = parsePlane(read('projects/studio/ui/plane.toml')).plane;
   const { stackOf, unstacked } = stackMembers(plane, owner, instances);
   assert.deepEqual(unstacked, []);
   assert.equal(stackOf.get('out'), null);
-  assert.deepEqual(edgePins(plane.stacks[0], owner, stackOf, STUDIO.top.connections), [{ side: 'out', instrument: 'card:master', address: '/limiter.out', label: 'out', outside: ['/out.l', '/out.r'] }]);
+  assert.deepEqual(edgePins(plane.stacks[0], owner, stackOf, STUDIO.top.connections), [
+    { side: 'out', instrument: 'card:master', address: '/limiter.out', label: 'limiter.out', outside: ['/out.l'] },
+    { side: 'out', instrument: 'card:master', address: '/limiter_r.out', label: 'limiter_r.out', outside: ['/out.r'] },
+  ]);
 });
 
 test('edge pins appear exactly where connections cross: inputs first, grouped per instrument in Stack order, names told apart', () => {
