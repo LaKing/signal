@@ -180,8 +180,93 @@ fn vendor_copies_a_library_composite(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0051 §10: an instrument made, saved as a project (`slot.export`),
+/// imported back as a link (`slot.import`'s op, patched) and copied in
+/// (`vendor` with `slot`).
+fn an_instrument_is_saved_imported_and_copied(transport: Transport) {
+    let mut rig = tone("file-instrument", transport);
+    let (mut ws, _) = rig.client();
+    let base = |rig: &Rig| {
+        json!(sha256_hex(
+            fs::read_to_string(rig.dir.join("project.toml"))
+                .unwrap()
+                .as_bytes()
+        ))
+    };
+    let b = base(&rig);
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "patch", "level": "", "base": b, "ops": [{"op": "slot.make", "slot": "voice", "instances": ["a", "b", "sum"]}]}),
+        "patched",
+    );
+    let saved = rig.dir.parent().unwrap().join("voice-saved");
+    let exported = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "slot.export", "slot": "voice", "path": saved.display().to_string()}),
+        "slot.exported",
+    );
+    assert!(
+        exported["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "project.toml")
+    );
+    let text = fs::read_to_string(saved.join("project.toml")).unwrap();
+    assert!(
+        text.contains("name = \"voice\"") && text.contains("[exports]"),
+        "{text}"
+    );
+    let busy = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "slot.export", "slot": "voice", "path": saved.display().to_string()}),
+        "error",
+    );
+    assert_eq!(busy["code"], "bad-value");
+    let import = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "slot.import", "path": saved.display().to_string()}),
+        "slot.import",
+    );
+    assert_eq!(import["name"], "voice_2");
+    assert_eq!(import["op"]["load"], "../voice-saved");
+    let b = base(&rig);
+    rig.request(
+        &mut ws,
+        5,
+        json!({"type": "patch", "level": "", "base": b, "ops": [import["op"].clone()]}),
+        "patched",
+    );
+    let b = base(&rig);
+    let copied = rig.request(
+        &mut ws,
+        6,
+        json!({"type": "vendor", "slot": "voice_2", "base": b}),
+        "vendored",
+    );
+    assert!(
+        copied["copied"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "composites/voice_2_inside.toml"),
+        "{copied}"
+    );
+    let project = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(
+        project.contains("load = \"voice_2_inside\", seed = 1"),
+        "{project}"
+    );
+    rig.finish();
+}
+
 both!(
     a_write_is_applied_live,
     refusals_write_nothing,
     vendor_copies_a_library_composite,
+    an_instrument_is_saved_imported_and_copied,
 );

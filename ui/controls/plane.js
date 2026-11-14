@@ -504,6 +504,8 @@ export class SignalPlane extends HTMLElement {
     this.selection = null;
     /** The patches written from Wiring and Control, for undo and redo (the schematic's session model). */
     this.session = new PatchSession();
+    /** Folder choices asked of the app so far (each answer names its ask). */
+    this.folderAsks = 0;
     this.graphKey = '';
     /** Signal.app's channel for the card menu (ui/app/lib/cards.js `connectPlaneCards`), or null (a browser). */
     this.cardChannel = null;
@@ -2902,7 +2904,10 @@ export class SignalPlane extends HTMLElement {
       const device = this.model ? this.clockCandidateAt(at) : null;
       if (device) return { items: [{ id: 'make-clock', label: `Make ${device.name} the clock device` }], act: (id) => id === 'make-clock' && this.makeClock(device.key) };
       if (!this.model || path.some((node) => node?.classList?.contains?.('box') || node?.classList?.contains?.('tray'))) return null;
-      return { items: [{ id: 'create-stack', label: 'Create new Stack' }], act: (id) => id === 'create-stack' && this.addStack(at) };
+      return {
+        items: [{ id: 'create-stack', label: 'Create new Stack' }, { id: 'import-instrument', label: 'Import Instrument…' }],
+        act: (id) => (id === 'create-stack' ? this.addStack(at) : id === 'import-instrument' && this.importInstrument()),
+      };
     }
     // The instrument whose front panel holds the click (on a control of it too).
     const s = this.stacks.get(name);
@@ -2935,6 +2940,12 @@ export class SignalPlane extends HTMLElement {
     if (entry) shows.push({ id: 'show-instrument', label: 'Show Instrument' });
     // ADR 0051 §5: a card's instrument (the migration form) made a slot holding its engine.
     if (entry && isCardEntry(entry) && this.model && (level === 'stack' || level === 'wiring')) shows.push({ id: 'make-instrument', label: 'Make Instrument' });
+    // ADR 0051 §10: a slot instrument saved as a project; one linking a project copied in.
+    const slotOf = entry && !isCardEntry(entry) ? (this.graph?.top?.instances ?? []).find((i) => i.name === entry && i.slot) : null;
+    if (slotOf && (level === 'stack' || level === 'wiring')) {
+      if (slotOf.slot.load && !slotOf.slot.project) shows.push({ id: 'export-instrument', label: 'Save Instrument as Project…' });
+      if (slotOf.slot.project) shows.push({ id: 'copy-instrument', label: 'Make Own Copy' });
+    }
     shows.push({ id: 'show-stack', label: 'Show Stack' });
     const show = (id) => {
       if (id === 'show-chip') return this.showChip(chip), true;
@@ -2943,6 +2954,8 @@ export class SignalPlane extends HTMLElement {
       if (id === 'copy-address') return globalThis.navigator?.clipboard?.writeText(hit.address).catch(() => this.say('Not copied: the clipboard was refused')), true;
       if (id === 'show-instrument') return this.fitOnScreen(name, entry), true;
       if (id === 'make-instrument') return this.makeInstrument(entry), true;
+      if (id === 'export-instrument') return this.exportInstrument(entry), true;
+      if (id === 'copy-instrument') return this.copyInstrument(entry), true;
       if (id === 'show-stack') return this.fitOnScreen(name, null), true;
       return false;
     };
@@ -3397,6 +3410,65 @@ export class SignalPlane extends HTMLElement {
     const made = makeInstrumentOp(entry, this.model?.owner, this.graph?.top?.instances ?? [], instrumentTitle(entry, this.model?.cards ?? []));
     if (made.error) return this.say(`Not made: ${made.error}`);
     return this.writePatch([made.op], `Make Instrument ${made.slot} of ${made.instances.join(', ')}`, 0, '');
+  }
+
+  /**
+   * A folder for `purpose` (`export`: where to save, named `name`;
+   * `import`: a project's), from Signal.app's own chooser (`folder.choose`,
+   * answered with a `signal-folder` event), else asked for as a path (a
+   * browser). Resolves to an absolute path, or null.
+   */
+  chooseFolder(purpose, name = '') {
+    if (this.cardChannel) {
+      return new Promise((resolve) => {
+        const id = `folder-${++this.folderAsks}`;
+        const told = (event) => {
+          if (event.detail?.id !== id) return;
+          globalThis.removeEventListener('signal-folder', told);
+          resolve(event.detail.path ?? null);
+        };
+        globalThis.addEventListener('signal-folder', told);
+        this.cardChannel({ type: 'folder.choose', purpose, name, id });
+      });
+    }
+    const asked = globalThis.prompt?.(purpose === 'export' ? `Save ${name} as a project in the folder (an absolute path):` : 'The project folder to import (an absolute path):', '');
+    return Promise.resolve(asked || null);
+  }
+
+  /** ADR 0051 §10: slot instrument `slot` saved as a project of its own in a chosen folder. */
+  async exportInstrument(slot) {
+    const path = await this.chooseFolder('export', slot);
+    if (!path) return;
+    try {
+      const reply = await this.connection.request({ type: 'slot.export', slot, path });
+      this.say(`Saved ${slot} as a project: ${reply.path}`);
+    } catch (error) {
+      this.say(`Not saved: ${error?.message ?? error}`);
+    }
+  }
+
+  /** ADR 0051 §10: a chosen project linked as a new slot instrument (one patch, undoable). */
+  async importInstrument() {
+    const path = await this.chooseFolder('import');
+    if (!path) return;
+    try {
+      const reply = await this.connection.request({ type: 'slot.import', path });
+      await this.writePatch([reply.op], `Import ${reply.name} (${reply.op.load})`, 0, '');
+    } catch (error) {
+      this.say(`Not imported: ${error?.message ?? error}`);
+    }
+  }
+
+  /** ADR 0051 §10: the project slot `slot` links copied in as its own inside (`vendor --slot`). */
+  async copyInstrument(slot) {
+    const base = this.session.bases.get('');
+    if (!base) return this.say('Not copied: project.toml is not known yet');
+    try {
+      const reply = await this.connection.request({ type: 'vendor', slot, base });
+      this.say(`${slot} holds its own copy now (${(reply.copied ?? []).length} files)`);
+    } catch (error) {
+      this.say(`Not copied: ${error?.message ?? error}`);
+    }
   }
 
   /** The file a level's patch writes, as the person reads it. */

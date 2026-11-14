@@ -890,6 +890,8 @@ impl Host {
             "file.read" => self.file_read(message).map(Some),
             "file.write" => self.file_write(ctx, message).map(Some),
             "vendor" => self.vendor(message).map(Some),
+            "slot.export" => self.slot_export(message).map(Some),
+            "slot.import" => self.slot_import(message).map(Some),
             "slot.projects" => self.slot_projects().map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(message).map(Some),

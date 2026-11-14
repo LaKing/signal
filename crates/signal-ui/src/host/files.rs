@@ -190,6 +190,154 @@ impl Host {
     /// channels; `settable`: the `set` keys it takes), or, when it does not
     /// load, `error`. Hidden folders and the project's own are left out;
     /// nothing is written.
+    /// `slot.export` (ADR 0046 §9, ADR 0051 §10): top-level slot `slot`
+    /// saved as a project of its own in the folder `path` (absolute; new,
+    /// or empty), as `signal slot-export` saves it. The open project is
+    /// only read.
+    pub(super) fn slot_export(&self, message: &Value) -> Result<Value, Failure> {
+        let slot = message
+            .get("slot")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "slot.export needs `slot`"))?;
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                fail(
+                    "bad-message",
+                    "slot.export needs `path`, an absolute folder",
+                )
+            })?;
+        let project =
+            Project::load(&self.opening.dir).map_err(|e| fail("does-not-load", e.to_string()))?;
+        let part = signal_project::read_regular_to_string(
+            self.opening
+                .dir
+                .join("ui/parts")
+                .join(format!("{slot}.html")),
+        )
+        .ok();
+        let files = signal_project::export::export_slot(&project, slot, part.as_deref())
+            .map_err(|e| fail("bad-value", e))?;
+        let busy = path.exists()
+            && fs::read_dir(&path)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(true);
+        if busy {
+            return Err(fail(
+                "bad-value",
+                format!("{} exists and is not empty", path.display()),
+            ));
+        }
+        for file in &files {
+            let full = path.join(&file.path);
+            if let Some(dir) = full.parent() {
+                fs::create_dir_all(dir)
+                    .map_err(|e| fail("write-failed", format!("{}: {e}", dir.display())))?;
+            }
+            transaction::write_atomic(&full, file.text.as_bytes())
+                .map_err(|e| fail("write-failed", format!("{}: {e}", full.display())))?;
+        }
+        Ok(json!({
+            "type": "slot.exported",
+            "slot": slot,
+            "path": path.display().to_string(),
+            "written": files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// `slot.import` (ADR 0051 §10, Link): the `slot.add` op that adds a
+    /// slot loading the project in folder `path` (absolute), written
+    /// relative to the open project, its interface the project's exports
+    /// (auto ports), named `name` or after the project (`_2`, … while
+    /// taken). Nothing is written: the page sends the op as a `patch`, so
+    /// it is undone like any.
+    pub(super) fn slot_import(&self, message: &Value) -> Result<Value, Failure> {
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                fail(
+                    "bad-message",
+                    "slot.import needs `path`, an absolute folder",
+                )
+            })?;
+        let project = Project::load(&path).map_err(|e| fail("does-not-load", e.to_string()))?;
+        let own = fs::canonicalize(&self.opening.dir).unwrap_or_else(|_| self.opening.dir.clone());
+        let target = fs::canonicalize(&path).unwrap_or(path.clone());
+        if target == own {
+            return Err(fail("bad-value", "a project cannot hold itself"));
+        }
+        let load = relative_path(&own, &target).ok_or_else(|| {
+            fail(
+                "bad-value",
+                "the folder cannot be written relative to the project",
+            )
+        })?;
+        let text = project
+            .files
+            .iter()
+            .find(|f| f.path == PROJECT_FILE)
+            .map(|f| f.text.clone())
+            .unwrap_or_default();
+        let table: toml::Table = text.parse().unwrap_or_default();
+        let mut interface = serde_json::Map::new();
+        if let Some(exports) = table.get("exports").and_then(toml::Value::as_table) {
+            for role in ["inputs", "outputs", "parameters"] {
+                if let Some(ports) = exports.get(role).and_then(toml::Value::as_table) {
+                    let ports: serde_json::Map<String, Value> =
+                        ports.keys().map(|k| (k.clone(), json!({}))).collect();
+                    if !ports.is_empty() {
+                        interface.insert(role.to_owned(), Value::Object(ports));
+                    }
+                }
+            }
+        }
+        let own_project = Project::load(&self.opening.dir).ok();
+        let taken = |n: &str| {
+            own_project.as_ref().is_some_and(|p| {
+                p.files.iter().any(|f| {
+                    f.path == PROJECT_FILE
+                        && f.text
+                            .parse::<toml::Table>()
+                            .ok()
+                            .and_then(|t| t.get("instances").and_then(|i| i.get(n)).cloned())
+                            .is_some()
+                })
+            })
+        };
+        let base = match message.get("name").and_then(Value::as_str) {
+            Some(name) => name.to_owned(),
+            None => {
+                let slug: String = project
+                    .name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                let slug = slug.trim_matches('_').to_owned();
+                if slug.starts_with(|c: char| c.is_ascii_lowercase()) {
+                    slug
+                } else {
+                    format!("p_{slug}")
+                }
+            }
+        };
+        let name = std::iter::once(base.clone())
+            .chain((2..).map(|n| format!("{base}_{n}")))
+            .find(|n| !taken(n))
+            .unwrap_or(base);
+        Ok(json!({
+            "type": "slot.import",
+            "name": name,
+            "op": {"op": "slot.add", "name": name, "slot": Value::Object(interface), "load": load},
+        }))
+    }
+
     pub(super) fn slot_projects(&self) -> Result<Value, Failure> {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
@@ -248,10 +396,16 @@ impl Host {
     /// reached through a link, and the project as it would be left plans as a
     /// reload would (`does-not-load`).
     pub(super) fn vendor(&mut self, message: &Value) -> Result<Value, Failure> {
-        let composite = message
-            .get("composite")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("bad-message", "vendor needs `composite`"))?;
+        // ADR 0051 §10: `slot` instead copies the project a slot links
+        // into its own inside (`signal vendor --slot`).
+        let slot = message.get("slot").and_then(Value::as_str);
+        let composite = match slot {
+            Some(_) => "",
+            None => message
+                .get("composite")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("bad-message", "vendor needs `composite` or `slot`"))?,
+        };
         let name = match message.get("as") {
             Some(Value::String(name)) => Some(name.as_str()),
             None | Some(Value::Null) => None,
@@ -289,8 +443,11 @@ impl Host {
             ),
             VendorError::Io { .. } => fail("write-failed", error.to_string()),
         };
-        let prepared =
-            vendor::prepare(&self.opening.dir, composite, name, library).map_err(refused)?;
+        let prepared = match slot {
+            Some(slot) => vendor::prepare_slot(&self.opening.dir, slot, library),
+            None => vendor::prepare(&self.opening.dir, composite, name, library),
+        }
+        .map_err(refused)?;
         // What was prepared is the version `base` names (the file may have
         // changed since the check above); `vendor::write` then commits it
         // only while the files are still the ones prepared (ADR 0040).
@@ -797,5 +954,52 @@ impl Host {
             "plate": crate::plate::panel_plate(&after),
             "created": !exists,
         }))
+    }
+}
+
+/// `to` relative to the folder `from` (both canonical): `./x`, `../x`,
+/// `../../a/b`; `None` when they share no root.
+fn relative_path(from: &Path, to: &Path) -> Option<String> {
+    let a: Vec<_> = from.components().collect();
+    let b: Vec<_> = to.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for _ in common..a.len() {
+        parts.push("..".to_owned());
+    }
+    for c in b.get(common..).unwrap_or(&[]) {
+        parts.push(c.as_os_str().to_string_lossy().into_owned());
+    }
+    let text = parts.join("/");
+    Some(if text.starts_with("..") {
+        text
+    } else {
+        format!("./{text}")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_path;
+    use std::path::Path;
+
+    #[test]
+    fn a_folder_is_written_relative_to_the_project() {
+        let from = Path::new("/a/b/project");
+        assert_eq!(
+            relative_path(from, Path::new("/a/b/project/sub")).as_deref(),
+            Some("./sub")
+        );
+        assert_eq!(
+            relative_path(from, Path::new("/a/b/other")).as_deref(),
+            Some("../other")
+        );
+        assert_eq!(
+            relative_path(from, Path::new("/a/x/y")).as_deref(),
+            Some("../../x/y")
+        );
     }
 }

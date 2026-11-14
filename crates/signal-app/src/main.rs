@@ -936,6 +936,35 @@ impl Windows {
                     shown.window.set_focus();
                 }
             }
+            // ADR 0051 §10: a folder for an instrument's export or import,
+            // from the system's chooser; the answer goes back to the page.
+            (Some("folder.choose"), _) => {
+                let purpose = message.get("purpose").and_then(Value::as_str).unwrap_or("");
+                let name = message
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("instrument");
+                let chosen = if purpose == "export" {
+                    choose_folder_to_save(name)
+                } else {
+                    choose_project().and_then(|path| {
+                        if path.is_dir() {
+                            Some(path)
+                        } else if path.file_name().is_some_and(|n| n == "project.toml") {
+                            path.parent().map(Path::to_owned)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                let detail = serde_json::json!({
+                    "id": message.get("id").cloned().unwrap_or(Value::Null),
+                    "path": chosen.map(|p| p.display().to_string()),
+                });
+                self.list[index].run(&format!(
+                    "window.dispatchEvent(new CustomEvent('signal-folder', {{ detail: {detail} }}))"
+                ));
+            }
             (Some("window.fit"), _) => {
                 let height = message.get("height").and_then(Value::as_f64);
                 self.fit(index, height);
@@ -1550,6 +1579,24 @@ fn choose_save(name: &str) -> Option<PathBuf> {
     panel.setPrompt(Some(&NSString::from_str("Save")));
     panel.setMessage(Some(&NSString::from_str(
         "Save the project as one .signal file",
+    )));
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    let path = panel.URL()?.path()?;
+    Some(PathBuf::from(path.to_string()))
+}
+
+/// The system's save panel for a new project folder named `name` (ADR
+/// 0051 §10: an instrument saved as a project); the chosen path, or None.
+fn choose_folder_to_save(name: &str) -> Option<PathBuf> {
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setNameFieldStringValue(&NSString::from_str(name));
+    panel.setCanCreateDirectories(true);
+    panel.setPrompt(Some(&NSString::from_str("Save")));
+    panel.setMessage(Some(&NSString::from_str(
+        "Save the instrument as a project folder",
     )));
     if panel.runModal() != NSModalResponseOK {
         return None;
