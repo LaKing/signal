@@ -32,14 +32,27 @@ type Snapshot = BTreeMap<PathBuf, (Option<SystemTime>, u64)>;
 pub struct ProjectWatcher {
     dir: PathBuf,
     last: Snapshot,
+    /// ADR 0035 §7: the folders of the projects it includes outside its own
+    /// folder (`../studio`), each by the path the host reaches it by, as
+    /// they were at the last poll.
+    includes: Vec<(PathBuf, PathBuf, Snapshot)>,
 }
 
 impl ProjectWatcher {
-    /// Watches `dir`, as it is now.
+    /// Watches `dir`, as it is now, and the folders of the projects it
+    /// includes outside it.
     pub fn new(dir: &Path) -> io::Result<ProjectWatcher> {
+        let includes = include_dirs(dir)
+            .into_iter()
+            .map(|(shown, folder)| {
+                let files = snapshot(&folder).unwrap_or_default();
+                (shown, folder, files)
+            })
+            .collect();
         Ok(ProjectWatcher {
             dir: dir.to_owned(),
             last: snapshot(dir)?,
+            includes,
         })
     }
 
@@ -65,6 +78,40 @@ impl ProjectWatcher {
                     .cloned(),
             )
             .collect();
+        // A changed definition may include another project: the folders
+        // watched are read again (each one's files as they are now).
+        if changed.iter().any(|p| {
+            p.as_path() == Path::new(crate::PROJECT_FILE) || p.starts_with(crate::COMPOSITES)
+        }) {
+            let known: BTreeMap<PathBuf, Snapshot> = self
+                .includes
+                .drain(..)
+                .map(|(shown, _, files)| (shown, files))
+                .collect();
+            self.includes = include_dirs(&self.dir)
+                .into_iter()
+                .map(|(shown, folder)| {
+                    let files = known
+                        .get(&shown)
+                        .cloned()
+                        .unwrap_or_else(|| snapshot(&folder).unwrap_or_default());
+                    (shown, folder, files)
+                })
+                .collect();
+        }
+        // ADR 0035 §7: an included project's files, by the path the host
+        // reaches them by (`../studio/patterns/drums.toml`).
+        for (shown, folder, last) in &mut self.includes {
+            let now = snapshot(folder).unwrap_or_default();
+            changed.extend(
+                now.iter()
+                    .filter(|(path, state)| last.get(*path) != Some(*state))
+                    .map(|(path, _)| path.clone())
+                    .chain(last.keys().filter(|path| !now.contains_key(*path)).cloned())
+                    .map(|path| shown.join(path)),
+            );
+            *last = now;
+        }
         changed.sort();
         self.last = now;
         Ok(changed)
@@ -113,6 +160,14 @@ impl FolderState {
     pub fn read(dir: &Path) -> io::Result<FolderState> {
         let mut files = snapshot(dir)?;
         files.retain(|path, _| !is_presentation(path));
+        // ADR 0035 §7: what a load reads of the projects it includes outside it.
+        for (shown, folder) in include_dirs(dir) {
+            for (path, state) in snapshot(&folder).unwrap_or_default() {
+                if !is_presentation(&path) {
+                    files.insert(shown.join(path), state);
+                }
+            }
+        }
         Ok(FolderState(files))
     }
 }
@@ -120,6 +175,47 @@ impl FolderState {
 /// A file's modification time and length as [`ProjectWatcher::stamp`] read them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp(Option<(Option<SystemTime>, u64)>);
+
+/// ADR 0035 §7: the folders of the projects `dir`'s project includes or
+/// loads into slots, and theirs in turn, that lie outside `dir` (one inside
+/// is watched with it), each with the path the host reaches it by
+/// (`../studio`), at most [`crate::MAX_DEPTH`] deep, each folder once. A
+/// `.signal` archive or a folder that does not exist names none.
+pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(root) = fs::canonicalize(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut seen = vec![root.clone()];
+    let mut todo = vec![(PathBuf::new(), root.clone(), 0usize)];
+    while let Some((shown, folder, depth)) = todo.pop() {
+        if depth >= crate::MAX_DEPTH {
+            continue;
+        }
+        let Ok(files) = crate::read_sources(&folder) else {
+            continue;
+        };
+        for written in crate::included_paths(&files) {
+            if written.ends_with(".signal") {
+                continue;
+            }
+            let Ok(canonical) = fs::canonicalize(folder.join(&written)) else {
+                continue;
+            };
+            if seen.contains(&canonical) {
+                continue;
+            }
+            seen.push(canonical.clone());
+            let path = shown.join(&written);
+            if !canonical.starts_with(&root) {
+                found.push((path.clone(), canonical.clone()));
+            }
+            todo.push((path, canonical, depth + 1));
+        }
+    }
+    found.sort();
+    found
+}
 
 fn snapshot(dir: &Path) -> io::Result<Snapshot> {
     let mut files = Snapshot::new();
@@ -1107,6 +1203,43 @@ mod tests {
     use super::{FolderState, ProjectWatcher, is_presentation};
     use std::fs;
     use std::path::Path;
+
+    /// ADR 0035 §7: a project included from outside the host's folder is
+    /// watched too, its files named by the path the host reaches them by;
+    /// an include added by an edit is watched from then on.
+    #[test]
+    fn the_watcher_follows_the_projects_it_includes() {
+        let base = std::env::temp_dir().join(format!("signal-watch-inc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (host, inc) = (base.join("host"), base.join("inc"));
+        fs::create_dir_all(inc.join("patterns")).unwrap();
+        fs::create_dir_all(&host).unwrap();
+        fs::write(inc.join("project.toml"), "x").unwrap();
+        fs::write(host.join("project.toml"), "[instances]\n").unwrap();
+        let mut watcher = ProjectWatcher::new(&host).unwrap();
+        fs::write(
+            host.join("project.toml"),
+            "[instances]\ndrums = { project = \"../inc\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            watcher.changes().unwrap(),
+            vec![Path::new("project.toml").to_path_buf()]
+        );
+        fs::write(inc.join("patterns/beat.toml"), "y").unwrap();
+        assert_eq!(
+            watcher.changes().unwrap(),
+            vec![Path::new("../inc/patterns/beat.toml").to_path_buf()]
+        );
+        let before = FolderState::read(&host).unwrap();
+        fs::write(inc.join("patterns/beat.toml"), "yz").unwrap();
+        assert_ne!(
+            FolderState::read(&host).unwrap(),
+            before,
+            "a load's cache sees it"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn the_watcher_notices_changed_and_added_files_only() {
