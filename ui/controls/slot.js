@@ -30,7 +30,7 @@
 import { browserEntries } from '../lib/module-browser.js';
 import { generationOf, named } from '../lib/opening.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
-import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
+import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute, slotTemplate, templatePartFile } from '../lib/parts.js';
 import { asleepVoices, cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp, voicesOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { layOutCards } from './plate.js';
@@ -140,9 +140,24 @@ ${BROWSER_CSS}`;
     return /^\/([a-z][a-z0-9_]*)$/.exec(this.getAttribute('bind')?.trim() ?? '')?.[1] ?? null;
   }
 
-  /** ADR 0046: the slot's part, relative to the project's `ui/` (what the panel editor reads and writes). */
+  /**
+   * ADR 0046: the part shown and edited, relative to the project's `ui/`
+   * (what the panel editor reads and writes): the slot's own, or (§9) its
+   * project template's while it has none of its own.
+   */
   get file() {
+    if (this.partSource === 'template' && this.template) return templatePartFile(this.template);
+    return this.ownFile;
+  }
+
+  /** The slot's own part file (`parts/<slot>.html`). */
+  get ownFile() {
     return this.slotName ? partFile(this.slotName) : null;
+  }
+
+  /** ADR 0046 §9: the project interface template the slot starts from, if any. */
+  get template() {
+    return slotTemplate(this.description, this.slotName);
   }
 
   /** The part's root: the slot's address. */
@@ -260,6 +275,11 @@ ${BROWSER_CSS}`;
     this.update();
     // Described means open: a part not read yet (or whose read the connection dropped) is read now.
     if (this.partState === null && !this.partReading) this.readPart();
+    // A template known only now (ADR 0046 §9): its part is looked for once.
+    else if (this.partState && !this.partState.exists && this.template && this.templateLooked !== this.template && !this.partReading) {
+      this.templateLooked = this.template;
+      this.readPart();
+    }
     if (this.partState?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
   }
 
@@ -296,8 +316,10 @@ ${BROWSER_CSS}`;
 
   /** Reads the part (`panel.read`) and shows it; none, the slot card as before. */
   async readPart(connection = this.connection) {
+    if (this.partEditor?.editing || !this.ownFile) return;
+    // Its own part first; without one, its template's (ADR 0046 §9).
+    this.partSource = 'own';
     const file = this.file;
-    if (this.partEditor?.editing || !file) return;
     // A connection that reads no file (the gallery's): no part, the card as before.
     if (!connection?.request) {
       this.partState = { exists: false, html: null, error: null };
@@ -321,6 +343,13 @@ ${BROWSER_CSS}`;
       this.partReading = false;
     }
     if (file !== this.file) return;
+    if (!read?.exists && this.template) {
+      const shared = await connection.request({ type: 'panel.read', file: templatePartFile(this.template) }).catch(() => null);
+      if (shared?.exists) {
+        this.partSource = 'template';
+        read = shared;
+      }
+    }
     this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, plate: read?.plate ?? null, error: read?.exists && !read?.editable ? read.reason : null };
     await this.showPart();
     if (this.partState.exists && this.description) {
@@ -347,6 +376,8 @@ ${BROWSER_CSS}`;
 
   /** A `panel.written` push: the part another client (or a patch) wrote. */
   partWritten(message) {
+    // Its own part made while it showed its template's: its own from now on.
+    if (message?.file === this.ownFile && this.partSource === 'template' && typeof message.html === 'string') this.partSource = 'own';
     if (message?.file !== this.file) return;
     if (this.partEditor?.editing) {
       this.partEditor.written(message);
@@ -430,6 +461,22 @@ ${BROWSER_CSS}`;
     }
     if (!this.slotName || !this.connection) return;
     this.setFolded(false);
+    // ADR 0046 §9: a template's part is edited for every slot from it, or
+    // copied into this slot's own first (copy on write).
+    if (this.partSource === 'template' && this.partState?.exists) {
+      const choice = await this.chooseTemplateEdit();
+      if (choice === null) return;
+      if (choice === 'own') {
+        try {
+          await this.connection.request({ type: 'panel.write', file: this.ownFile, html: this.partState.html, plate: this.partState.plate ?? null, base: null });
+        } catch (error) {
+          this.say(`Not written: ${error?.message ?? error}`);
+          return;
+        }
+        this.partSource = 'own';
+        await this.readPart();
+      }
+    }
     this.partEditor ??= new PanelEditor(this);
     this.partEditor.shared = shared;
     let refused;
@@ -439,6 +486,27 @@ ${BROWSER_CSS}`;
       refused = error?.message ?? String(error);
     }
     if (refused) this.say(`Edit layout of ${this.file}: ${refused}`);
+  }
+
+  /**
+   * ADR 0046 §9: asks, in the card, whether Edit layout changes the
+   * template's part (every slot from it) or makes this slot's own copy;
+   * `'template'`, `'own'`, or null when the host's Edit layout ended first.
+   */
+  chooseTemplateEdit() {
+    const box = this.$('.message');
+    if (!box) return Promise.resolve('template');
+    return new Promise((resolve) => {
+      const done = (choice) => {
+        box.hidden = true;
+        box.replaceChildren();
+        resolve(choice);
+      };
+      const button = (text, choice) => Object.assign(document.createElement('button'), { type: 'button', textContent: text, onclick: () => done(choice) });
+      const text = Object.assign(document.createElement('span'), { textContent: `This slot shows the part of interface ${this.template}. ` });
+      box.replaceChildren(text, button(`Edit it for every slot from ${this.template}`, 'template'), button('Make this slot’s own copy', 'own'), button('Cancel', null));
+      box.hidden = false;
+    });
   }
 
   /** The panel editor's Escape: the host's Edit layout ends. */

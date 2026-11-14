@@ -584,6 +584,17 @@ pub enum Scope<'a> {
         /// `/synth`, `/rack1/fx`.
         root: &'a str,
     },
+    /// ADR 0046 §9: project template `name`'s part
+    /// (`ui/interfaces/<name>.html`), rendered for the slot of part key
+    /// `key` at `root`: only `.<name>` binds of the slot's interface.
+    Template {
+        /// The template, `voice`.
+        name: &'a str,
+        /// The slot's part key it is checked for.
+        key: &'a str,
+        /// `/synth`.
+        root: &'a str,
+    },
 }
 
 impl Scope<'_> {
@@ -599,7 +610,9 @@ impl Scope<'_> {
                 }
                 address.to_owned()
             }
-            Scope::Part { root, .. } => crate::parts::root_address(address, root)?,
+            Scope::Part { root, .. } | Scope::Template { root, .. } => {
+                crate::parts::root_address(address, root)?
+            }
         };
         absolute
             .parse()
@@ -612,8 +625,17 @@ impl Targets<'_> {
     /// must be of the slot's interface (an error otherwise), and an address
     /// with nothing behind it now is inactive, never unknown (ADR 0046 §3).
     fn find_scoped(&self, port: &PortAddress, scope: Scope<'_>) -> Option<Found> {
-        let Scope::Part { key, root } = scope else {
-            return self.find(port);
+        let (key, root) = match scope {
+            Scope::Host => return self.find(port),
+            Scope::Part { key, root } => (key, root),
+            Scope::Template { name, key, root } => {
+                if port.instance().as_str() != root {
+                    return Some(Found::Refused(format!(
+                        "a template's part binds only the interface (.<name>): {port} lies inside one slot's content; bind it in that slot's own part (Make part own), template `{name}`"
+                    )));
+                }
+                (key, root)
+            }
         };
         let found = self.find(port);
         if port.instance().as_str() == root {
@@ -778,6 +800,21 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
                         ),
                     ),
                 }),
+                (Scope::Template { name, .. }, found) => {
+                    let wanted = crate::parts::template_marker(name);
+                    if found.map(|(v, _)| v.as_str()) != Some(wanted.as_str()) {
+                        findings.push(Finding {
+                            control: None,
+                            diagnostic: at(
+                                place,
+                                Severity::Error,
+                                format!(
+                                    "the part's marker does not name its template: ui/interfaces/{name}.html is the part of interface `{name}`, so its <{PANEL_ELEMENT}> needs part=\"{wanted}\""
+                                ),
+                            ),
+                        });
+                    }
+                }
                 (Scope::Part { key, .. }, found) => {
                     let wanted = crate::parts::marker(key);
                     if found.map(|(v, _)| v.as_str()) != Some(wanted.as_str()) {
@@ -1182,6 +1219,13 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
                     crate::parts::marker(key)
                 ),
             ),
+            Scope::Template { name, .. } => (
+                Severity::Error,
+                format!(
+                    "no <{PANEL_ELEMENT} part=\"{}\">: a template's part is one panel element naming its template",
+                    crate::parts::template_marker(name)
+                ),
+            ),
         };
         findings.push(Finding {
             control: None,
@@ -1366,6 +1410,18 @@ pub fn check_project(
             &targets,
         ));
     }
+    // ADR 0046 §9: the project templates' parts, at each slot from them.
+    let templates = ui.join(crate::parts::TEMPLATES_DIR);
+    for path in panel_files(&templates).map_err(|e| format!("{}: {e}", templates.display()))? {
+        let text = signal_project::read_regular_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        checked.push(check_file(
+            &format!("{}/{name}", crate::parts::TEMPLATES_DIR),
+            &text,
+            &targets,
+        ));
+    }
     // ADR 0051 §4: the plane's Stacks, against the panel's cards and the top-level slots with a part.
     if let Some(plane) = check_plane(&ui, &panel, &plan) {
         checked.push(plane);
@@ -1443,6 +1499,9 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
 /// of a composite whose slot it is), its findings merged.
 pub fn check_file(name: &str, text: &str, targets: &Targets<'_>) -> Checked {
     let file = format!("ui/{name}");
+    if name.starts_with("interfaces/") {
+        return check_template(&file, name, text, targets);
+    }
     if !name.starts_with("parts/") {
         return check(&file, text, targets);
     }
@@ -1491,6 +1550,56 @@ pub fn check_file(name: &str, text: &str, targets: &Targets<'_>) -> Checked {
         }
     }
     merged.unwrap_or_else(|| check(&file, text, targets))
+}
+
+/// ADR 0046 §9: a project template's part (`interfaces/<name>.html`,
+/// relative to `ui/`), checked at every slot from the template that has no
+/// part of its own, its findings merged; with none, a warning that it is
+/// not rendered anywhere yet.
+fn check_template(file: &str, name: &str, text: &str, targets: &Targets<'_>) -> Checked {
+    let whole = |severity, message: String| Checked {
+        file: file.to_owned(),
+        controls: 0,
+        bindings: 0,
+        findings: vec![Finding {
+            control: None,
+            diagnostic: Diagnostic::at(severity, file, text, 0, message),
+        }],
+    };
+    let Some(template) = crate::parts::template_of(name) else {
+        return whole(
+            Severity::Error,
+            format!("{file} is no template part's name: it is ui/interfaces/<template>.html"),
+        );
+    };
+    let keys = targets.panel.template_slots(template);
+    let mut merged: Option<Checked> = None;
+    for key in keys {
+        for root in targets.panel.part_roots(key).unwrap_or_default() {
+            let scope = Scope::Template {
+                name: template,
+                key,
+                root,
+            };
+            let checked = check_scoped(file, text, targets, scope);
+            match &mut merged {
+                None => merged = Some(checked),
+                Some(all) => {
+                    for finding in checked.findings {
+                        if !all.findings.contains(&finding) {
+                            all.findings.push(finding);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    merged.unwrap_or_else(|| {
+        whole(
+            Severity::Warning,
+            format!("{file}: no slot of the project starts from interface `{template}`, so it is not checked or shown"),
+        )
+    })
 }
 
 #[cfg(test)]

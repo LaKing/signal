@@ -220,3 +220,19 @@ export function partControls(part, slot, start = 0, key = slot) {
   }
   return controls;
 }
+
+/** ADR 0046 §9: a project interface template's part, relative to `ui/` (`interfaces/voice.html`). */
+export function templatePartFile(name) {
+  return `interfaces/${name}.html`;
+}
+
+/**
+ * ADR 0046 §9: the project interface template top-level slot `slot` starts
+ * from (its interface's `from` in `describe.content.slots`), or null: none,
+ * or a library one (`lib.*`), whose parts are not built (rule 8).
+ */
+export function slotTemplate(description, slot) {
+  const found = (description?.content?.slots ?? []).find((s) => s.slot === `/${slot}`);
+  const from = found?.interface?.from ?? null;
+  return typeof from === 'string' && /^[a-z][a-z0-9_]*$/.test(from) ? from : null;
+}

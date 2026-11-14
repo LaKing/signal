@@ -966,3 +966,147 @@ fn the_page_reads_its_part_from_a_real_server() {
     assert!(html.contains("<h2>TAPE ECHO</h2>"), "{html}");
     rig.finish();
 }
+
+/// ADR 0046 §9: a project template's part. Two slots start from the
+/// interface template `fxi`; `a` has no part of its own, `b` has one.
+const TEMPLATE_HOST: &str = r#"schema_version = 1
+
+[project]
+name = "templates"
+sample_rate = 48000
+seed = 1
+
+[instances]
+osc = { module = "std.sine_osc", freq = 220 }
+a = { slot = "fxi", load = "std.gain", map = { x = "in", y = "out", volume = "db" } }
+b = { slot = "fxi", load = "std.gain", map = { x = "in", y = "out", volume = "db" } }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "a.x" },
+  { from = "a.y", to = "b.x" },
+  { from = "b.y", to = "out.l" },
+]
+"#;
+
+const FXI: &str = "schema_version = 1\n\n[interface]\nname = \"fxi\"\n\n[inputs]\nx = \"audio\"\n\n[outputs]\ny = \"audio\"\n\n[parameters]\nvolume = { unit = \"dB\" }\n";
+
+fn template_scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "signal-ui-template-parts-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("ui/parts")).unwrap();
+    fs::create_dir_all(dir.join("interfaces")).unwrap();
+    fs::write(dir.join("project.toml"), TEMPLATE_HOST).unwrap();
+    fs::write(dir.join("interfaces/fxi.toml"), FXI).unwrap();
+    fs::write(
+        dir.join("ui/main.html"),
+        "<!doctype html>\n<signal-panel>\n  <div class=\"signal-cards\">\n    <signal-slot bind=\"/a\"></signal-slot>\n    <signal-slot bind=\"/b\"></signal-slot>\n  </div>\n</signal-panel>\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("ui/parts/b.html"),
+        part(
+            "b",
+            "b",
+            "      <signal-knob bind=\".volume\"></signal-knob>\n",
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn a_template_part_is_checked_at_its_slots_and_shown_where_none_is_own() {
+    let dir = template_scratch("check");
+    // No template part yet: the slots check as before.
+    assert!(checked(&dir).iter().all(|c| c.findings.is_empty()));
+    let template = "      <signal-knob bind=\".volume\" label=\"volume\"></signal-knob>\n      <signal-scope bind=\".y\"></signal-scope>\n";
+    fs::create_dir_all(dir.join("ui/interfaces")).unwrap();
+    fs::write(
+        dir.join("ui/interfaces/fxi.html"),
+        part("", "interface:fxi", template),
+    )
+    .unwrap();
+    assert_eq!(findings(&checked(&dir), "ui/interfaces/fxi.html"), vec![]);
+    // Only the template's names: one slot's content and a wrong marker are errors.
+    let inner = format!("{template}      <signal-value bind=\"/gain.db\"></signal-value>\n");
+    fs::write(dir.join("ui/interfaces/fxi.html"), part("", "fxi", &inner)).unwrap();
+    let found = findings(&checked(&dir), "ui/interfaces/fxi.html");
+    assert!(
+        found
+            .iter()
+            .any(|(s, m)| *s == Severity::Error && m.contains("needs part=\"interface:fxi\"")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|(s, m)| *s == Severity::Error
+            && m.contains("a template's part binds only the interface")),
+        "{found:?}"
+    );
+    // A template no slot starts from: a warning, not checked.
+    fs::write(
+        dir.join("ui/interfaces/other.html"),
+        part("", "interface:other", template),
+    )
+    .unwrap();
+    let other = findings(&checked(&dir), "ui/interfaces/other.html");
+    assert_eq!(other.len(), 1, "{other:?}");
+    assert_eq!(other[0].0, Severity::Warning);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_slot_without_its_own_part_shows_its_template_s_and_the_first_write_makes_it() {
+    let source = template_scratch("source-graph");
+    let mut rig = rig(
+        "template-parts",
+        Options {
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let _ = fs::remove_dir_all(&source);
+    let (mut ws, _) = rig.client();
+    // Before the template part exists, `a` shows none.
+    let g = graph(&mut rig, &mut ws, 1);
+    assert_eq!(instance(&g, "a")["slot"]["part"], Value::Null);
+    let content = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>fxi</h2>\n      <signal-knob bind=\".volume\"></signal-knob>\n    </section>\n  </div>\n";
+    let written = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "panel.write", "file": "interfaces/fxi.html", "html": content, "base": null}),
+        "panel.written",
+    );
+    assert_eq!(written["created"], true, "{written}");
+    let text = read(&rig.dir, "ui/interfaces/fxi.html").unwrap();
+    assert!(
+        text.contains("<signal-panel part=\"interface:fxi\">"),
+        "{text}"
+    );
+    let g = graph(&mut rig, &mut ws, 3);
+    let shown = &instance(&g, "a")["slot"]["part"];
+    assert_eq!(shown["template"], "fxi", "{shown}");
+    assert_eq!(shown["file"], "ui/interfaces/fxi.html");
+    assert_eq!(
+        shown["controls"][0]["binds"],
+        json!(["/a.volume"]),
+        "{shown}"
+    );
+    // `b` keeps its own.
+    assert_eq!(instance(&g, "b")["slot"]["part"]["file"], "ui/parts/b.html");
+    assert_eq!(instance(&g, "b")["slot"]["part"]["template"], Value::Null);
+    // The template part checks clean at its slot.
+    let checked = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "panel.check", "file": "interfaces/fxi.html"}),
+        "panel.check",
+    );
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(checked["diagnostics"], json!([]), "{checked}");
+    rig.finish();
+}

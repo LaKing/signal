@@ -140,6 +140,9 @@ pub struct Panel {
     /// ADR 0046 §2–3: each slot's part key (`synth`, `rack.fx`) and the
     /// roots it is rendered at (`/synth`; each instance of `rack`'s `/fx`).
     part_roots: BTreeMap<String, Vec<String>>,
+    /// ADR 0046 §9: the project interface template each slot's interface
+    /// starts from (`from`, not a library one), by the slot's part key.
+    slot_templates: BTreeMap<String, String>,
     /// ADR 0044 §6: the allocators of the polyphonic slots (`/pad/alloc`),
     /// whose parameters are structure, set only by writing `voices`.
     allocators: Vec<String>,
@@ -535,6 +538,7 @@ impl Panel {
         }
         let mut slot_interfaces = BTreeMap::new();
         let mut part_roots = BTreeMap::new();
+        let mut slot_templates = BTreeMap::new();
         let mut allocators = Vec::new();
         for resolution in planned.slots.iter().filter(|r| r.voices.is_some()) {
             if let Some(name) = resolution.slot.strip_prefix('/') {
@@ -553,6 +557,15 @@ impl Panel {
                 .map(|p| p.name.clone())
                 .collect();
             slot_interfaces.insert(resolution.slot.clone(), names);
+            let key = match resolution.slot.strip_prefix('/') {
+                Some(name) => name.to_owned(),
+                None => resolution.slot.replacen('/', ".", 1),
+            };
+            if let Some(from) = &resolution.interface.from
+                && !from.starts_with(signal_core::LIBRARY_PREFIX)
+            {
+                slot_templates.insert(key, from.clone());
+            }
             if let Some(name) = resolution.slot.strip_prefix('/') {
                 if !name.contains('/') {
                     part_roots.insert(name.to_owned(), vec![resolution.slot.clone()]);
@@ -578,6 +591,7 @@ impl Panel {
             slots: slots.keys().map(|n| (*n).to_owned()).collect(),
             slot_interfaces,
             part_roots,
+            slot_templates,
             allocators,
         }
     }
@@ -598,6 +612,22 @@ impl Panel {
     /// instance of a composite's slot); `None` when no slot has that key.
     pub fn part_roots(&self, key: &str) -> Option<&[String]> {
         self.part_roots.get(key).map(Vec::as_slice)
+    }
+
+    /// ADR 0046 §9: the project interface template the slot of part key
+    /// `key` starts from, if any (a library template is none).
+    pub fn slot_template(&self, key: &str) -> Option<&str> {
+        self.slot_templates.get(key).map(String::as_str)
+    }
+
+    /// ADR 0046 §9: the part keys of the slots from project template
+    /// `name`, in order.
+    pub fn template_slots(&self, name: &str) -> Vec<&str> {
+        self.slot_templates
+            .iter()
+            .filter(|(_, from)| *from == name)
+            .map(|(key, _)| key.as_str())
+            .collect()
     }
 
     /// ADR 0046 §2: the slots' part keys, in order.
@@ -753,6 +783,7 @@ impl Panel {
         self.slots = other.slots;
         self.slot_interfaces = other.slot_interfaces;
         self.part_roots = other.part_roots;
+        self.slot_templates = other.slot_templates;
     }
 
     /// The kind of the project's pattern `name` (`patterns/<name>.toml`), if

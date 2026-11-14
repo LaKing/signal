@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseContent, serialize } from './panel-tree.js';
-import { emptyPartTree, opensAsCard, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
+import { emptyPartTree, opensAsCard, slotTemplate, templatePartFile, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
 
 const ui = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, ui), 'utf8');
@@ -122,4 +122,18 @@ test("a slot's face names its part's file: a composite's slot's is <composite>.<
   // Its interface controls are the face's: no control node of their own, at the box or in the frame.
   assert.equal(levelControls(graph, ''), null);
   assert.equal(levelControls(graph, 'rack/fx'), null);
+});
+
+test('ADR 0046 §9: a slot from a project template finds its template part; a library template has none', () => {
+  const description = { content: { slots: [
+    { slot: '/lead', interface: { from: 'voice', ports: [] } },
+    { slot: '/pad', interface: { from: 'lib.voice', ports: [] } },
+    { slot: '/fx', interface: { ports: [] } },
+  ] } };
+  assert.equal(slotTemplate(description, 'lead'), 'voice');
+  assert.equal(templatePartFile('voice'), 'interfaces/voice.html');
+  assert.equal(slotTemplate(description, 'pad'), null);
+  assert.equal(slotTemplate(description, 'fx'), null);
+  assert.equal(slotTemplate(description, 'none'), null);
+  assert.equal(slotTemplate(null, 'lead'), null);
 });

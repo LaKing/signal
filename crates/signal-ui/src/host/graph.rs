@@ -370,10 +370,10 @@ impl Host {
     /// `null` when the slot has none.
     fn part_json(&self, level: &str, slot: &str, root: &str) -> Value {
         let path = signal_project::patch::part_path(level, slot);
-        let Some(text) = self.ui_text(&path) else {
-            return Value::Null;
-        };
         let key = signal_project::patch::part_key(level, slot);
+        let Some(text) = self.ui_text(&path) else {
+            return self.template_part_json(&key, root);
+        };
         let wanted = crate::parts::marker(&key);
         let error = match crate::parts::marker_in(&text) {
             Some((found, _)) if found == wanted => Value::Null,
@@ -388,6 +388,35 @@ impl Host {
             "root": root,
             "controls": crate::parts::rooted_controls(&text, root),
             "error": error,
+        })
+    }
+
+    /// ADR 0046 §9: the part a slot without its own shows, its project
+    /// template's (`ui/interfaces/<name>.html`), as [`Self::part_json`]
+    /// gives a part with `template` naming it; `null` when there is none.
+    fn template_part_json(&self, key: &str, root: &str) -> Value {
+        let Some(name) = self.panel.slot_template(key) else {
+            return Value::Null;
+        };
+        let path = format!("ui/{}", crate::parts::template_file(name));
+        let Some(text) = self.ui_text(&path) else {
+            return Value::Null;
+        };
+        let wanted = crate::parts::template_marker(name);
+        let error = match crate::parts::marker_in(&text) {
+            Some((found, _)) if found == wanted => Value::Null,
+            Some((found, _)) => json!(format!(
+                "its <signal-panel> names `{found}`, not its template `{wanted}` (part=\"{wanted}\")"
+            )),
+            None => json!(format!("no <signal-panel part=\"{wanted}\">")),
+        };
+        json!({
+            "file": path,
+            "base": sha256_hex(text.as_bytes()),
+            "root": root,
+            "controls": crate::parts::rooted_controls(&text, root),
+            "error": error,
+            "template": name,
         })
     }
 

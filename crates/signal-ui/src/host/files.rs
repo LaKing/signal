@@ -671,6 +671,8 @@ impl Host {
         if link(&ui)
             || link(&ui.join(name))
             || (part.is_some() && link(&ui.join(crate::parts::PARTS_DIR)))
+            || (crate::parts::template_of(name).is_some()
+                && link(&ui.join(crate::parts::TEMPLATES_DIR)))
         {
             return Err(fail(
                 "unknown-panel",
@@ -690,6 +692,14 @@ impl Host {
         // ADR 0046 §5: a slot's part, made by its first write.
         if let Some(key) = part
             && self.panel.part_roots(key).is_some()
+            && fs::symlink_metadata(ui.join(name)).is_err()
+        {
+            return Ok((ui.join(name), false));
+        }
+        // ADR 0046 §9: a project template's part, made by its first write,
+        // once a slot starts from the template.
+        if let Some(template) = crate::parts::template_of(name)
+            && !self.panel.template_slots(template).is_empty()
             && fs::symlink_metadata(ui.join(name)).is_err()
         {
             return Ok((ui.join(name), false));
@@ -992,9 +1002,10 @@ impl Host {
                 replace(text, range, html)
             }
             // ADR 0046 §5: a slot's part, made by its first write.
-            None => match crate::parts::key_of(name) {
-                Some(key) => crate::parts::part_text(key, html),
-                None => first_file(&self.project_name(), html),
+            None => match (crate::parts::key_of(name), crate::parts::template_of(name)) {
+                (Some(key), _) => crate::parts::part_text(key, html),
+                (None, Some(template)) => crate::parts::template_part_text(template, html),
+                (None, None) => first_file(&self.project_name(), html),
             },
         };
         let after = match plate {

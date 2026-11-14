@@ -41,6 +41,37 @@ pub fn valid_key(key: &str) -> bool {
     }
 }
 
+/// ADR 0046 §9: the folder of the project templates' parts, under `ui/`.
+pub const TEMPLATES_DIR: &str = "interfaces";
+
+/// The project interface template of a template part file named relative
+/// to `ui/` (`interfaces/voice.html` → `voice`).
+pub fn template_of(file: &str) -> Option<&str> {
+    let name = file
+        .strip_prefix("interfaces/")
+        .and_then(|f| f.strip_suffix(".html"))?;
+    valid_name(name).then_some(name)
+}
+
+/// The template part's file relative to `ui/`.
+pub fn template_file(name: &str) -> String {
+    format!("{TEMPLATES_DIR}/{name}.html")
+}
+
+/// What a template part's `<signal-panel part>` names: `interface:voice`.
+pub fn template_marker(name: &str) -> String {
+    format!("interface:{name}")
+}
+
+/// A new template part file, as [`part_text`] for a slot's.
+pub fn template_part_text(name: &str, content: &str) -> String {
+    let marker = template_marker(name);
+    format!(
+        "<!-- The part of interface template `{name}` (ADR 0046 §9): every slot from it shows it unless it has its own; it binds only the template's names (.<name>). -->\n\
+<{PANEL_ELEMENT} part=\"{marker}\">{content}</{PANEL_ELEMENT}>\n"
+    )
+}
+
 /// The key of a part file named relative to `ui/` (`parts/synth.html`).
 pub fn key_of(file: &str) -> Option<&str> {
     let key = file
