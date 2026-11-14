@@ -25,6 +25,10 @@ pub enum MenuAction {
     /// Without the main thread, the page shows the Setup tab with its folder
     /// field focused (ADR 0023).
     Open,
+    /// File ▸ Open Included Project… (ADR 0035 §12): one of the projects
+    /// the open project includes (or loads into a slot), chosen in a native
+    /// alert when there are several, opens as Open… opens a choice.
+    OpenIncluded,
     /// Save: the page writes every unsaved parameter again, then a
     /// `.signal` project's working folder back to its file.
     Save,
@@ -66,8 +70,9 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    const ALL: [MenuAction; 13] = [
+    const ALL: [MenuAction; 14] = [
         MenuAction::Open,
+        MenuAction::OpenIncluded,
         MenuAction::Save,
         MenuAction::SaveAs,
         MenuAction::Revert,
@@ -86,6 +91,7 @@ impl MenuAction {
     pub fn id(self) -> &'static str {
         match self {
             MenuAction::Open => "open",
+            MenuAction::OpenIncluded => "open-included",
             MenuAction::Save => "save",
             MenuAction::SaveAs => "save-as",
             MenuAction::Revert => "revert",
@@ -106,6 +112,7 @@ impl MenuAction {
     pub fn command(self) -> &'static str {
         match self {
             MenuAction::Open => "file.open",
+            MenuAction::OpenIncluded => "file.open_included",
             MenuAction::Save => "file.save",
             MenuAction::SaveAs => "file.save_as",
             MenuAction::Revert => "file.revert",
@@ -133,13 +140,14 @@ impl MenuAction {
     }
 
     /// The script that hands the action to the page (a `signal-menu`
-    /// event, `ui/app/app.js`, so a main window's); none for Save As,
-    /// Revert to Saved, Quit, the new windows and Settings, which the app
+    /// event, `ui/app/app.js`, so a main window's); none for Open Included
+    /// Project, Save As, Revert to Saved, Quit, the new windows and Settings, which the app
     /// does.
     pub fn page_script(self) -> Option<String> {
         (!matches!(
             self,
             MenuAction::Quit
+                | MenuAction::OpenIncluded
                 | MenuAction::SaveAs
                 | MenuAction::Revert
                 | MenuAction::NewMain
@@ -226,6 +234,7 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 6] = [
         "File",
         &[
             MenuItem::Own(MenuAction::Open, "Open…"),
+            MenuItem::Own(MenuAction::OpenIncluded, "Open Included Project…"),
             MenuItem::Own(MenuAction::Save, "Save"),
             MenuItem::Own(MenuAction::SaveAs, "Save As…"),
             MenuItem::Own(MenuAction::Revert, "Revert to Saved…"),
@@ -719,6 +728,7 @@ mod tests {
             own("File"),
             [
                 ("Open…", chord("Cmd+O")),
+                ("Open Included Project…", None),
                 ("Save", chord("Cmd+S")),
                 ("Save As…", chord("Shift+Cmd+S")),
                 ("Revert to Saved…", None),

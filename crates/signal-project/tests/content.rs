@@ -1639,3 +1639,37 @@ fn a_signal_file_includes_as_its_folder_does() {
         "{found:#?}"
     );
 }
+
+/// ADR 0035 §12: File ▸ Open Included Project lists the projects a host
+/// includes or loads into slots, from its own files and its composites',
+/// by key, with the path to open (a `.signal` file itself); a missing one
+/// is left out.
+#[test]
+fn the_includes_to_open_are_listed_by_key() {
+    let host = noisy_host("to-open", "", false, 48_000);
+    let text = fs::read_to_string(host.join("project.toml"))
+        .unwrap()
+        .replace(
+            "out = { module = \"std.audio_out\" }",
+            "gone = { project = \"missing\" }\nout = { module = \"std.audio_out\" }",
+        );
+    write(
+        &host,
+        &[
+            ("project.toml", &text),
+            (
+                "composites/rack.toml",
+                "schema_version = 1\n[composite]\nname = \"rack\"\n[instances]\ndeck = { slot = { outputs = { l = {} } }, load = \"parts/one.signal\" }\n",
+            ),
+            ("parts/one.signal", "not read here"),
+        ],
+    );
+    let found = signal_project::includes_to_open(&host);
+    assert_eq!(
+        found,
+        [
+            ("m".to_owned(), host.join("noisy")),
+            ("rack.deck".to_owned(), host.join("parts/one.signal")),
+        ]
+    );
+}

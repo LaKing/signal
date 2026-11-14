@@ -1328,6 +1328,14 @@ fn main() -> ExitCode {
                 }
                 None
             }
+            Event::UserEvent(UserEvent::Menu(MenuAction::OpenIncluded))
+                if MainThreadMarker::new().is_some() =>
+            {
+                if let Some(server) = server.as_ref() {
+                    open_included(server, &mut windows, target, &proxy);
+                }
+                None
+            }
             Event::UserEvent(UserEvent::Menu(MenuAction::SaveAs)) => {
                 if let Some(server) = server.as_ref() {
                     save_as(server, &mut windows, target, &proxy);
@@ -1469,6 +1477,56 @@ fn open_project(
     if let Err(message) = server.open(target_path, edits) {
         windows.tell(target, proxy, "signal-app-error", &message);
     }
+}
+
+/// File ▸ Open Included Project… (ADR 0035 §12): the project the open
+/// one includes (or loads into a slot) opens as Open… opens a choice (its
+/// edits asked about first); with several, a native alert asks which.
+/// Not yet in a new instance while this one plays the host (§12): it opens
+/// here.
+fn open_included(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
+    let Some(project) = server.project() else {
+        return windows.tell(target, proxy, "signal-app-error", "No project is open");
+    };
+    let includes = signal_project::includes_to_open(&project.dir);
+    let path = match includes.as_slice() {
+        [] => {
+            let message = format!("{} includes no other project", project.name);
+            return windows.tell(target, proxy, "signal-app-error", &message);
+        }
+        [(_, path)] => path.clone(),
+        several => match choose_include(&project.name, several) {
+            Some(path) => path,
+            None => return,
+        },
+    };
+    open_project(server, windows, target, proxy, &path);
+}
+
+/// "Open which project does <name> include?" as a native alert, a button
+/// per include (`<key> — <folder or file>`) and Cancel; the chosen path,
+/// or None when cancelled or it cannot run.
+fn choose_include(name: &str, includes: &[(String, PathBuf)]) -> Option<PathBuf> {
+    let mtm = MainThreadMarker::new()?;
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&format!(
+        "Open which project does {name} include?"
+    )));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "It opens in place of {name}."
+    )));
+    for (key, path) in includes {
+        let shown = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        alert.addButtonWithTitle(&NSString::from_str(&format!("{key} — {shown}")));
+    }
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
+    includes
+        .get(usize::try_from(index).ok()?)
+        .map(|(_, path)| path.clone())
 }
 
 /// Revert to Saved…: asked first ("Revert to the last saved version of

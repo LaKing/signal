@@ -981,6 +981,60 @@ impl Project {
     }
 }
 
+/// ADR 0035 §12, File ▸ Open Included Project: the projects the project in
+/// `dir` includes (or loads into slots) from its own files, by the key of
+/// the including instance (`<composite>.<instance>` in a composite's file)
+/// and the path to open: the folder, or a `.signal` file itself, as
+/// written relative to `dir`. In definition then instance order; a path
+/// that does not exist is left out.
+pub fn includes_to_open(dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(files) = read_sources(dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for file in &files {
+        let def = if file.path == PROJECT_FILE {
+            String::new()
+        } else {
+            match file
+                .path
+                .strip_prefix("composites/")
+                .and_then(|n| n.strip_suffix(".toml"))
+            {
+                Some(name) => name.to_owned(),
+                None => continue,
+            }
+        };
+        let Ok(table) = toml::from_str::<toml::Table>(&file.text) else {
+            continue;
+        };
+        let Some(instances) = table.get("instances").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (instance, entry) in instances {
+            let Some(entry) = entry.as_table() else {
+                continue;
+            };
+            let written = entry
+                .get("project")
+                .and_then(toml::Value::as_str)
+                .or_else(|| {
+                    entry.get("slot")?;
+                    entry
+                        .get("load")
+                        .and_then(toml::Value::as_str)
+                        .filter(|load| is_project_path(load))
+                });
+            if let Some(written) = written
+                && dir.join(written).exists()
+            {
+                found.push((key(&def, instance), dir.join(written)));
+            }
+        }
+    }
+    found
+}
+
 /// The projects `files` (a project's `project.toml` and composites) include
 /// or load into slots, as written, without loading anything: what `signal
 /// pack` cannot pack yet (ADR 0035 §13, phase 4). A file that does not

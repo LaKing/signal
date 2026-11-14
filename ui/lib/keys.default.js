@@ -35,6 +35,7 @@ export default {
     { "id": "app.hide", "scope": "app", "label": "Hide Signal", "keys": ["Cmd+H"], "fixed": true },
     { "id": "app.hide_others", "scope": "app", "label": "Hide Others", "keys": ["Alt+Cmd+H"], "fixed": true },
     { "id": "file.open", "scope": "app", "label": "Open…", "keys": ["Cmd+O"], "menu": true },
+    { "id": "file.open_included", "scope": "app", "label": "Open Included Project…", "keys": [], "menu": true },
     { "id": "file.save", "scope": "app", "label": "Save", "keys": ["Cmd+S"], "menu": true },
     { "id": "file.save_as", "scope": "app", "label": "Save As…", "keys": ["Shift+Cmd+S"], "menu": true },
     { "id": "file.revert", "scope": "app", "label": "Revert to Saved…", "keys": [], "menu": true },
