@@ -15,3 +15,10 @@ export function includeTitle(key, include) {
 export function panelIncludes(description) {
   return (description?.content?.includes ?? []).filter((i) => !i.slot && /^[a-z][a-z0-9_]*$/.test(i.key ?? ''));
 }
+
+/** ADR 0035 §10: a pattern control's `pattern` in include `key`'s panel, naming the include's pattern (`include/<key>/<name>`, read-only in the host). */
+export function includePattern(key, value) {
+  if (value === undefined || value === null || value === '') return value;
+  return `include/${key}/${value}`;
+}
+

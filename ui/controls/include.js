@@ -12,7 +12,7 @@
 import { SignalElement } from './base.js';
 import { showWritten } from './panel-editor.js';
 import { faceAttribute, stylesheets } from '../lib/schematic-face.js';
-import { includePanelFile, includeTitle } from '../lib/include.js';
+import { includePanelFile, includeTitle, includePattern } from '../lib/include.js';
 
 const CSS = `
 :host { display: block; grid-column: 1 / -1; }
@@ -21,6 +21,12 @@ const CSS = `
 .head .note { color: var(--signal-muted, #8a93a3); font-size: 11px; }
 .problem { color: var(--signal-clip, #ff5252); font-size: 12px; padding: 0 0.6rem; }
 `;
+
+/** An attribute of the included panel's control: its addresses rooted, its skins from the include's folder, its pattern the include's (read-only). */
+function includeAttribute(name, value, key, base) {
+  if (name === 'pattern') return includePattern(key, value);
+  return faceAttribute(name, value, `/${key}`, base);
+}
 
 export class SignalInclude extends SignalElement {
   static role = 'group';
@@ -70,7 +76,7 @@ export class SignalInclude extends SignalElement {
       this.showProblem(read?.reason ?? null);
       return;
     }
-    const error = await showWritten(this.$('.body'), read.html, (name, value) => faceAttribute(name, value, `/${key}`, base));
+    const error = await showWritten(this.$('.body'), read.html, (name, value) => includeAttribute(name, value, key, base));
     this.showProblem(error);
   }
 

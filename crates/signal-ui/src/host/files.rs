@@ -723,6 +723,23 @@ impl Host {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| fail("bad-message", "a pattern message needs `name`"))?;
+        // ADR 0035 §10: `include/<key>/<name>`, a pattern of the project
+        // the top-level instance `key` includes, read from its folder.
+        if let Some(rest) = name.strip_prefix("include/") {
+            let unknown = || fail("unknown-pattern", format!("no included pattern '{name}'"));
+            let (key, pattern) = rest.split_once('/').ok_or_else(unknown)?;
+            let mut chars = pattern.chars();
+            let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            let ui = crate::http::include_ui(&self.opening.dir, key).filter(|_| valid);
+            let project = ui.as_deref().and_then(Path::parent).ok_or_else(unknown)?;
+            let folder = project.join(PATTERNS);
+            let path = folder.join(format!("{pattern}.toml"));
+            let link =
+                |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+            let linked = link(&folder) || link(&path);
+            return Ok((name.to_owned(), path, linked));
+        }
         let mut chars = name.chars();
         let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase())
             && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
@@ -794,6 +811,12 @@ impl Host {
         message: &Value,
     ) -> Result<Value, Failure> {
         let (name, path, linked) = self.pattern_path(message)?;
+        if name.starts_with("include/") {
+            return Err(fail(
+                "not-editable",
+                format!("{name} is a linked project's pattern: open that project to edit it"),
+            ));
+        }
         let file = format!("{PATTERNS}/{name}.toml");
         let text = message
             .get("text")

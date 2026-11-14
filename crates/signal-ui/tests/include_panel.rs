@@ -153,6 +153,10 @@ fn an_include_s_panel_is_read_and_served() {
         ".signal-card { color: red; }\n",
     )
     .unwrap();
+    fs::create_dir_all(source.join("inc/patterns")).unwrap();
+    let beat =
+        "schema_version = 1\nkind = \"steps\"\nsteps = 16\nstep = 0.25\n\n[lanes]\nkick = \"x...x...x...x...\"\n";
+    fs::write(source.join("inc/patterns/beat.toml"), beat).unwrap();
     let mut rig = rig(
         "include-served",
         Options {
@@ -184,6 +188,22 @@ fn an_include_s_panel_is_read_and_served() {
         "error",
     );
     assert_eq!(missing["code"], "unknown-panel", "{missing}");
+    // Its patterns: read from its folder, never written here.
+    let pattern = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "pattern.read", "name": "include/inc/beat"}),
+        "pattern.read",
+    );
+    assert_eq!(pattern["exists"], true, "{pattern}");
+    assert!(pattern["text"].as_str().unwrap().contains("x...x"));
+    let refused = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "pattern.write", "name": "include/inc/beat", "text": beat, "base": pattern["base"]}),
+        "error",
+    );
+    assert_eq!(refused["code"], "not-editable", "{refused}");
     let addr = rig.host().http_addr();
     let get = |path: &str| {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
