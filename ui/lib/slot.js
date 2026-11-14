@@ -72,9 +72,11 @@ export function voicesBadge(slot) {
  * ADR 0044 §7: the slot card's voices controls' op: `slot.voices` with a
  * count (1 to 64, rounded and clamped) and the allocator's legato.
  */
-export function voicesOp(slotName, count, legato) {
+export function voicesOp(slotName, count, legato, sleep = true) {
   const n = Math.min(64, Math.max(1, Math.round(Number(count) || 1)));
-  return { op: 'slot.voices', slot: slotName, voices: legato ? { count: n, legato: true } : n };
+  // Only the keys that differ from their defaults (legato off, sleep on).
+  const table = { count: n, ...(legato ? { legato: true } : {}), ...(sleep === false ? { sleep: false } : {}) };
+  return { op: 'slot.voices', slot: slotName, voices: Object.keys(table).length > 1 ? table : n };
 }
 
 export function slotContent(slot) {
@@ -623,6 +625,16 @@ export function faultedVoices(muted, name) {
   const found = new Set();
   for (const address of muted) {
     const m = new RegExp(`^/${name}/v(\\d+)/`).exec(String(address));
+    if (m) found.add(Number(m[1]));
+  }
+  return [...found].sort((a, b) => a - b);
+}
+
+/** ADR 0044 §11: the voices of poly slot `name` that sleep, from the sleep groups' member addresses (`/pad/v3`), in order. */
+export function asleepVoices(asleep, name) {
+  const found = new Set();
+  for (const address of asleep ?? []) {
+    const m = new RegExp(`^/${name}/v(\\d+)$`).exec(String(address));
     if (m) found.add(Number(m[1]));
   }
   return [...found].sort((a, b) => a - b);

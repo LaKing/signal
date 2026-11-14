@@ -58,6 +58,7 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let mut plan = build_plan(&root, &[], registry, 0).unwrap();
     plan.version = version;

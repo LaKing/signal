@@ -102,6 +102,7 @@ fn plan(registry: &Registry, gain: Option<f64>, version: u64) -> ExecutionPlan {
         ],
         connections: vec![connection("out.l"), connection("out.r")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, version).unwrap()
 }

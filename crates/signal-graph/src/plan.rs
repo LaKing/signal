@@ -26,6 +26,10 @@ pub struct ExecutionPlan {
     /// order: byte-wise by source port address (ADR 0016 §3, §4). A parameter may
     /// have both kinds of source; [`Source::shape`] tells them apart.
     pub sources: BTreeMap<PortAddress, Vec<Source>>,
+    /// The sleep groups (ADR 0044 §11, `docs/semantics.md` §17), by members
+    /// address; validated: disjoint, each driven from outside itself.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sleep_groups: Vec<SleepGroup>,
     /// Diagnostics; none of them changes what runs.
     pub warnings: Vec<GraphWarning>,
 }
@@ -67,4 +71,27 @@ pub struct Source {
     /// The source port's shape. Into a parameter, a signal source is modulation
     /// and an event source changes the base (ADR 0016 §4).
     pub shape: PortShape,
+}
+
+/// A sleep group of the plan (ADR 0044 §11, `docs/semantics.md` §17).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SleepGroup {
+    /// Every primitive instance under this address (or at it) is a member.
+    pub members: InstanceAddress,
+    /// The driver: a signal output of an instance outside the group, which
+    /// nothing in the group reaches, so it is computed before the group.
+    pub driver: PortAddress,
+    /// The rest length *R* in frames, at least 1.
+    pub rest: u64,
+}
+
+impl SleepGroup {
+    /// Whether the instance at `address` is a member.
+    pub fn contains(&self, address: &InstanceAddress) -> bool {
+        address == &self.members
+            || address
+                .as_str()
+                .strip_prefix(self.members.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
 }

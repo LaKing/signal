@@ -125,6 +125,7 @@ fn out_of_order_emission_keeps_each_frames_order() {
         ],
         connections: vec![conn("flood.out", "r0.in"), conn("r0.out", "sink.zeta")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let plan = build_plan(&root, &[], &types(), 1).unwrap();
     let frame_by_frame = render(&plan, 300, 1);
@@ -164,6 +165,7 @@ fn dense(count: f64, fanout: usize) -> ExecutionPlan {
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &types(), 1).unwrap()
 }

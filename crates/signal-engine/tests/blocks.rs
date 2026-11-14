@@ -94,6 +94,7 @@ fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> Executi
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &types(), 1).unwrap()
 }

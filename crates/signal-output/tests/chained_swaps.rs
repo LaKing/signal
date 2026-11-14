@@ -70,6 +70,7 @@ fn plan(freq: Option<f64>, tone: bool, version: u64) -> ExecutionPlan {
                 }],
                 ..Exports::default()
             },
+            sleep: Vec::new(),
         });
     }
     let root = CompositeDef {
@@ -77,6 +78,7 @@ fn plan(freq: Option<f64>, tone: bool, version: u64) -> ExecutionPlan {
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let mut plan = build_plan(&root, &defs, &registry(), 0).unwrap();
     plan.version = version;

@@ -272,6 +272,10 @@ impl<A: ControlSink, B: ControlSink> ControlSink for Both<'_, A, B> {
         self.0.parameter(port, value);
         self.1.parameter(port, value);
     }
+    fn sleep(&mut self, members: &signal_core::InstanceAddress, asleep: bool) {
+        self.0.sleep(members, asleep);
+        self.1.sleep(members, asleep);
+    }
     fn status(&mut self, status: &RunnerStatus) {
         self.0.status(status);
         self.1.status(status);

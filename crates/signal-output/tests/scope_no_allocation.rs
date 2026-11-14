@@ -57,6 +57,7 @@ fn runner_process_with_scopes_allocates_and_frees_nothing() {
             connection("a.out", "out.r"),
         ],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let plan = build_plan(&root, &[], &registry, 0).unwrap();
     let mut config = RealtimeConfig::new(RATE, 1);

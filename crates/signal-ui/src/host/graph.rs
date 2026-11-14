@@ -184,6 +184,12 @@ impl Host {
                 .as_ref()
                 .map(|run| run.muted.iter().map(|m| m.address.clone()).collect::<Vec<_>>())
                 .unwrap_or_default(),
+            // ADR 0044 §11 (additive): the sleep groups asleep now.
+            "asleep": self
+                .run
+                .as_ref()
+                .map(|run| run.asleep.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
             "unsaved": self.unsaved_json(),
             // ADR 0035 §8, ADR 0037 §7: includes (with their rate notes)
             // and slots; null without either.

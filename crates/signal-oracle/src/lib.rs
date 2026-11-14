@@ -41,6 +41,31 @@ pub struct Graph {
     pub instances: Vec<Instance>,
     /// Every connection, from an output port to an input port or parameter.
     pub connections: Vec<Connection>,
+    /// Its sleep groups (`docs/semantics.md` §17).
+    pub sleep: Vec<Sleep>,
+}
+
+/// A sleep group (`docs/semantics.md` §17): every instance under `members`,
+/// woken by `driver` at 0.5 or more, falling asleep at multiples of `rest`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sleep {
+    /// The members' address prefix.
+    pub members: InstanceAddress,
+    /// A signal output outside the group.
+    pub driver: PortAddress,
+    /// *R*, in frames.
+    pub rest: u64,
+}
+
+impl Sleep {
+    /// Whether `address` is a member.
+    pub fn contains(&self, address: &InstanceAddress) -> bool {
+        address == &self.members
+            || address
+                .as_str()
+                .strip_prefix(self.members.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
 }
 
 /// A primitive instance.

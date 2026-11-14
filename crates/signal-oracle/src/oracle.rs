@@ -137,6 +137,32 @@ enum Mode {
     Running,
     Suspended,
     Muted,
+    /// Its sleep group is asleep (§17).
+    Asleep,
+}
+
+/// One step of phase 3: a direct instance, or a sleep group's decision
+/// (§17), after its driver and every outside source of its members and
+/// before its members and their outside readers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Direct(usize),
+    Group(usize),
+}
+
+/// A sleep group of the plan (§17) and its state.
+struct Group {
+    /// Members prefix, driver and *R*: a swap keeps a group's state by them.
+    key: (InstanceAddress, PortAddress, u64),
+    members: Vec<usize>,
+    /// The driver's output.
+    driver: usize,
+    rest: u64,
+    /// The members' outputs an instance outside reads.
+    boundary: Vec<usize>,
+    asleep: bool,
+    /// Quiet frames up to the last one.
+    quiet: u64,
 }
 
 /// The suspension fade of an instance's `audio` outputs (§6).
@@ -305,6 +331,10 @@ struct Inst {
     /// Per descriptor port: whether a swap since its last call changed its
     /// sources (ADR 0037 §6); handed to its next call, then cleared.
     sources_changed: Vec<bool>,
+    /// Its sleep group (§17), if any.
+    group: Option<usize>,
+    /// Being gathered while its group is asleep.
+    asleep: bool,
 }
 
 impl Inst {
@@ -318,6 +348,8 @@ impl Inst {
             Mode::Muted
         } else if self.suspended {
             Mode::Suspended
+        } else if self.asleep {
+            Mode::Asleep
         } else {
             Mode::Running
         }
@@ -344,8 +376,12 @@ impl Inst {
 struct Plan {
     /// In address order.
     instances: Vec<Inst>,
-    /// Direct instances in an order that runs each source first.
-    order: Vec<usize>,
+    /// Phase 3's steps: direct instances in an order that runs each source
+    /// first, and the sleep groups' decisions.
+    order: Vec<Step>,
+    groups: Vec<Group>,
+    /// Per output: a sleep group's boundary output (§17).
+    boundary: Vec<bool>,
     /// State-output instances.
     state_outputs: Vec<usize>,
     /// Every signal output's value as readers see it: of this frame once its
@@ -384,6 +420,8 @@ impl Plan {
         let mut plan = Plan {
             instances: Vec::new(),
             order: Vec::new(),
+            groups: Vec::new(),
+            boundary: Vec::new(),
             state_outputs: Vec::new(),
             outputs: Vec::new(),
             output_ports: Vec::new(),
@@ -473,6 +511,8 @@ impl Plan {
                 row_ports: Vec::new(),
                 connected: vec![false; descriptor.ports.len()],
                 sources_changed: vec![false; descriptor.ports.len()],
+                group: None,
+                asleep: false,
             };
             for port in descriptor.ports {
                 let address = port_address(&spec.address, port.name)?;
@@ -597,6 +637,7 @@ impl Plan {
                 }
             }
         }
+        plan.sleep_groups(graph, old.as_ref())?;
         plan.order = plan.direct_order()?;
         if let Some(old) = &old {
             plan.hold_modulation(old, &survivors);
@@ -686,47 +727,154 @@ impl Plan {
         Ok(())
     }
 
-    /// The direct instances, each after the direct instances it reads (a
-    /// state-output source's output is known before the frame, §2); ties by
-    /// address. The order changes nothing (§2), so any valid one will do.
-    fn direct_order(&self) -> Result<Vec<usize>, OracleError> {
+    /// The sleep groups of `graph` (§17): members, driver, boundary
+    /// outputs; a group in `old` with the same members, driver and *R*
+    /// keeps its state.
+    fn sleep_groups(&mut self, graph: &Graph, old: Option<&Plan>) -> Result<(), OracleError> {
+        for sleep in &graph.sleep {
+            let members: Vec<usize> = (0..self.instances.len())
+                .filter(|&i| sleep.contains(&self.instances[i].address))
+                .collect();
+            let Some(driver) = self.output_ports.iter().position(|p| *p == sleep.driver) else {
+                return error(format!(
+                    "sleep group driver {} is no signal output",
+                    sleep.driver
+                ));
+            };
+            if members.is_empty() || members.contains(&self.output_owner[driver]) || sleep.rest == 0
+            {
+                return error(format!("invalid sleep group {}", sleep.members));
+            }
+            let g = self.groups.len();
+            for &m in &members {
+                if self.instances[m].group.is_some() {
+                    return error(format!("overlapping sleep group {}", sleep.members));
+                }
+                self.instances[m].group = Some(g);
+            }
+            let mut boundary = Vec::new();
+            for inst in &self.instances {
+                if inst.group == Some(g) {
+                    continue;
+                }
+                let read = inst
+                    .signal_sources
+                    .iter()
+                    .flatten()
+                    .chain(inst.params.iter().flat_map(|p| &p.modulation));
+                for &(o, _) in read {
+                    if members.contains(&self.output_owner[o]) && !boundary.contains(&o) {
+                        boundary.push(o);
+                    }
+                }
+            }
+            let key = (sleep.members.clone(), sleep.driver.clone(), sleep.rest);
+            let kept = old.and_then(|old| old.groups.iter().find(|g| g.key == key));
+            self.groups.push(Group {
+                key,
+                members,
+                driver,
+                rest: sleep.rest,
+                boundary,
+                asleep: kept.is_some_and(|k| k.asleep),
+                quiet: kept.map_or(0, |k| k.quiet),
+            });
+        }
+        self.boundary = vec![false; self.outputs.len()];
+        for group in &self.groups {
+            for &o in &group.boundary {
+                self.boundary[o] = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Instance `i`'s sources: the instances whose outputs or events it
+    /// reads.
+    fn sources_of(&self, i: usize) -> Vec<usize> {
+        let inst = &self.instances[i];
+        let signals = inst
+            .signal_sources
+            .iter()
+            .flatten()
+            .chain(inst.params.iter().flat_map(|p| &p.modulation))
+            .map(|&(o, _)| self.output_owner[o]);
+        let events = inst
+            .event_inputs
+            .iter()
+            .flat_map(|e| &e.sources)
+            .chain(inst.params.iter().flat_map(|p| &p.events))
+            .map(|&(e, _)| self.event_owner[e]);
+        signals.chain(events).collect()
+    }
+
+    /// Phase 3's steps: the direct instances, each after the direct
+    /// instances it reads (a state-output source's output is known before
+    /// the frame, §2), and each sleep group's decision after its driver and
+    /// the direct outside sources of its members, before its direct members
+    /// and the direct instances outside that read a member (§17); ties by
+    /// address, groups after instances. The order changes nothing (§2), so
+    /// any valid one will do.
+    fn direct_order(&self) -> Result<Vec<Step>, OracleError> {
         let n = self.instances.len();
         let direct: Vec<bool> = self
             .instances
             .iter()
             .map(|i| i.descriptor.feedthrough == Feedthrough::Direct)
             .collect();
-        // reads[i]: the direct instances i reads.
-        let mut reads: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, inst) in self.instances.iter().enumerate() {
-            let signals = inst
-                .signal_sources
-                .iter()
-                .flatten()
-                .chain(inst.params.iter().flat_map(|p| &p.modulation))
-                .map(|&(o, _)| self.output_owner[o]);
-            let events = inst
-                .event_inputs
-                .iter()
-                .flat_map(|e| &e.sources)
-                .chain(inst.params.iter().flat_map(|p| &p.events))
-                .map(|&(e, _)| self.event_owner[e]);
-            for source in signals.chain(events) {
-                if direct[source] {
-                    reads[i].push(source);
+        let sources: Vec<Vec<usize>> = (0..n).map(|i| self.sources_of(i)).collect();
+        // before[i]: the direct instances i runs after; after_group[i]: the
+        // groups it runs after.
+        let mut before: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut after_group: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut group_before: Vec<Vec<usize>> = vec![Vec::new(); self.groups.len()];
+        for i in 0..n {
+            let group = self.instances[i].group;
+            if let Some(g) = group {
+                after_group[i].push(g);
+            }
+            for &s in &sources[i] {
+                if direct[s] {
+                    before[i].push(s);
+                }
+                match (group, self.instances[s].group) {
+                    // An outside source of a member runs before its group.
+                    (Some(g), sg) if sg != Some(g) && direct[s] => group_before[g].push(s),
+                    // An outside reader of a member runs after its group.
+                    (rg, Some(g)) if rg != Some(g) => after_group[i].push(g),
+                    _ => {}
                 }
             }
         }
+        for (g, group) in self.groups.iter().enumerate() {
+            let owner = self.output_owner[group.driver];
+            if direct[owner] {
+                group_before[g].push(owner);
+            }
+        }
         let mut done = vec![false; n];
+        let mut group_done = vec![false; self.groups.len()];
         let mut order = Vec::new();
-        while order.len() < direct.iter().filter(|&&d| d).count() {
-            let next = (0..n)
-                .find(|&i| direct[i] && !done[i] && reads[i].iter().all(|&s| done[s] && s != i));
-            let Some(i) = next else {
+        let total = direct.iter().filter(|&&d| d).count() + self.groups.len();
+        while order.len() < total {
+            let instance = (0..n).find(|&i| {
+                direct[i]
+                    && !done[i]
+                    && before[i].iter().all(|&s| done[s] && s != i)
+                    && after_group[i].iter().all(|&g| group_done[g])
+            });
+            if let Some(i) = instance {
+                done[i] = true;
+                order.push(Step::Direct(i));
+                continue;
+            }
+            let group = (0..self.groups.len())
+                .find(|&g| !group_done[g] && group_before[g].iter().all(|&s| done[s]));
+            let Some(g) = group else {
                 return error("a cycle without a state-output instance".to_owned());
             };
-            done[i] = true;
-            order.push(i);
+            group_done[g] = true;
+            order.push(Step::Group(g));
         }
         Ok(order)
     }
@@ -816,7 +964,7 @@ impl Plan {
         }
     }
 
-    /// Phases 2–4 of frame `n` (§2).
+    /// Phases 2–4 of frame `n` (§2), with the sleep groups' rule (§17).
     fn frame(
         &mut self,
         n: u64,
@@ -828,17 +976,113 @@ impl Plan {
         for events in &mut self.emitted {
             events.clear();
         }
+        // §17: an awake group falls asleep at a multiple of R after R quiet
+        // frames.
+        for group in &mut self.groups {
+            if !group.asleep && n.is_multiple_of(group.rest) && group.quiet >= group.rest {
+                group.asleep = true;
+            }
+        }
+        let asleep = |plan: &Plan, i: usize| {
+            plan.instances[i]
+                .group
+                .is_some_and(|g| plan.groups[g].asleep)
+        };
+        // An asleep group's state-output members emit at its decision, if
+        // it wakes.
         for k in 0..self.state_outputs.len() {
             let i = self.state_outputs[k];
-            self.emit(i, n, records);
+            if !asleep(self, i) {
+                self.emit(i, n, records);
+            }
         }
         for k in 0..self.order.len() {
-            let i = self.order[k];
-            self.process(i, n, externals, records);
+            match self.order[k] {
+                Step::Direct(i) if asleep(self, i) => {}
+                Step::Direct(i) => self.process(i, n, externals, records),
+                Step::Group(g) if self.groups[g].asleep => {
+                    if self.wakes(g, n, externals) {
+                        self.groups[g].asleep = false;
+                        self.groups[g].quiet = 0;
+                        for m in self.groups[g].members.clone() {
+                            if self.instances[m].descriptor.feedthrough == Feedthrough::StateOutput
+                            {
+                                self.emit(m, n, records);
+                            }
+                        }
+                    } else {
+                        for m in self.groups[g].members.clone() {
+                            self.sleep(m, n, externals, records);
+                        }
+                    }
+                }
+                Step::Group(_) => {}
+            }
         }
         for k in 0..self.state_outputs.len() {
             let i = self.state_outputs[k];
-            self.absorb(i, n, externals, records);
+            if !asleep(self, i) {
+                self.absorb(i, n, externals, records);
+            }
+        }
+        for g in 0..self.groups.len() {
+            if !self.groups[g].asleep {
+                let loud = self.loud(g, externals, true);
+                let group = &mut self.groups[g];
+                group.quiet = if loud {
+                    0
+                } else {
+                    group.quiet.saturating_add(1)
+                };
+            }
+        }
+    }
+
+    /// Whether asleep group `g` wakes at this frame: its driver is 0.5 or
+    /// more, or an event reaches a member's event input (§17).
+    fn wakes(&self, g: usize, _n: u64, externals: &[&ExternalEvent]) -> bool {
+        self.loud(g, externals, false)
+    }
+
+    /// Whether group `g`'s frame is not quiet: its driver at 0.5 or more,
+    /// an event reaching a member's event input, or (with `boundary`, once
+    /// the frame has run) a boundary output not exactly zero (§17).
+    fn loud(&self, g: usize, externals: &[&ExternalEvent], boundary: bool) -> bool {
+        let group = &self.groups[g];
+        if self.outputs[group.driver] >= 0.5 {
+            return true;
+        }
+        if boundary && group.boundary.iter().any(|&o| self.outputs[o] != 0.0) {
+            return true;
+        }
+        group.members.iter().any(|&m| {
+            self.instances[m].event_inputs.iter().any(|input| {
+                externals.iter().any(|e| e.target == input.port)
+                    || input
+                        .sources
+                        .iter()
+                        .any(|&(e, _)| !self.emitted[e].is_empty())
+            })
+        })
+    }
+
+    /// Member `i`'s frame `n` while its group is asleep (§17): not called;
+    /// its parameters keep time; its boundary outputs read exactly +0.0 and
+    /// the others hold; suspended or muted, it fades as it would awake.
+    fn sleep(&mut self, i: usize, n: u64, externals: &[&ExternalEvent], records: &mut Vec<Record>) {
+        self.instances[i].asleep = true;
+        let mode = self.gather(i, n, externals, records);
+        self.instances[i].asleep = false;
+        match mode {
+            Mode::Asleep | Mode::Running => {
+                for &o in &self.instances[i].outputs {
+                    if self.boundary[o] {
+                        self.outputs[o] = 0.0;
+                    }
+                }
+            }
+            Mode::Suspended => self.fade_suspended(i),
+            Mode::Muted => self.fade_muted(i),
         }
     }
 
@@ -884,7 +1128,7 @@ impl Plan {
                             source,
                         }
                     }
-                    Mode::Suspended | Mode::Muted => {
+                    Mode::Suspended | Mode::Muted | Mode::Asleep => {
                         discards += 1;
                         Record::Discard {
                             frame,
@@ -904,7 +1148,8 @@ impl Plan {
         }
 
         for param in &mut inst.params {
-            if mode == Mode::Running {
+            // Asleep, parameters keep time (§17).
+            if matches!(mode, Mode::Running | Mode::Asleep) {
                 param.base.advance();
             }
             let mut arrivals: Vec<(EventPayload, Source)> = externals
@@ -1026,7 +1271,7 @@ impl Plan {
                 inst.sources_changed.fill(false);
                 self.commit(i, n, ok, &outputs, records);
             }
-            Mode::Suspended => self.fade_suspended(i),
+            Mode::Suspended | Mode::Asleep => self.fade_suspended(i),
             Mode::Muted => self.fade_muted(i),
         }
     }
@@ -1053,7 +1298,7 @@ impl Plan {
                 };
                 self.commit(i, n, ok, &outputs, records);
             }
-            Mode::Suspended => self.fade_suspended(i),
+            Mode::Suspended | Mode::Asleep => self.fade_suspended(i),
             Mode::Muted => self.fade_muted(i),
         }
     }
@@ -1287,6 +1532,7 @@ pub(crate) fn with_converters(registry: &Registry, graph: &Graph) -> Result<Grap
         version: graph.version,
         instances: graph.instances.clone(),
         connections: Vec::new(),
+        sleep: graph.sleep.clone(),
     };
     let mut made: Vec<(PortAddress, u32)> = Vec::new();
     for c in &graph.connections {

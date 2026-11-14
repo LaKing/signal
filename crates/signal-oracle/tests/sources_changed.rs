@@ -170,6 +170,7 @@ fn plan(source: &str, version: u64) -> ExecutionPlan {
             wire("sum.out", "out.r", 1.0),
         ],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let mut plan = build_plan(&root, &[], &registry(), 0).unwrap();
     plan.version = version;

@@ -31,7 +31,7 @@ import { browserEntries } from '../lib/module-browser.js';
 import { generationOf, named } from '../lib/opening.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
 import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
-import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp, voicesOp } from '../lib/slot.js';
+import { asleepVoices, cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp, voicesOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { layOutCards } from './plate.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
@@ -63,6 +63,7 @@ export class SignalSlot extends SignalElement {
 .voice-row { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; margin: 4px 0; font-size: 10px; color: var(--signal-muted, #8a93a3); }
 .voice-row > i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--signal-muted, #8a93a3); box-sizing: border-box; }
 .voice-row > i.on { background: var(--signal-accent, #4fb3ff); border-color: var(--signal-accent, #4fb3ff); }
+.voice-row > i.asleep { opacity: 0.35; border-style: dotted; }
 .voice-row > i.fault { border-color: var(--signal-danger, #e5534b); box-shadow: 0 0 0 1px var(--signal-danger, #e5534b); }
 .voice-row { cursor: pointer; }
 .voice-levels { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 10px; color: var(--signal-muted, #8a93a3); }
@@ -122,7 +123,7 @@ ${BROWSER_CSS}`;
     return `<div class="card" part="card">
   <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
   <div class="state" role="status"></div>
-  <div class="voices-line"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><div class="voice-row" hidden title="The voices, lit while each sounds; click for their levels"></div></div>
+  <div class="voices-line"><span class="slot-voices" hidden><label title="The slot's voices (ADR 0044): each a copy of its content">voices <input type="number" class="voice-count" min="1" max="64" step="1"></label><label title="The allocator's legato: a new note on a sounding voice keeps its gate high"><input type="checkbox" class="voice-legato"> legato</label></span><div class="voice-row" hidden title="The voices, lit while each sounds, faint while asleep (not computed); click for their levels"></div></div>
   <div class="voice-levels" hidden></div>
   <ul class="ports"></ul>
   <div class="params"></div>
@@ -201,7 +202,7 @@ ${BROWSER_CSS}`;
     this.$('.unload').addEventListener('click', () => this.write([unloadOp(this.slotName)], 'Unloading…'));
     this.$('.levels').addEventListener('click', () => this.setLevels(!this.levels));
     // ADR 0044 §7: the voices stepper and the legato switch write `voices`.
-    const writeVoices = () => this.write([voicesOp(this.slotName, this.$('.voice-count').value, this.$('.voice-legato').checked)], 'Setting the voices…');
+    const writeVoices = () => this.write([voicesOp(this.slotName, this.$('.voice-count').value, this.$('.voice-legato').checked, this.card?.voices?.sleep)], 'Setting the voices…');
     this.$('.voice-count').addEventListener('change', writeVoices);
     this.$('.voice-legato').addEventListener('change', writeVoices);
     // ADR 0044 §7: the voice row opened shows the first voices' levels.
@@ -631,6 +632,14 @@ ${BROWSER_CSS}`;
       return dot;
     });
     row.replaceChildren(...dots);
+    // ADR 0044 §11: an asleep voice (not computed) is faint, from the
+    // host's `sleep` pushes (and `describe.asleep` until the first).
+    const mark = (asleep) => {
+      const sleeping = new Set(asleepVoices(asleep, card.name));
+      dots.forEach((dot, e) => dot.classList.toggle('asleep', sleeping.has(e)));
+    };
+    if (count) mark(connection?.description?.asleep);
+    if (count && connection?.on) this.sleepStop = connection.on('sleep', (message) => mark(message?.asleep));
     const levels = this.$('.voice-levels');
     const shown = this.voiceLevels ? Math.min(count, VOICE_LEVELS) : 0;
     levels.hidden = !shown;
@@ -671,6 +680,8 @@ ${BROWSER_CSS}`;
   stopVoices() {
     this.voiceStop?.();
     this.voiceStop = null;
+    this.sleepStop?.();
+    this.sleepStop = null;
     for (const stop of (this.voiceLevelStops ?? []).splice(0)) stop?.();
   }
 }

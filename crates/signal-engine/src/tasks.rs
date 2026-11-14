@@ -118,23 +118,33 @@ impl Tasks {
     }
 }
 
-/// The members of `unit`, and whether each runs one frame per call.
-fn members<'a>(units: &'a Units, unit: &'a Unit) -> impl Iterator<Item = (usize, bool)> + 'a {
-    let (single, cycle) = match unit {
-        Unit::Direct(i) => (Some((*i, false)), 0..0),
-        Unit::State(i) => (Some((*i, true)), 0..0),
+/// The members of `unit`, and whether each runs one frame per call; a
+/// sleep group's, through its own units.
+fn members(units: &Units, unit: &Unit) -> Vec<(usize, bool)> {
+    let cycle = |range: Span<usize>| {
+        units
+            .members
+            .get(range)
+            .unwrap_or(&[])
+            .iter()
+            .map(|&i| (i, true))
+            .collect::<Vec<_>>()
+    };
+    match unit {
+        Unit::Direct(i) => vec![(*i, false)],
+        Unit::State(i) => vec![(*i, true)],
         Unit::Cycle {
             state_outputs,
             direct,
-        } => (None, state_outputs.start..direct.end),
-    };
-    let cycle = units
-        .members
-        .get(cycle)
-        .unwrap_or(&[])
-        .iter()
-        .map(|&i| (i, true));
-    single.into_iter().chain(cycle)
+        } => cycle(state_outputs.start..direct.end),
+        Unit::Group { inner, .. } => units
+            .inner
+            .get(inner.clone())
+            .unwrap_or(&[])
+            .iter()
+            .flat_map(|u| members(units, u))
+            .collect(),
+    }
 }
 
 /// Groups the units of a plan of `instances` instances into tasks; `cost_ns`
@@ -153,6 +163,7 @@ pub(crate) fn tasks(
 ) -> Tasks {
     let unit_cost = |unit: &Unit| -> f64 {
         members(units, unit)
+            .into_iter()
             .map(|(i, per_call)| {
                 let cost = cost_ns
                     .get(i)

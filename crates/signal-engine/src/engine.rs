@@ -14,7 +14,7 @@ use std::fmt;
 use std::mem;
 use std::ops::Range as Span;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use signal_core::{
@@ -42,7 +42,7 @@ use crate::shared::{Armed, HookPoint, Refuse};
 use crate::sink::Sink;
 use crate::source::Source;
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
-use crate::units::{Unit, Units, units};
+use crate::units::{GroupSpec, Unit, Units, grouped};
 use crate::wake::{MakeWaiter, RtPolicy, WakeStats};
 
 /// Events an event output keeps per frame: the contract suite's 16 events per
@@ -420,6 +420,9 @@ enum Mode {
     Running,
     Suspended,
     Muted,
+    /// Its sleep group is asleep (ADR 0044 §11, `docs/semantics.md` §17):
+    /// not called, its time stopped, its parameters keeping time.
+    Asleep,
 }
 
 /// An instance: its feedthrough class, its buffer ranges and its state.
@@ -485,6 +488,11 @@ pub(crate) struct Slot {
     sources_changed: Vec<bool>,
     /// A swap changed some port's sources since its last call.
     fresh: bool,
+    /// Its sleep group (ADR 0044 §11), if it is a member of one.
+    group: Option<usize>,
+    /// Its sleep group is asleep for the frames being run: set by the
+    /// group's unit before each of its sub-blocks (ADR 0044 §11).
+    asleep: bool,
 }
 
 impl Slot {
@@ -493,10 +501,41 @@ impl Slot {
             Mode::Muted
         } else if self.suspended {
             Mode::Suspended
+        } else if self.asleep {
+            Mode::Asleep
         } else {
             Mode::Running
         }
     }
+}
+
+/// A sleep group of a running plan (ADR 0044 §11, `docs/semantics.md`
+/// §17): what its unit reads. Domain-free: frames, ports and exact zero.
+#[derive(Debug)]
+pub(crate) struct Group {
+    /// Its members address, driver and rest length: a swap keeps the state
+    /// of a group with the same three.
+    key: (InstanceAddress, PortAddress, u64),
+    /// Its members.
+    members: Vec<usize>,
+    /// The driver's output row.
+    driver: usize,
+    /// The rest length *R* in frames, at least 1.
+    rest: u64,
+    /// Its boundary outputs, the rows read outside it: (member, row).
+    boundary: Vec<(usize, usize)>,
+    /// Its members' event inputs: the target, and its sources with the
+    /// instance that owns each, in canonical order.
+    inputs: Vec<(PortId, Vec<(usize, EventSource)>)>,
+}
+
+/// A sleep group's state between blocks: written only by the task running
+/// its unit, and by the engine between blocks (a swap).
+#[derive(Debug, Default)]
+pub(crate) struct GroupState {
+    asleep: AtomicBool,
+    /// Its quiet frames, up to the last frame run, saturating.
+    quiet: AtomicU64,
 }
 
 /// An event source port of an input, with its number of connections to that
@@ -695,6 +734,15 @@ pub(crate) struct PlanState {
     units: Units,
     /// The units grouped into tasks for the workers (ADR 0019 §2).
     tasks: Tasks,
+    /// The sleep groups (ADR 0044 §11) and their states, by group.
+    groups: Vec<Group>,
+    group_states: Vec<GroupState>,
+    /// For a swap's new plan: its groups in the old plan as well, (new,
+    /// old), whose state moves at the commit.
+    kept_groups: Vec<(usize, usize)>,
+    /// Per signal output row: a sleep group's boundary output, which reads
+    /// exactly +0.0 while the group is asleep (the others hold).
+    boundary: Vec<bool>,
     last_edit: Vec<Option<(EditKind, Frame)>>,
 
     /// The block capacity *K*: the stride of every per-frame buffer.
@@ -1043,6 +1091,8 @@ impl PlanState {
                 // Set below for a survivor, against the old plan.
                 sources_changed: vec![false; descriptor.ports.len()],
                 fresh: false,
+                group: None,
+                asleep: false,
             });
             primitives.push(primitive);
             types.push(kind);
@@ -1179,7 +1229,48 @@ impl PlanState {
             .iter()
             .map(|s| s.feedthrough == Feedthrough::Direct)
             .collect();
-        let units = units(slots.len(), &edges, &position, &direct);
+        let (groups, specs) = sleep_groups(
+            plan,
+            &slots,
+            (&roles, &ports),
+            &signal_sources,
+            &params,
+            &event_inputs,
+        )?;
+        for (g, group) in groups.iter().enumerate() {
+            for &m in &group.members {
+                if let Some(slot) = slots.get_mut(m) {
+                    slot.group = Some(g);
+                }
+            }
+        }
+        let Some(units) = grouped(slots.len(), &edges, &position, &direct, &specs) else {
+            return Err(groups.first().map_or(EngineError::InvalidSchedule, |g| {
+                EngineError::InvalidSleepGroup {
+                    members: g.key.0.clone(),
+                }
+            }));
+        };
+        let mut boundary = vec![false; output_audio.len()];
+        for group in &groups {
+            for &(_, o) in &group.boundary {
+                if let Some(flag) = boundary.get_mut(o) {
+                    *flag = true;
+                }
+            }
+        }
+        // Every group starts awake; one in both plans keeps its state at the
+        // commit (§17 "Swaps").
+        let group_states: Vec<GroupState> = groups.iter().map(|_| GroupState::default()).collect();
+        let kept_groups: Vec<(usize, usize)> = old.map_or_else(Vec::new, |old| {
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(n, group)| {
+                    Some((n, old.groups.iter().position(|g| g.key == group.key)?))
+                })
+                .collect()
+        });
 
         // Buffer bounds, over any K consecutive frames (K the block capacity).
         // X(t): the most up-front externals stamped for target t of this plan;
@@ -1382,6 +1473,10 @@ impl PlanState {
             roles,
             units,
             tasks,
+            groups,
+            group_states,
+            kept_groups,
+            boundary,
             capacity,
             signal_in: vec![0.0; signal_inputs],
             external: vec![0.0; external_rows * capacity],
@@ -1510,6 +1605,11 @@ impl PlanState {
 
     /// The id and role of `port`.
     /// The address of parameter `j` (in [`Engine::parameter_at`] order).
+    /// Sleep group `g`'s members address.
+    pub(crate) fn group_members(&self, g: usize) -> Option<&InstanceAddress> {
+        self.groups.get(g).map(|group| &group.key.0)
+    }
+
     pub(crate) fn parameter_port(&self, j: usize) -> Option<&PortAddress> {
         self.ports.get(self.cells.params.get().get(j)?.port.0)
     }
@@ -1591,6 +1691,104 @@ impl PlanState {
 /// `n`: its primitive (moved), suspension, fade and fault state, outputs as
 /// readers see them, held values, event sinks and parameter bases with their
 /// ramps. Both have the same descriptor, so their ranges have equal lengths.
+/// Every port's role (by [`PortId`]) and the ports, in address order.
+type Roles<'a> = (&'a [Option<(usize, Role)>], &'a [PortAddress]);
+
+/// The plan's sleep groups (ADR 0044 §11) as the engine runs them, and as
+/// [`grouped`] condenses them: each group's members (every instance under
+/// its address), its driver's output row and instance, its boundary
+/// outputs (member rows an instance outside reads, as a signal or as
+/// modulation) and its members' event inputs with their sources.
+fn sleep_groups(
+    plan: &ExecutionPlan,
+    slots: &[Slot],
+    (roles, ports): Roles<'_>,
+    signal_sources: &[Vec<(usize, f64)>],
+    params: &[Param],
+    event_inputs: &[EventInput],
+) -> Result<(Vec<Group>, Vec<GroupSpec>), EngineError> {
+    let mut groups = Vec::with_capacity(plan.sleep_groups.len());
+    let mut specs = Vec::with_capacity(plan.sleep_groups.len());
+    let output_owner = |o: usize| slots.iter().position(|s| s.signal_out.contains(&o));
+    let sink_owner = |k: usize| slots.iter().position(|s| s.event_out.contains(&k));
+    for declared in &plan.sleep_groups {
+        let invalid = || EngineError::InvalidSleepGroup {
+            members: declared.members.clone(),
+        };
+        let members: Vec<usize> = plan
+            .instances
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| declared.contains(&i.address))
+            .map(|(m, _)| m)
+            .collect();
+        let id = ports
+            .binary_search(&declared.driver)
+            .map_err(|_| invalid())?;
+        let Some(Some((driver_instance, Role::SignalOut(driver)))) = roles.get(id).copied() else {
+            return Err(invalid());
+        };
+        if members.is_empty() || members.contains(&driver_instance) || declared.rest == 0 {
+            return Err(invalid());
+        }
+        let member = |i: Option<usize>| i.is_some_and(|i| members.binary_search(&i).is_ok());
+        let mut boundary = BTreeSet::new();
+        for (i, slot) in slots.iter().enumerate() {
+            if member(Some(i)) {
+                continue;
+            }
+            let read = slot
+                .signal_in
+                .clone()
+                .flat_map(|k| signal_sources.get(k).into_iter().flatten())
+                .map(|&(o, _)| o)
+                .chain(
+                    params
+                        .get(slot.params.clone())
+                        .unwrap_or(&[])
+                        .iter()
+                        .flat_map(|p| p.modulation.iter().map(|&(o, _)| o)),
+                );
+            for o in read {
+                if let Some(owner) = output_owner(o).filter(|&m| member(Some(m))) {
+                    boundary.insert((owner, o));
+                }
+            }
+        }
+        let mut inputs = Vec::new();
+        for &m in &members {
+            let Some(slot) = slots.get(m) else {
+                continue;
+            };
+            for input in event_inputs.get(slot.event_in.clone()).unwrap_or(&[]) {
+                let sources = input
+                    .sources
+                    .iter()
+                    .map(|s| (sink_owner(s.sink).unwrap_or(usize::MAX), *s))
+                    .collect();
+                inputs.push((input.port, sources));
+            }
+        }
+        specs.push(GroupSpec {
+            members: members.clone(),
+            driver: driver_instance,
+        });
+        groups.push(Group {
+            key: (
+                declared.members.clone(),
+                declared.driver.clone(),
+                declared.rest,
+            ),
+            members,
+            driver,
+            rest: declared.rest,
+            boundary: boundary.into_iter().collect(),
+            inputs,
+        });
+    }
+    Ok((groups, specs))
+}
+
 fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
     let (nc, oc) = (&mut new.cells, &mut old.cells);
     if let (Some(a), Some(b)) = (
@@ -2326,6 +2524,14 @@ impl Engine {
         for &(n, o) in &swap.survivors {
             move_instance(new, old, n, o);
         }
+        for &(n, o) in &new.kept_groups {
+            if let (Some(to), Some(from)) = (new.group_states.get(n), old.group_states.get(o)) {
+                let asleep = from.asleep.load(Ordering::Relaxed);
+                to.asleep.store(asleep, Ordering::Relaxed);
+                to.quiet
+                    .store(from.quiet.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
         let new_params = new.cells.params.get_mut();
         let old_params = old.cells.params.get();
         for hold in &swap.holds {
@@ -2638,6 +2844,9 @@ impl Engine {
         let plan = &mut self.plan;
         let fx = Fixed {
             units: &plan.units,
+            groups: &plan.groups,
+            group_states: &plan.group_states,
+            boundary: &plan.boundary,
             external: &plan.external,
             capacity: plan.capacity,
             signal_sources: &plan.signal_sources,
@@ -3168,6 +3377,40 @@ impl Engine {
         self.slot(instance).map(|s| s.suspended)
     }
 
+    /// Whether the sleep group whose members are under `members` is asleep
+    /// after the last block (ADR 0044 §11); `None` when the running plan
+    /// has no such group.
+    pub fn is_asleep(&self, members: &InstanceAddress) -> Option<bool> {
+        let g = self.plan.groups.iter().position(|g| &g.key.0 == members)?;
+        self.plan
+            .group_states
+            .get(g)
+            .map(|s| s.asleep.load(Ordering::Relaxed))
+    }
+
+    /// The sleep groups of the running plan, by members address, and
+    /// whether each is asleep after the last block (ADR 0044 §11).
+    pub fn sleep_states(&self) -> impl Iterator<Item = (&InstanceAddress, bool)> {
+        self.plan
+            .groups
+            .iter()
+            .zip(&self.plan.group_states)
+            .map(|(g, s)| (&g.key.0, s.asleep.load(Ordering::Relaxed)))
+    }
+
+    /// The running plan's number of sleep groups.
+    pub(crate) fn sleep_group_count(&self) -> usize {
+        self.plan.groups.len()
+    }
+
+    /// Whether sleep group `g` is asleep after the last block.
+    pub(crate) fn sleep_group_at(&self, g: usize) -> Option<bool> {
+        self.plan
+            .group_states
+            .get(g)
+            .map(|s| s.asleep.load(Ordering::Relaxed))
+    }
+
     /// Whether the fault guard muted `instance`.
     pub fn is_muted(&self, instance: &InstanceAddress) -> Option<bool> {
         self.slot(instance).map(|s| s.fault.is_some())
@@ -3366,6 +3609,10 @@ impl Engine {
 #[derive(Clone, Copy)]
 struct Fixed<'x> {
     units: &'x Units,
+    /// The sleep groups, their states and the boundary rows (ADR 0044 §11).
+    groups: &'x [Group],
+    group_states: &'x [GroupState],
+    boundary: &'x [bool],
     /// The sources' external rows (ADR 0038 §7) and their stride, the
     /// block capacity.
     external: &'x [f64],
@@ -3401,13 +3648,19 @@ impl Fixed<'_> {
 }
 
 /// Unit `u` of the plan over the segment's frames: an acyclic direct
-/// instance in one call, a state-output instance and a cycle frame by frame.
+/// instance in one call, a state-output instance and a cycle frame by frame,
+/// a sleep group in sub-blocks ([`run_group`]).
 fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
-    let (a, b) = (fx.a, fx.b);
+    match fx.units.order.get(u) {
+        Some(Unit::Group { group, inner }) => run_group(fx, access, *group, inner.clone()),
+        Some(unit) => run_inner(fx, access, unit, fx.a, fx.b),
+        None => {}
+    }
+}
+
+/// A unit that is not a group over frames `a..b`.
+fn run_inner(fx: &Fixed<'_>, access: &mut Access<'_>, unit: &Unit, a: usize, b: usize) {
     let lane = access.lane();
-    let Some(unit) = fx.units.order.get(u) else {
-        return;
-    };
     match unit {
         &Unit::Direct(i) => run_direct(fx, access, i, a, b),
         &Unit::State(i) => {
@@ -3437,6 +3690,261 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
                         absorb(fx, &mut v, (lane, i), f);
                     }
                 }
+            }
+        }
+        Unit::Group { .. } => {}
+    }
+}
+
+/// What a sleep group's unit does with its members and reads (ADR 0044
+/// §11): through views ([`Access`]) or the whole plan ([`Whole`]).
+trait GroupIo {
+    /// Runs one of the group's own units over frames `a..b`, awake.
+    fn run(&mut self, fx: &Fixed<'_>, unit: &Unit, a: usize, b: usize);
+    /// Member `i`'s frames `a..b` asleep ([`asleep`]).
+    fn sleep(&mut self, fx: &Fixed<'_>, i: usize, a: usize, b: usize);
+    /// `find` over output row `o` at frames `a..b`, read through member
+    /// `via`'s view (its own row, or another instance's).
+    fn rows(
+        &mut self,
+        via: usize,
+        o: usize,
+        frames: (usize, usize),
+        find: impl FnOnce(&[f64]) -> Option<usize>,
+    ) -> Option<usize>;
+    /// `find` over the events of sink `sink`, read through member `view`'s
+    /// view: the sink's owner when that is a member, else any member.
+    fn events(
+        &mut self,
+        view: usize,
+        sink: usize,
+        frames: (usize, usize),
+        find: impl FnOnce(&[Event]) -> Option<usize>,
+    ) -> Option<usize>;
+}
+
+impl GroupIo for Access<'_> {
+    fn run(&mut self, fx: &Fixed<'_>, unit: &Unit, a: usize, b: usize) {
+        run_inner(fx, self, unit, a, b);
+    }
+
+    fn sleep(&mut self, fx: &Fixed<'_>, i: usize, a: usize, b: usize) {
+        if let Some(mut v) = self.call(i, a, b) {
+            v.slot.asleep = true;
+            let mode = gather(fx, &mut gathering(&mut v), a, b);
+            v.slot.asleep = false;
+            asleep(fx, &mut running(&mut v), mode, a, b);
+        }
+    }
+
+    fn rows(
+        &mut self,
+        via: usize,
+        o: usize,
+        (a, b): (usize, usize),
+        find: impl FnOnce(&[f64]) -> Option<usize>,
+    ) -> Option<usize> {
+        let v = self.call(via, a, b)?;
+        let own = v.slot.signal_out.clone();
+        if own.contains(&o) {
+            v.outputs.frames(o - own.start, (a, b)).and_then(find)
+        } else {
+            v.sources.frames(o, (a, b)).and_then(|row| find(&row))
+        }
+    }
+
+    fn events(
+        &mut self,
+        view: usize,
+        sink: usize,
+        (a, b): (usize, usize),
+        find: impl FnOnce(&[Event]) -> Option<usize>,
+    ) -> Option<usize> {
+        let v = self.call(view, a, b)?;
+        let own = v.slot.event_out.clone();
+        if own.contains(&sink) {
+            v.emitted.get(sink - own.start).and_then(|e| find(e))
+        } else {
+            let row = v.events.row(sink)?;
+            row.first().and_then(|e| find(e))
+        }
+    }
+}
+
+/// Sleep group `g`'s unit over the segment's frames (ADR 0044 §11,
+/// `docs/semantics.md` §17): asleep, from the first frame its driver is
+/// 0.5 or more or an event reaches a member's event input, it wakes; awake,
+/// it runs its own units in sub-blocks that end at the multiples of *R*,
+/// and at a multiple after *R* quiet frames (the driver below 0.5, no
+/// event, every boundary output exactly zero) it falls asleep. A split
+/// changes no output, so the result is the same for every partition.
+fn run_group(fx: &Fixed<'_>, io: &mut impl GroupIo, g: usize, inner: Span<usize>) {
+    let (Some(group), Some(state)) = (fx.groups.get(g), fx.group_states.get(g)) else {
+        return;
+    };
+    let units = fx.units.inner.get(inner).unwrap_or(&[]);
+    let Some(&via) = group.members.first() else {
+        return;
+    };
+    let mut sleeping = state.asleep.load(Ordering::Relaxed);
+    let mut quiet = state.quiet.load(Ordering::Relaxed);
+    let rest = group.rest.max(1);
+    let (a, b) = (fx.a, fx.b);
+    let mut x = a;
+    while x < b {
+        if sleeping {
+            let w = first_loud(fx, io, group, via, (x, b)).unwrap_or(b);
+            if w > x {
+                for &m in &group.members {
+                    io.sleep(fx, m, x, w);
+                }
+            }
+            if w < b {
+                sleeping = false;
+                quiet = 0;
+            }
+            x = w;
+        } else {
+            let frame = fx.frame(x).0;
+            let ahead = rest - frame % rest;
+            let y = usize::try_from(ahead)
+                .map_or(b, |ahead| x.saturating_add(ahead))
+                .min(b);
+            for unit in units {
+                io.run(fx, unit, x, y);
+            }
+            quiet = match last_loud(fx, io, group, via, (x, y)) {
+                Some(l) => (y - 1 - l) as u64,
+                None => quiet.saturating_add((y - x) as u64),
+            };
+            if fx.frame(y).0.is_multiple_of(rest) && quiet >= rest {
+                sleeping = true;
+            }
+            x = y;
+        }
+    }
+    state.asleep.store(sleeping, Ordering::Relaxed);
+    state.quiet.store(quiet, Ordering::Relaxed);
+}
+
+/// The first frame of `frames` at which an asleep group wakes: its driver
+/// is 0.5 or more, or an event reaches a member's event input (staged, or
+/// emitted by a source; members emit none while asleep).
+fn first_loud(
+    fx: &Fixed<'_>,
+    io: &mut impl GroupIo,
+    group: &Group,
+    via: usize,
+    (a, b): (usize, usize),
+) -> Option<usize> {
+    let driver = io.rows(via, group.driver, (a, b), |row| {
+        row.iter().position(|&x| x >= 0.5).map(|c| a + c)
+    });
+    let mut first = driver;
+    for (target, sources) in &group.inputs {
+        let staged = staged_in(fx.staged, *target, (a, b));
+        if let Some(e) = staged.first() {
+            first = Some(first.map_or(e.frame, |f| f.min(e.frame)));
+        }
+        for &(owner, source) in sources {
+            if group.members.binary_search(&owner).is_ok() {
+                continue;
+            }
+            let at = io.events(via, source.sink, (a, b), |events| {
+                let i = events.partition_point(|e| (e.offset as usize) < a);
+                events.get(i).map(|e| e.offset as usize).filter(|&f| f < b)
+            });
+            if let Some(at) = at {
+                first = Some(first.map_or(at, |f| f.min(at)));
+            }
+        }
+    }
+    first
+}
+
+/// The last frame of `frames`, run awake, that is not quiet: the driver at
+/// 0.5 or more, an event reaching a member's event input, or a boundary
+/// output not exactly zero.
+fn last_loud(
+    fx: &Fixed<'_>,
+    io: &mut impl GroupIo,
+    group: &Group,
+    via: usize,
+    (a, b): (usize, usize),
+) -> Option<usize> {
+    let mut last = io.rows(via, group.driver, (a, b), |row| {
+        row.iter().rposition(|&x| x >= 0.5).map(|c| a + c)
+    });
+    let later = |last: &mut Option<usize>, f: Option<usize>| {
+        if let Some(f) = f {
+            *last = Some(last.map_or(f, |l| l.max(f)));
+        }
+    };
+    for &(member, o) in &group.boundary {
+        let f = io.rows(member, o, (a, b), |row| {
+            row.iter().rposition(|&x| x != 0.0).map(|c| a + c)
+        });
+        later(&mut last, f);
+    }
+    for (target, sources) in &group.inputs {
+        later(
+            &mut last,
+            staged_in(fx.staged, *target, (a, b))
+                .last()
+                .map(|e| e.frame),
+        );
+        for &(owner, source) in sources {
+            let view = if group.members.binary_search(&owner).is_ok() {
+                owner
+            } else {
+                via
+            };
+            let f = io.events(view, source.sink, (a, b), |events| {
+                let i = events.partition_point(|e| (e.offset as usize) < b);
+                i.checked_sub(1)
+                    .and_then(|i| events.get(i))
+                    .map(|e| e.offset as usize)
+                    .filter(|&f| f >= a)
+            });
+            later(&mut last, f);
+        }
+    }
+    last
+}
+
+/// The staged external events for `target` at block frames `a..b`.
+fn staged_in(staged: &[Staged], target: PortId, (a, b): (usize, usize)) -> &[Staged] {
+    let start = staged.partition_point(|e| (e.target, e.frame) < (target.0, a));
+    let end = staged.partition_point(|e| (e.target, e.frame) < (target.0, b));
+    staged.get(start..end).unwrap_or(&[])
+}
+
+/// A member's frames `a..b` while its group is asleep, after their gather
+/// (which kept its parameters' time): its boundary outputs read exactly
+/// +0.0 and the others hold; suspended or muted, it fades as it would
+/// awake (`docs/semantics.md` §17 "Suspension and sleep compose").
+fn asleep<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, mode: Mode, a: usize, b: usize) {
+    match mode {
+        Mode::Asleep | Mode::Running => {
+            for (p, o) in r.slot.signal_out.clone().enumerate() {
+                let value = if fx.boundary.get(o) == Some(&true) {
+                    0.0
+                } else {
+                    previous(fx.outputs, &r.outputs, (o, p), a)
+                };
+                if let Some(row) = r.outputs.frames_mut(p, (a, b)) {
+                    row.fill(value);
+                }
+            }
+        }
+        Mode::Suspended => {
+            for f in a..b {
+                fade_suspended(fx, r, f);
+            }
+        }
+        Mode::Muted => {
+            for f in a..b {
+                fade_muted(fx, r, f);
             }
         }
     }
@@ -3495,7 +4003,7 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
                 }
             }
         }
-        Mode::Suspended => {
+        Mode::Suspended | Mode::Asleep => {
             let mut r = running(&mut v);
             for f in a..b {
                 fade_suspended(fx, &mut r, f);
@@ -3530,7 +4038,7 @@ fn divided_direct(
     }
     match gather(fx, &mut gathering(v), a, b) {
         Mode::Running => {}
-        Mode::Suspended => {
+        Mode::Suspended | Mode::Asleep => {
             let mut r = running(v);
             for f in a..b {
                 fade_suspended(fx, &mut r, f);
@@ -3737,7 +4245,7 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usiz
                 hold_emitted(&mut running(v));
             }
         }
-        Mode::Suspended => fade_suspended(fx, &mut running(v), f),
+        Mode::Suspended | Mode::Asleep => fade_suspended(fx, &mut running(v), f),
         Mode::Muted => fade_muted(fx, &mut running(v), f),
     }
 }
@@ -4304,10 +4812,15 @@ impl Whole<'_> {
 
 /// [`run_unit`] for a sequential segment.
 fn whole_unit(fx: &Fixed<'_>, w: &mut Whole<'_>, u: usize) {
-    let (a, b) = (fx.a, fx.b);
-    let Some(unit) = fx.units.order.get(u) else {
-        return;
-    };
+    match fx.units.order.get(u) {
+        Some(Unit::Group { group, inner }) => run_group(fx, w, *group, inner.clone()),
+        Some(unit) => whole_inner(fx, w, unit, fx.a, fx.b),
+        None => {}
+    }
+}
+
+/// [`run_inner`] for a sequential segment.
+fn whole_inner(fx: &Fixed<'_>, w: &mut Whole<'_>, unit: &Unit, a: usize, b: usize) {
     match unit {
         &Unit::Direct(i) => whole_direct(fx, w, i, a, b),
         &Unit::State(i) => {
@@ -4333,6 +4846,52 @@ fn whole_unit(fx: &Fixed<'_>, w: &mut Whole<'_>, u: usize) {
                 }
             }
         }
+        Unit::Group { .. } => {}
+    }
+}
+
+impl GroupIo for Whole<'_> {
+    fn run(&mut self, fx: &Fixed<'_>, unit: &Unit, a: usize, b: usize) {
+        whole_inner(fx, self, unit, a, b);
+    }
+
+    fn sleep(&mut self, fx: &Fixed<'_>, i: usize, a: usize, b: usize) {
+        if !self.has(i) {
+            return;
+        }
+        let mode = {
+            let Some(mut g) = self.gathering(i) else {
+                return;
+            };
+            g.slot.asleep = true;
+            let mode = gather(fx, &mut g, a, b);
+            g.slot.asleep = false;
+            mode
+        };
+        if let Some(mut r) = self.running(i) {
+            asleep(fx, &mut r, mode, a, b);
+        }
+    }
+
+    fn rows(
+        &mut self,
+        _via: usize,
+        o: usize,
+        (a, b): (usize, usize),
+        find: impl FnOnce(&[f64]) -> Option<usize>,
+    ) -> Option<usize> {
+        let row = o.checked_mul(self.k)?;
+        self.outputs.get(row + a..row + b).and_then(find)
+    }
+
+    fn events(
+        &mut self,
+        _view: usize,
+        sink: usize,
+        _frames: (usize, usize),
+        find: impl FnOnce(&[Event]) -> Option<usize>,
+    ) -> Option<usize> {
+        self.emitted.get(sink).and_then(|e| find(e))
     }
 }
 
@@ -4396,7 +4955,7 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
                 w.mute(fx, i, (a, b), rollback, fault);
             }
         }
-        Mode::Suspended => {
+        Mode::Suspended | Mode::Asleep => {
             if let Some(mut r) = w.running(i) {
                 for f in a..b {
                     fade_suspended(fx, &mut r, f);
@@ -4430,7 +4989,7 @@ fn whole_divided(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize
     };
     match mode {
         Mode::Running => {}
-        Mode::Suspended => {
+        Mode::Suspended | Mode::Asleep => {
             if let Some(mut r) = w.running(i) {
                 for f in a..b {
                     fade_suspended(fx, &mut r, f);
@@ -4544,7 +5103,7 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
                 w.mute(fx, i, (f, f + 1), false, fault);
             }
         }
-        Mode::Suspended => {
+        Mode::Suspended | Mode::Asleep => {
             if let Some(mut r) = w.running(i) {
                 fade_suspended(fx, &mut r, f);
             }
@@ -4829,7 +5388,12 @@ fn gather<R: Own, S: Sources, E: Emitted>(
         let Some(row) = g.signal_in.frames_mut(p, (a, b)) else {
             continue;
         };
-        sum_sources(row, from, &g.sources, (a, b));
+        // Asleep, no member reads its inputs (ADR 0044 §11): +0.
+        if mode == Mode::Asleep {
+            row.fill(0.0);
+        } else {
+            sum_sources(row, from, &g.sources, (a, b));
+        }
     }
 
     let mut discards = 0u64;
@@ -4872,6 +5436,19 @@ fn gather<R: Own, S: Sources, E: Emitted>(
             continue;
         };
         let target = param.port;
+        // Asleep with nothing to apply or advance: the value holds.
+        if mode == Mode::Asleep
+            && param.base.is_steady()
+            && param.events.is_empty()
+            && staged_in(fx.staged, target, (a, b)).is_empty()
+        {
+            // Its last frame only: what the accessors and the next call's
+            // hold read (no member reads it while asleep, and only a sink's
+            // parameters are read frame by frame, `parameter_at_frame`).
+            let value = previous(fx.param_values, &g.param_rows, (j, q), a);
+            g.param_rows.set(q, b - 1, value);
+            continue;
+        }
         if mode == Mode::Running
             && !param.modulation.is_empty()
             && let Some(modulation) = g.lane.modulation.get_mut(a..b)
@@ -4879,7 +5456,8 @@ fn gather<R: Own, S: Sources, E: Emitted>(
             sum_sources(modulation, &param.modulation, &g.sources, (a, b));
         }
         for f in a..b {
-            if mode == Mode::Running {
+            // Asleep, parameters keep time (ADR 0044 §11).
+            if matches!(mode, Mode::Running | Mode::Asleep) {
                 param.base.advance();
             }
             for staged in staged_at(fx.staged, target, f) {
@@ -5018,7 +5596,9 @@ fn deliver(
                 source,
             }
         }
-        Mode::Suspended | Mode::Muted => {
+        // Asleep: unreachable, as an event to an event input wakes the
+        // group first (ADR 0044 §11).
+        Mode::Suspended | Mode::Muted | Mode::Asleep => {
             *discards = discards.saturating_add(1);
             let reason = if mode == Mode::Muted {
                 DiscardReason::Muted
@@ -5051,7 +5631,7 @@ fn apply(
     (target, f, payload, source): ParamArrival,
 ) {
     let applied = match mode {
-        Mode::Running => Some(base.apply(payload)),
+        Mode::Running | Mode::Asleep => Some(base.apply(payload)),
         Mode::Suspended => Some(base.apply_suspended(payload)),
         Mode::Muted => None,
     };

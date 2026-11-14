@@ -9,7 +9,7 @@ Scope: the semantics are stated frame by frame; the engine runs them in blocks o
 ## 1. Frames
 
 - Time is the **frame**: an integer count since project start, at the project's master rate (its sample rate, in whole frames per second). Nothing in the engine reads a clock.
-- **Every instance runs every frame**, connected or not, unless it is suspended (§6) or muted by the fault guard (§7). An instance from which no sink can be reached only causes a validation warning (ADR 0016 §1).
+- **Every instance runs every frame**, connected or not, unless it is suspended (§6), muted by the fault guard (§7) or a member of an asleep sleep group (§17). An instance from which no sink can be reached only causes a validation warning (ADR 0016 §1).
 - Values are f64 (ADR 0007). f32 appears only in `audio.wav` (§8).
 - An instance of a type at rate divisor *d* > 1 runs every frame too, but is **called** on its ticks only, the frames that are multiples of *d*; its outputs hold between them (§16). Everything below holds for it as stated, frame by frame.
 
@@ -527,3 +527,43 @@ Audit P1 (2026-10-15). What a project's text names, directly or through composit
 A real-time run keeps two plan states, the engine's and the control side's mirror, each under the engine's budgets. What a primitive allocates in its own `prepare` is bounded by its type, not here (`module-contract.md`).
 
 A converter type, once made, is kept for the rest of the process (`signal_core::converter`). The table is not capped: each type costs a fixed few hundred bytes whatever its width, only types that plans use are made, and a cap would make whether a project plans depend on what the process planned before, which only its text may decide (ADR 0009). A process that plans millions of distinct (conversion, divisors, shape, kind) combinations keeps that much.
+
+## 17. Sleep groups
+
+ADR 0044 §11. A plan may declare **sleep groups**, so that instances that output nothing are not computed. A sleep group knows frames, ports, instances and exact zero, nothing else.
+
+### What a group is
+
+- **Members:** every primitive instance under one instance address, or at it (an instance subtree; a converter from a member's port lives beneath it, §16, so it is a member too).
+- **Driver:** one signal output of an instance outside the group.
+- **Rest length** *R*: a number of frames, at least 1.
+- A composite declares a group over one of its instances (`signal_graph::SleepDef`); a poly slot declares one per voice (ADR 0044 §11).
+- The plan is refused, with a named reason (`GraphError::SleepGroup`), when a group has no primitive member; a member is latent, a sink or a source; the driver is a member or not a signal output; two groups overlap; anything in the group reaches the driver; or its outputs come back into it through instances outside it. So a group can run as one unit after its driver: every instance outside it that it reads runs before it, and every instance that reads it runs after it.
+- A **boundary output** is a member's signal or vector output row that an instance outside the group reads, as a signal input or as modulation of a parameter.
+
+### Per frame
+
+A group is **awake** or **asleep**. It starts awake, and a group added by a swap starts awake.
+
+- **Falling asleep.** An awake group falls asleep at a frame *g* that is a multiple of *R* (counted from frame 0 of the run, as the ticks of §16 are) when every frame of [*g* − *R*, *g*) was **quiet**:
+  - the driver's value was below 0.5;
+  - no event arrived at a member's event input: an external event targeting it, or an event emitted by its source, delivered or discarded;
+  - every boundary output was exactly zero (+0.0 or −0.0).
+
+  It is asleep from frame *g* on.
+- **Waking.** An asleep group wakes at frame *n* when the driver's value at *n* is 0.5 or more, or an event arrives at a member's event input at *n*. It is awake from *n* on, and its members are called for *n*: the driver and every outside source of a member are computed before the group, so this is known in the same frame. A state-output member's emit at *n* comes from its frozen state. An event to a **parameter** does not wake it.
+- **While asleep, the members' time stops**, as under suspension (§6):
+  - they are not called, and their state is frozen (a fade-in in progress waits too);
+  - their boundary outputs read **exactly +0.0**, and their other outputs hold; readers cannot tell the +0.0 from the ±0.0 the group was writing, since every input is a sum from +0 (§3);
+  - they emit no events, and the fault guard has nothing to check;
+  - a change of their sources by a swap is seen at their next call (ADR 0037 §6), as for a suspended instance.
+- **Parameters keep time while asleep**, unlike under suspension. Parameter events apply to the bases as on a running instance (`set`, `ramp`, §5), and ramps advance one step per frame. The effective value (§5) holds, since modulation is read only when an instance is called. So a member that wakes has the parameter bases it would have had awake.
+- **Suspension and sleep compose.** A member is called only if it is neither suspended, nor muted, nor asleep. A suspend, a resume or a removal acts on an asleep member as on any instance: its suspension or fault fade runs as it would awake, from its output as readers see it (+0.0 at a boundary), and its ramps pause while it is suspended.
+- **Swaps.** A group in both plans with the same members address, driver and *R* keeps its state at the swap frame: awake or asleep, and how many quiet frames it has had. Any other group of the new plan starts awake.
+
+### Determinism
+
+Whether a group sleeps depends only on signal values, events and frame numbers. The engine runs a group as one unit (§13) after its driver and its outside sources: asleep, it scans for the first frame that wakes it; awake, it runs its members in calls that end at the multiples of *R*, and decides at each multiple. A split never changes an output (`module-contract.md`, *k*-partition invariance), so the result is the same for every partition and thread count, with the exception of §14 for a panic. The semantic oracle states the rule frame by frame, independently.
+
+`sleep = true` and `sleep = false` give different renders when a group sleeps: an asleep oscillator's phase does not advance. Each is reproducible. A content whose boundary output never reaches exact zero (a DC offset, a feedback tail, an exponential release that has not yet fallen below its envelope's flush level, about 20 time constants for `std.adsr`) never sleeps, and costs what it costs awake.
+

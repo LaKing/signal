@@ -365,6 +365,7 @@ fn a_module_whose_panic_payload_panics_is_only_faulted() {
                 ],
                 connections: vec![conn("a.out", "rec.zeta"), conn("b.out", "rec.alpha")],
                 exports: signal_graph::Exports::default(),
+                sleep: Vec::new(),
             };
             let plan = signal_graph::build_plan(&definition, &[], &registry, 1).unwrap();
             let config = EngineConfig {

@@ -744,6 +744,7 @@ mod tests {
             }],
             connections: Vec::new(),
             exports: Exports::default(),
+            sleep: Vec::new(),
         };
         let plan = build_plan(&root, &[], &registry, 0).unwrap();
         let port = |text: &str| -> PortAddress { text.parse().unwrap() };

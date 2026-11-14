@@ -147,6 +147,7 @@ fn latent_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
         ],
         connections: vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 1).unwrap()
 }
@@ -342,6 +343,7 @@ fn mixed_plan(registry: &Registry, second: &str) -> signal_graph::ExecutionPlan 
             conn(&format!("lat.{second}"), "rec.zeta"),
         ],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 1).unwrap()
 }
@@ -653,6 +655,7 @@ fn lossy_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
         ],
         connections: vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 1).unwrap()
 }
@@ -835,6 +838,7 @@ fn a_latent_module_without_a_result_is_refused() {
         ],
         connections: vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let plan = build_plan(&root, &[], &registry, 1).unwrap();
     match Engine::new(&plan, &registry, EngineConfig::new(48_000, 42), Vec::new()) {
@@ -863,6 +867,7 @@ fn two_latent_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
             conn("b.out", "rec.zeta"),
         ],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 1).unwrap()
 }

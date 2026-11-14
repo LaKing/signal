@@ -19,7 +19,7 @@ const NONE: u8 = u8::MAX;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.voice_alloc",
-    doc: "A polyphonic slot's allocator (ADR 0044): note events (Set(128·key + v), v 1–127 an on at v/127, 0 an off; a Trigger ends every note) shared among `voices` voices, a free voice released longest ago first, else the oldest note stolen; a steal or retrigger takes the gate low for one frame (not with `legato`). Each output a vector of 64, element e voice e: hz (held after the note), gate, velocity (held).",
+    doc: "A polyphonic slot's allocator (ADR 0044): note events (Set(128·key + v), v 1–127 an on at v/127, 0 an off; a Trigger ends every note) shared among `voices` voices, a free voice released longest ago first, else the oldest note stolen; a steal or retrigger takes the gate low for one frame (not with `legato`). Each output a vector of 64, element e voice e: hz (held after the note), gate, velocity (held), active (1 while a note sounds or is claimed: a sleep group's driver).",
     ports: &[
         event_port("notes", Direction::In),
         port_at(
@@ -46,6 +46,15 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             PortShape::Vector(MAX_VOICES as u32),
             1,
             PortKind::Control,
+            None,
+            None,
+        ),
+        port_at(
+            "active",
+            Direction::Out,
+            PortShape::Vector(MAX_VOICES as u32),
+            1,
+            PortKind::Gate,
             None,
             None,
         ),
@@ -150,6 +159,9 @@ fn read(payload: EventPayload) -> Option<Note> {
 ///   a note ends.
 /// - `gate` (vector of 64 out, gate): 1 while voice *e* sounds, else 0.
 /// - `velocity` (vector of 64 out, control): `v/127`, held after a note.
+/// - `active` (vector of 64 out, gate): 1 while voice *e* sounds or is
+///   claimed (its gate is low for that one frame), 0 once it is released
+///   or free: the driver of a poly slot's sleep groups (ADR 0044 §11).
 ///
 /// **Parameters**
 /// - `voices` (1 to 64, read rounded, default 1): how many voices are used.
@@ -380,7 +392,13 @@ impl DirectPrimitive for VoiceAlloc {
                 } else {
                     0.0
                 };
-                for (port, value) in [(0, voice.hz), (1, gate), (2, voice.velocity)] {
+                let active = if e < count && voice.state != State::Free {
+                    1.0
+                } else {
+                    0.0
+                };
+                let values = [(0, voice.hz), (1, gate), (2, voice.velocity), (3, active)];
+                for (port, value) in values {
                     if let Some(row) = outputs.rows(port * MAX_VOICES + e, 1).get_mut(f) {
                         *row = value;
                     }
@@ -428,7 +446,7 @@ mod tests {
             let ends = [these.len()];
             let params = [voices, if legato { 1.0 } else { 0.0 }];
             let inputs = Inputs::new(1, &[], &params, &these, &ends);
-            let mut rows = vec![0.0; 3 * MAX_VOICES];
+            let mut rows = vec![0.0; 4 * MAX_VOICES];
             let mut outputs = Outputs::new(1, &mut rows, &mut []);
             alloc.process(&inputs, &mut outputs);
             out.push((0..show).map(|e| (rows[MAX_VOICES + e], rows[e])).collect());
@@ -490,6 +508,47 @@ mod tests {
             2,
         );
         assert_eq!(frames[4][0], (1.0, hz(65)));
+    }
+
+    /// `active` is 1 from an on through a claim (its gate low for that
+    /// frame) to the release, and 0 for a free voice or one above the count.
+    #[test]
+    fn active_holds_through_a_claim_and_ends_at_the_release() {
+        let mut alloc = VoiceAlloc::default();
+        let events = [(0, on(60)), (2, on(62)), (4, off(62))];
+        let mut seen = Vec::new();
+        for f in 0..6 {
+            let these: Vec<Event> = events
+                .iter()
+                .filter(|(at, _)| *at == f)
+                .map(|(_, p)| Event {
+                    offset: 0,
+                    payload: *p,
+                })
+                .collect();
+            let ends = [these.len()];
+            let inputs = Inputs::new(1, &[], &[1.0, 0.0], &these, &ends);
+            let mut rows = vec![0.0; 4 * MAX_VOICES];
+            let mut outputs = Outputs::new(1, &mut rows, &mut []);
+            alloc.process(&inputs, &mut outputs);
+            seen.push((
+                rows[MAX_VOICES],
+                rows[3 * MAX_VOICES],
+                rows[3 * MAX_VOICES + 1],
+            ));
+        }
+        // (gate, active of v0, active of v1, above the count)
+        assert_eq!(
+            seen,
+            [
+                (1.0, 1.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ]
+        );
     }
 
     #[test]

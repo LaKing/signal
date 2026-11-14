@@ -119,6 +119,13 @@ impl RealtimeConfig {
 /// `parameters / PARAMETERS_PER_CALLBACK` callbacks (rounded up).
 pub const PARAMETERS_PER_CALLBACK: usize = 64;
 
+/// Each callback reports the states of up to this many sleep groups
+/// (ADR 0044 §11), going round the plan's, for observation only.
+pub const SLEEP_GROUPS_PER_CALLBACK: usize = 64;
+
+/// The sleep group states in flight to the control thread.
+const SLEEP_QUEUE: usize = 1024;
+
 /// The id of a command sent through the [`Controller`]: 1, 2, 3, … in send
 /// order. An event's id is also its sequence number.
 pub type CommandId = u64;
@@ -255,6 +262,9 @@ pub trait ControlSink {
     /// A parameter's base and effective value at the end of a callback
     /// (observation only: it never feeds back into the run).
     fn parameter(&mut self, _port: &PortAddress, _value: ParameterValue) {}
+    /// A sleep group's state, by its members address (ADR 0044 §11): each
+    /// group's at least every few callbacks (observation only).
+    fn sleep(&mut self, _members: &InstanceAddress, _asleep: bool) {}
     /// The newest runner status `poll` read (M2.7-4): its cumulative counts
     /// let a recorder tell whether it received every boundary record. Call
     /// it once more with the stopped [`Runner`]'s own status, whose last
@@ -516,6 +526,7 @@ pub fn realtime_with(
     let (back_tx, back_rx) = RingBuffer::new(2 * limit);
     let (log_tx, log_rx) = RingBuffer::new(config.log.max(1));
     let (parameter_tx, parameter_rx) = RingBuffer::new(config.parameters.max(1));
+    let (sleep_tx, sleep_rx) = RingBuffer::new(SLEEP_QUEUE);
     let (status_tx, status_rx) = RingBuffer::new(config.status.max(1));
     let (data_tx, data_rx) = match config.boundary_data {
         0 => (None, None),
@@ -537,6 +548,8 @@ pub fn realtime_with(
         log: log_tx,
         parameters: parameter_tx,
         next_parameter: 0,
+        sleeps: sleep_tx,
+        next_sleep: 0,
         status: status_tx,
         data: data_tx,
         pending: VecDeque::with_capacity(limit),
@@ -552,6 +565,7 @@ pub fn realtime_with(
         back: back_rx,
         log: log_rx,
         parameters: parameter_rx,
+        sleeps: sleep_rx,
         status: status_rx,
         data: data_rx,
         words: Vec::with_capacity(config.boundary_data),
@@ -592,6 +606,10 @@ pub struct Runner {
     parameters: Producer<(u64, usize, ParameterValue)>,
     /// The parameter the next callback reports first.
     next_parameter: usize,
+    /// (plan version, sleep group index, asleep).
+    sleeps: Producer<(u64, usize, bool)>,
+    /// The sleep group the next callback reports first.
+    next_sleep: usize,
     status: Producer<RunnerStatus>,
     /// Delivered results carried with `Delivered` records, if recorded.
     data: Option<Producer<f32>>,
@@ -874,6 +892,7 @@ impl Runner {
     /// last, so that every report it covers precedes it.
     fn finish(&mut self) {
         self.push_parameters();
+        self.push_sleeps();
         let Runner {
             engine,
             back,
@@ -919,6 +938,25 @@ impl Runner {
                 && self.parameters.push((version, index, value)).is_err()
             {
                 self.counts.parameter_overflows = self.counts.parameter_overflows.saturating_add(1);
+                return;
+            }
+        }
+    }
+
+    /// Pushes the next sleep groups' states, for observation (a full
+    /// queue drops them: a later callback reports them again).
+    fn push_sleeps(&mut self) {
+        let count = self.engine.sleep_group_count();
+        let version = self.engine.version();
+        for _ in 0..count.min(SLEEP_GROUPS_PER_CALLBACK) {
+            if self.next_sleep >= count {
+                self.next_sleep = 0;
+            }
+            let index = self.next_sleep;
+            self.next_sleep += 1;
+            if let Some(asleep) = self.engine.sleep_group_at(index)
+                && self.sleeps.push((version, index, asleep)).is_err()
+            {
                 return;
             }
         }
@@ -985,6 +1023,7 @@ pub struct Controller {
     back: Consumer<Back>,
     log: Consumer<(u64, LogRecord)>,
     parameters: Consumer<(u64, usize, ParameterValue)>,
+    sleeps: Consumer<(u64, usize, bool)>,
     status: Consumer<RunnerStatus>,
     /// Delivered results carried with `Delivered` records, if recorded, and
     /// the words of the one being handed out.
@@ -1300,6 +1339,12 @@ impl Controller {
                 sink.parameter(port, value);
             }
         }
+        while let Ok((version, index, asleep)) = self.sleeps.pop() {
+            let mirror = self.mirrors.iter().find(|m| m.0 == version);
+            if let Some(members) = mirror.and_then(|(_, state)| state.group_members(index)) {
+                sink.sleep(members, asleep);
+            }
+        }
         sink.frontier(frontier);
     }
 
@@ -1527,6 +1572,7 @@ mod tests {
                 scale: None,
             }],
             exports: Exports::default(),
+            sleep: Vec::new(),
         };
         build_plan(&root, &[], &registry(), version).unwrap()
     }

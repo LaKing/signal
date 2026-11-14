@@ -121,6 +121,7 @@ fn plan(registry: &Registry) -> ExecutionPlan {
             connection("other.out", "out.r"),
         ],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 0).unwrap()
 }

@@ -21,6 +21,18 @@ pub(crate) enum Unit {
         state_outputs: Span<usize>,
         direct: Span<usize>,
     },
+    /// A sleep group's members (ADR 0044 §11, `docs/semantics.md` §17):
+    /// its own units (none of them a group), a range of [`Units::inner`],
+    /// run together in sub-blocks split where the group's state can change.
+    Group { group: usize, inner: Span<usize> },
+}
+
+/// A sleep group as [`grouped`] condenses it: its member instances and
+/// the instance of its driver, which must run before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GroupSpec {
+    pub(crate) members: Vec<usize>,
+    pub(crate) driver: usize,
 }
 
 /// The units of a plan, in execution order, the members of its cycles, and
@@ -30,6 +42,144 @@ pub(crate) struct Units {
     pub(crate) order: Vec<Unit>,
     pub(crate) members: Vec<usize>,
     pub(crate) successors: Vec<Vec<usize>>,
+    /// The sleep groups' own units, each group's a range.
+    pub(crate) inner: Vec<Unit>,
+}
+
+/// [`units`] with sleep groups: each group's members are condensed into one
+/// unit, after its driver's, and that unit holds their own units in the
+/// same order [`units`] gives them alone. `None` when a group cannot run
+/// as one unit (its driver is a member, or its outputs come back into it
+/// through other instances), which the graph's validation refuses first.
+pub(crate) fn grouped(
+    count: usize,
+    edges: &[(usize, usize)],
+    position: &[usize],
+    direct: &[bool],
+    groups: &[GroupSpec],
+) -> Option<Units> {
+    if groups.is_empty() {
+        return Some(units(count, edges, position, direct));
+    }
+    // The condensed graph's nodes: the instances outside every group, in
+    // order, then one per group.
+    let mut group_of: Vec<Option<usize>> = vec![None; count];
+    for (g, spec) in groups.iter().enumerate() {
+        for &m in &spec.members {
+            if group_of.get(m)?.is_some() {
+                return None;
+            }
+            *group_of.get_mut(m)? = Some(g);
+        }
+    }
+    let outside: Vec<usize> = (0..count)
+        .filter(|&i| group_of.get(i).is_some_and(Option::is_none))
+        .collect();
+    let mut node = vec![0usize; count];
+    for (k, &i) in outside.iter().enumerate() {
+        *node.get_mut(i)? = k;
+    }
+    for (i, g) in group_of.iter().enumerate() {
+        if let Some(g) = g {
+            *node.get_mut(i)? = outside.len() + g;
+        }
+    }
+    let singles = outside.len();
+    let nodes = singles + groups.len();
+    let mut condensed: Vec<(usize, usize)> = Vec::with_capacity(edges.len() + groups.len());
+    for &(from, to) in edges {
+        let (a, b) = (*node.get(from)?, *node.get(to)?);
+        if a == b && a >= singles {
+            continue;
+        }
+        condensed.push((a, b));
+    }
+    let mut node_position: Vec<usize> = outside
+        .iter()
+        .map(|&i| position.get(i).copied().unwrap_or(usize::MAX))
+        .collect();
+    let mut node_direct: Vec<bool> = outside
+        .iter()
+        .map(|&i| direct.get(i).copied().unwrap_or(true))
+        .collect();
+    for (g, spec) in groups.iter().enumerate() {
+        if group_of.get(spec.driver)?.is_some() {
+            return None;
+        }
+        condensed.push((*node.get(spec.driver)?, singles + g));
+        let first = spec
+            .members
+            .iter()
+            .filter_map(|&m| position.get(m).copied())
+            .min()
+            .unwrap_or(usize::MAX);
+        node_position.push(first);
+        node_direct.push(true);
+    }
+    let mut outer = units(nodes, &condensed, &node_position, &node_direct);
+    // A group node must be a unit of its own: in a cycle it would not be.
+    if outer.members.iter().any(|&k| k >= singles) {
+        return None;
+    }
+    // Back to instance indices.
+    let instance = |k: usize| outside.get(k).copied().unwrap_or(usize::MAX);
+    for k in &mut outer.members {
+        *k = instance(*k);
+    }
+    for unit in &mut outer.order {
+        let g = match *unit {
+            Unit::Direct(k) if k >= singles => k - singles,
+            Unit::Direct(k) => {
+                *unit = Unit::Direct(instance(k));
+                continue;
+            }
+            Unit::State(k) => {
+                *unit = Unit::State(instance(k));
+                continue;
+            }
+            _ => continue,
+        };
+        let spec = groups.get(g)?;
+        let mut members = spec.members.clone();
+        members.sort_unstable();
+        let local = |i: usize| members.binary_search(&i).ok();
+        let inner_edges: Vec<(usize, usize)> = edges
+            .iter()
+            .filter_map(|&(from, to)| Some((local(from)?, local(to)?)))
+            .collect();
+        let inner_position: Vec<usize> = members
+            .iter()
+            .map(|&m| position.get(m).copied().unwrap_or(usize::MAX))
+            .collect();
+        let inner_direct: Vec<bool> = members
+            .iter()
+            .map(|&m| direct.get(m).copied().unwrap_or(true))
+            .collect();
+        let own = units(members.len(), &inner_edges, &inner_position, &inner_direct);
+        let start = outer.inner.len();
+        let offset = outer.members.len();
+        let global = |i: usize| members.get(i).copied().unwrap_or(usize::MAX);
+        outer.members.extend(own.members.iter().map(|&i| global(i)));
+        for unit in own.order {
+            outer.inner.push(match unit {
+                Unit::Direct(i) => Unit::Direct(global(i)),
+                Unit::State(i) => Unit::State(global(i)),
+                Unit::Cycle {
+                    state_outputs,
+                    direct,
+                } => Unit::Cycle {
+                    state_outputs: state_outputs.start + offset..state_outputs.end + offset,
+                    direct: direct.start + offset..direct.end + offset,
+                },
+                Unit::Group { .. } => return None,
+            });
+        }
+        *unit = Unit::Group {
+            group: g,
+            inner: start..outer.inner.len(),
+        };
+    }
+    Some(outer)
 }
 
 /// Condenses `count` instances, connected by `edges` (source instance,

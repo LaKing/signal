@@ -51,6 +51,15 @@ pub enum GraphError {
         /// Its primitive type.
         module: String,
     },
+    /// A sleep group (ADR 0044 §11) cannot be planned.
+    SleepGroup {
+        /// The composite instance that declares it (`None`: the root).
+        scope: Option<InstanceAddress>,
+        /// Its members instance, as written.
+        members: String,
+        /// Why, in words.
+        reason: String,
+    },
     /// An instance, export or parameter name is not `[a-z][a-z0-9_]*`.
     InvalidName {
         /// Where the name is declared.
@@ -302,6 +311,11 @@ impl fmt::Display for GraphError {
                 f,
                 "{instance}: `{module}` is a primitive type; only a composite instance can be a scope root"
             ),
+            GraphError::SleepGroup {
+                scope: s,
+                members,
+                reason,
+            } => write!(f, "{}: sleep group `{members}`: {reason}", scope(s)),
             GraphError::InvalidName { scope: s, name } => write!(
                 f,
                 "{}: invalid name `{name}`; names use a-z, 0-9, _ and start with a-z",

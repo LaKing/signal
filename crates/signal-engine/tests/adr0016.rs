@@ -163,6 +163,7 @@ fn cycle_without_state_output_is_rejected() {
         instances: vec![inst("a", "test.gain"), inst("b", "test.gain")],
         connections: vec![conn("a.out", "b.in"), conn("b.out", "a.in")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let errors = build_plan(&root, &[], &registry(), 1).unwrap_err();
     assert_eq!(
@@ -273,6 +274,7 @@ fn conflicting_sets_follow_the_merge_port_order_not_the_names() {
         ],
         connections: vec![conn("a.out", "p.value"), conn("b.out", "p.value")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     assert_eq!(
         build_plan(&root, &[], &registry(), 1).unwrap_err(),
@@ -369,6 +371,7 @@ fn a_source_fanned_into_two_merge_ports_arrives_in_port_order() {
         instances: vec![inst("src", "test.pair"), inst("seq", "test.sequence")],
         connections: vec![conn("src.out", "seq.in"), conn("src.out", "seq.in")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     assert!(matches!(
         build_plan(&root, &[], &registry(), 1).unwrap_err().as_slice(),

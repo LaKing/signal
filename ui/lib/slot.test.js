@@ -38,6 +38,7 @@ import {
   voicesOp,
   insideBanner,
   faultedVoices,
+  asleepVoices,
 } from './slot.js';
 
 /** A slot as `graph` gives it: `fx`, its own interface, std.gain loaded through a map. */
@@ -367,6 +368,10 @@ test("the card's voices controls write slot.voices, the count clamped to 1–64 
   assert.deepEqual(voicesOp('pad', 99, false).voices, 64);
   assert.deepEqual(voicesOp('pad', 0, false).voices, 1);
   assert.deepEqual(voicesOp('pad', '', false).voices, 1);
+  // ADR 0044 §11: sleep is written only when off, and kept by the stepper.
+  assert.deepEqual(voicesOp('pad', 8, false, false).voices, { count: 8, sleep: false });
+  assert.deepEqual(voicesOp('pad', 8, true, false).voices, { count: 8, legato: true, sleep: false });
+  assert.deepEqual(voicesOp('pad', 8, false, true).voices, 8);
 });
 
 test("a polyphonic slot's alloc port reads matched on its card (ADR 0044 §2)", () => {
@@ -402,4 +407,6 @@ test("a poly slot's generated level is read-only, its banner says so (ADR 0044 �
 test("a poly slot's faulted voices come from describe.muted (ADR 0044 §7)", () => {
   assert.deepEqual(faultedVoices(['/pad/v3/ladder', '/pad/v10/osc1', '/padx/v1/a', '/pad/alloc', '/pad/v3/vca'], 'pad'), [3, 10]);
   assert.deepEqual(faultedVoices([], 'pad'), []);
+  assert.deepEqual(asleepVoices(['/pad/v3', '/pad/v10', '/padx/v1', '/pad/v2/osc', '/pad/alloc'], 'pad'), [3, 10]);
+  assert.deepEqual(asleepVoices(undefined, 'pad'), []);
 });

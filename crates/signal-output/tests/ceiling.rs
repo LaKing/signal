@@ -44,6 +44,7 @@ fn plan(registry: &Registry, scale: f64, gain: f64) -> ExecutionPlan {
         ],
         connections: vec![connection("out.l"), connection("out.r")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 0).unwrap()
 }

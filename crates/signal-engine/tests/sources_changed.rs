@@ -124,6 +124,7 @@ fn try_plan(
             })
             .collect(),
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &watch_registry(), 0)
 }

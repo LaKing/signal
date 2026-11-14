@@ -676,13 +676,16 @@ pub(crate) struct InstanceEntry {
     pub(crate) parameters: BTreeMap<Spanned<String>, Spanned<f64>>,
 }
 
-/// ADR 0044 §1: `voices = N` or `voices = { count, assign, steal, legato }`.
+/// ADR 0044 §1: `voices = N` or `voices = { count, assign, steal, legato,
+/// sleep }`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VoicesSpec {
     /// From 1 to [`crate::slot::MAX_VOICES`].
     pub(crate) count: u32,
     /// The allocator's legato.
     pub(crate) legato: bool,
+    /// Sleeping voices (ADR 0044 §11): only the sounding ones are computed.
+    pub(crate) sleep: bool,
 }
 
 /// The `voices` key as written: on a slot, its voices (a bare count is
@@ -720,7 +723,9 @@ impl<'de> Deserialize<'de> for VoicesKey {
             type Value = VoicesKey;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a count from 1 to 64, or a table `{ count, assign, steal, legato }`")
+                f.write_str(
+                    "a count from 1 to 64, or a table `{ count, assign, steal, legato, sleep }`",
+                )
             }
 
             fn visit_i64<E: de::Error>(self, value: i64) -> Result<VoicesKey, E> {
@@ -738,6 +743,7 @@ impl<'de> Deserialize<'de> for VoicesKey {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<VoicesKey, A::Error> {
                 let mut found = None;
                 let mut legato = false;
+                let mut sleep = true;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "count" => found = Some(count(map.next_value::<i64>()?)?),
@@ -758,21 +764,21 @@ impl<'de> Deserialize<'de> for VoicesKey {
                             }
                         }
                         "legato" => legato = map.next_value::<bool>()?,
-                        "sleep" => {
-                            return Err(de::Error::custom(
-                                "`sleep` is not yet built (ADR 0044 §11, phase 5)",
-                            ));
-                        }
+                        "sleep" => sleep = map.next_value::<bool>()?,
                         other => {
                             return Err(de::Error::unknown_field(
                                 other,
-                                &["count", "assign", "steal", "legato"],
+                                &["count", "assign", "steal", "legato", "sleep"],
                             ));
                         }
                     }
                 }
                 let count = found.ok_or_else(|| de::Error::missing_field("count"))?;
-                Ok(VoicesKey::Table(VoicesSpec { count, legato }))
+                Ok(VoicesKey::Table(VoicesSpec {
+                    count,
+                    legato,
+                    sleep,
+                }))
             }
         }
 
@@ -941,7 +947,7 @@ impl JsonSchema for InstanceEntry {
                     "additionalProperties": { "anyOf": [{ "type": "string" }, { "const": false }] }
                 },
                 "voices": {
-                    "description": "ADR 0044 §1: a slot's voices, a count from 1 to 64 or a table { count, assign = \"rotate\", steal = \"oldest\", legato }.",
+                    "description": "ADR 0044 §1: a slot's voices, a count from 1 to 64 or a table { count, assign = \"rotate\", steal = \"oldest\", legato, sleep } (sleep, default true: only the sounding voices are computed, §11).",
                     "anyOf": [
                         { "type": "integer", "minimum": 1, "maximum": 64 },
                         {
@@ -950,7 +956,8 @@ impl JsonSchema for InstanceEntry {
                                 "count": { "type": "integer", "minimum": 1, "maximum": 64 },
                                 "assign": { "const": "rotate" },
                                 "steal": { "const": "oldest" },
-                                "legato": { "type": "boolean" }
+                                "legato": { "type": "boolean" },
+                                "sleep": { "type": "boolean" }
                             },
                             "required": ["count"],
                             "additionalProperties": false

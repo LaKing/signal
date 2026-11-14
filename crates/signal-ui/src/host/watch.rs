@@ -94,6 +94,7 @@ impl Host {
             values: &mut self.live.values,
             reports: &mut self.reports,
             muted: &mut self.muted,
+            sleeps: &mut self.sleeps,
         };
         let result = reload_with_bases(
             &mut run.controller,

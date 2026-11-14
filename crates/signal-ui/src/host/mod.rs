@@ -238,6 +238,8 @@ pub struct Host {
     reports: Vec<Report>,
     /// Instances muted since the last poll ([`Observed`]).
     muted: Vec<Muted>,
+    /// Sleep group states observed since the last poll (ADR 0044 §11).
+    sleeps: Vec<(String, bool)>,
     meters: Vec<Meter>,
     inputs: Vec<Meter>,
     blocks: Vec<ScopeBlock>,
@@ -466,6 +468,7 @@ impl Host {
             live: LiveState::default(),
             reports: Vec::new(),
             muted: Vec::new(),
+            sleeps: Vec::new(),
             meters: Vec::new(),
             inputs: Vec::new(),
             blocks: Vec::new(),

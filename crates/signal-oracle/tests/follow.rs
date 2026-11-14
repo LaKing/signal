@@ -75,6 +75,7 @@ fn plan(follow: Option<&str>, prefer: Option<&str>, version: u64) -> ExecutionPl
         ],
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let mut plan = build_plan(&root, &[], &registry(), 0).unwrap();
     plan.version = version;

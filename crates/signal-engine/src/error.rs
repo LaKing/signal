@@ -95,6 +95,12 @@ pub enum EngineError {
     /// The plan's schedule is not an order of its instances that runs every
     /// direct source before its receivers (ADR 0016 §1, §2).
     InvalidSchedule,
+    /// A sleep group of the plan cannot run as one unit after its driver
+    /// (ADR 0044 §11): the graph's validation refuses such a plan first.
+    InvalidSleepGroup {
+        /// The group's members address.
+        members: InstanceAddress,
+    },
     /// An external event names a port the plan does not have.
     UnknownTarget {
         /// The target.
@@ -220,6 +226,10 @@ impl fmt::Display for EngineError {
             EngineError::InvalidSchedule => {
                 f.write_str("the schedule is not a topological order of the plan's instances")
             }
+            EngineError::InvalidSleepGroup { members } => write!(
+                f,
+                "{members}: a sleep group that cannot run as one unit after its driver"
+            ),
             EngineError::UnknownTarget { target } => {
                 write!(f, "external event: unknown target {target}")
             }

@@ -987,24 +987,35 @@ pub(crate) fn voices_text(value: &serde_json::Value) -> Result<Option<String>, P
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Number(_) => Ok(Some(count(value)?.to_string())),
         serde_json::Value::Object(table) => {
-            if let Some(key) = table.keys().find(|k| *k != "count" && *k != "legato") {
+            if let Some(key) = table
+                .keys()
+                .find(|k| !["count", "legato", "sleep"].contains(&k.as_str()))
+            {
                 return Err(bad(format!(
-                    "`voices.{key}`: `slot.voices` writes `count` and `legato`"
+                    "`voices.{key}`: `slot.voices` writes `count`, `legato` and `sleep`"
                 )));
             }
             let n = count(table.get("count").unwrap_or(&serde_json::Value::Null))?;
-            let legato = match table.get("legato") {
-                None | Some(serde_json::Value::Bool(false)) => false,
-                Some(serde_json::Value::Bool(true)) => true,
-                Some(_) => return Err(bad("`voices.legato`: true or false")),
+            let flag = |key: &str, default: bool| match table.get(key) {
+                None => Ok(default),
+                Some(serde_json::Value::Bool(b)) => Ok(*b),
+                Some(_) => Err(bad(format!("`voices.{key}`: true or false"))),
             };
-            Ok(Some(if legato {
-                format!("{{ count = {n}, legato = true }}")
-            } else {
+            let (legato, sleep) = (flag("legato", false)?, flag("sleep", true)?);
+            let mut keys = Vec::new();
+            if legato {
+                keys.push("legato = true");
+            }
+            if !sleep {
+                keys.push("sleep = false");
+            }
+            Ok(Some(if keys.is_empty() {
                 n.to_string()
+            } else {
+                format!("{{ count = {n}, {} }}", keys.join(", "))
             }))
         }
-        _ => Err(bad("`voices`: a count, `{count, legato}` or null")),
+        _ => Err(bad("`voices`: a count, `{count, legato, sleep}` or null")),
     }
 }
 

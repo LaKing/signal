@@ -19,8 +19,9 @@ use signal_core::{
     Registry, Snap, StreamKey, ValueLabel, converter_shape, snap_value,
 };
 
-use crate::def::{CompositeDef, ConnectionDef, InstanceDef};
+use crate::def::{CompositeDef, ConnectionDef, InstanceDef, SleepDef};
 use crate::error::{GraphError, GraphWarning, PlanBudget};
+use crate::plan::SleepGroup;
 
 /// A primitive instance of the flattened graph.
 pub(crate) struct FlatInstance {
@@ -49,6 +50,10 @@ pub(crate) struct FlatGraph {
     /// Values of exported parameters corrected while flattening (ADR 0042,
     /// 0043): the plan's warnings.
     pub(crate) warnings: Vec<GraphWarning>,
+    /// The sleep groups (ADR 0044 §11), resolved but not yet validated, with
+    /// the composite instance that declares each and its members as written.
+    pub(crate) sleep: Vec<SleepGroup>,
+    pub(crate) sleep_declared: Vec<(Option<InstanceAddress>, String)>,
 }
 
 /// The primitive ports behind each export of a composite instance.
@@ -189,6 +194,8 @@ struct Flattener<'a> {
     connections: Vec<FlatConnection>,
     errors: Vec<GraphError>,
     warnings: Vec<GraphWarning>,
+    sleep: Vec<SleepGroup>,
+    sleep_declared: Vec<(Option<InstanceAddress>, String)>,
     /// Instances resolved so far, composite or primitive.
     made: usize,
     /// The budget flattening stopped at, if any: nothing more is expanded.
@@ -247,6 +254,8 @@ pub(crate) fn flatten(
         connections: Vec::new(),
         errors,
         warnings: Vec::new(),
+        sleep: Vec::new(),
+        sleep_declared: Vec::new(),
         made: 0,
         exceeded: None,
         scopes: Vec::new(),
@@ -257,6 +266,8 @@ pub(crate) fn flatten(
             instances: flattener.instances,
             connections: flattener.connections,
             warnings: flattener.warnings,
+            sleep: flattener.sleep,
+            sleep_declared: flattener.sleep_declared,
         })
     } else {
         Err(flattener.errors)
@@ -305,6 +316,9 @@ impl<'a> Flattener<'a> {
         });
         for connection in connections {
             self.connect(scope, &locals, connection);
+        }
+        for group in &def.sleep {
+            self.sleep_group(scope, &locals, group);
         }
 
         self.interface(def, scope, &locals)
@@ -597,6 +611,47 @@ impl<'a> Flattener<'a> {
                 None
             }
         }
+    }
+
+    /// Resolves sleep group `group` of the composite at `scope` (ADR 0044
+    /// §11): its members' address and its driver's primitive output port.
+    fn sleep_group(
+        &mut self,
+        scope: Option<&InstanceAddress>,
+        locals: &Locals<'_>,
+        group: &SleepDef,
+    ) {
+        if self.exceeded.is_some() {
+            return;
+        }
+        let error = |reason: String| GraphError::SleepGroup {
+            scope: scope.cloned(),
+            members: group.members.clone(),
+            reason,
+        };
+        let Some((members, _)) = locals.get(group.members.as_str()) else {
+            self.errors
+                .push(error(format!("no instance `{}` here", group.members)));
+            return;
+        };
+        if group.rest == 0 {
+            self.errors
+                .push(error("its rest length is 0 frames".into()));
+            return;
+        }
+        let Some((driver, from)) = self.endpoint(scope, locals, &group.driver) else {
+            return;
+        };
+        let Some(from) = self.ok(driver.source(from)) else {
+            return;
+        };
+        self.sleep.push(SleepGroup {
+            members: members.clone(),
+            driver: from,
+            rest: group.rest,
+        });
+        self.sleep_declared
+            .push((scope.cloned(), group.members.clone()));
     }
 
     fn connect(
@@ -951,6 +1006,8 @@ pub(crate) fn ports_of(
         connections: Vec::new(),
         errors: Vec::new(),
         warnings: Vec::new(),
+        sleep: Vec::new(),
+        sleep_declared: Vec::new(),
         made: 0,
         exceeded: None,
         scopes: Vec::new(),

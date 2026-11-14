@@ -385,6 +385,7 @@ fn composite(spec: &Spec) -> CompositeDef {
             })
             .collect(),
         exports: Exports::default(),
+        sleep: Vec::new(),
     }
 }
 
@@ -423,6 +424,7 @@ fn graph(spec: &Spec, version: u64, seed: u64) -> Graph {
         version,
         instances: shuffled(instances, seed),
         connections: shuffled(connections, !seed),
+        sleep: Vec::new(),
     }
 }
 

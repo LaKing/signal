@@ -1249,3 +1249,20 @@ A steal's step is smaller than a fresh note's own attack in every case (the enve
 **On the device** (ADR 0044 test 11, 2026-11-13, operator; SSL 2+ Mk II at 48 kHz, 128-frame buffer as the device ran, a silent copy of studio-poly with `gain = 0`, Signal.app playing alongside):
 - **10 minutes at 16 voices, live edits every 30 s** (`signal play --watch --seconds 600`, threads 12, workgroup): N 16 ↔ 8 every 30 s and a Replace (`moog_voice` ↔ a copy differing in one value) every 2 minutes, 19 edits in all, each applied (`applied a swap…`, `replaced 1 slot content…`): **0 xruns**, 0 stream errors, worst callback 0.543 of its period (p99 0.42, median 0.23), 0 late commands, 0 queue overflows.
 - **CPU per voice in real time** (15 s each, one thread): the whole studio-poly at 8 voices takes a median 0.39 of the period, at 16 voices 0.52 (worst 0.556 and 0.717), so a voice costs about **1.6 % of a core** at 48 kHz on the device, half the offline estimate above (which timed whole renders, start-up and file writing included). Every voice computes whether it sounds or not until phase 5.
+
+**Sleeping voices** (ADR 0044 test 14, 2026-11-14, operator, Apple M5 Max, release build, offline `signal render … --frames 2880000 --block 256 --threads 1`, 60 s at 48 kHz, best of 3–4 runs, wall time). A minimal project (`std.transport` → `std.note_seq` → a `lib.poly_voice` slot of `moog_voice` with `a_release` and `f_release` 20 ms, so a released voice reaches exact zero in about 0.4 s → `std.audio_out`):
+
+| Case | Wall time |
+|---|---|
+| no notes, 1 voice, `sleep = false` | 8.97 s |
+| no notes, 16 voices, `sleep = false` | 23.69 s |
+| no notes, 1 voice (asleep) | 8.45 s |
+| no notes, 16 voices (asleep) | 8.95 s |
+| two notes at a time, 2 voices, `sleep = false` | 10.44 s |
+| two notes at a time, 16 voices, `sleep = false` | 25.66 s |
+| two notes at a time, 16 voices, `sleep = true` | 13.11 s |
+
+- An awake voice costs 0.98 s per minute ((23.69 − 8.97) / 15), an asleep one 0.034 s, **3.5 % of a voice**. So 14 sleeping groups cost about 0.49 of a voice: the ADR's target of under 10 % of one voice for all of them is **not met**. What remains is per member and block: each of a voice's ~50 instances still gathers its parameters (time keeps going for them) and fills its output rows (boundary outputs +0.0, the others holding) and its input rows. An O(1) asleep group (no member touched while nothing is due for it) is the follow-up; it needs the accessors and scopes to read held rows without them being written.
+- Two notes at a time on 16 voices: 25.66 s awake against 13.11 s with sleep. Less the fixed part (about 8.0 s: one awake voice's 8.97 s less its 0.98 s), the voices take 5.1 s against 17.7 s, 29 %: each voice is awake for its note, its 0.4 s tail and up to *R* more, about 3.6 voices at a time here, plus the asleep ones' cost.
+- The fixed part (about 8 s per minute, some 8 voices' worth) is the 64-wide allocator, unpacks, pack and reduce, the sequencer and the output, not the voices: a separate question.
+- In `projects/studio-poly` no voice ever sleeps: its pad's `a_release` of 900 ms falls to `std.adsr`'s flush level (1e-9) only after about 18 s, and each voice plays again within 4 s. Its render is the same with `sleep = true` as with `sleep = false`, and its golden is unchanged.

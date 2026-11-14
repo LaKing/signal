@@ -375,6 +375,17 @@ fn voices_is_written_and_removed() {
         text.contains("voices = { count = 1, legato = true }"),
         "{text}"
     );
+    // ADR 0044 §11: `sleep` only when off.
+    let (text, _) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.voices", "slot": "fx", "voices": {"count": 2, "sleep": false}}),
+        )],
+    );
+    assert!(
+        text.contains("voices = { count = 2, sleep = false }"),
+        "{text}"
+    );
     let (text, _) = round_trip(
         &text,
         &[op(
@@ -386,7 +397,8 @@ fn voices_is_written_and_removed() {
         serde_json::json!(0),
         serde_json::json!(65),
         serde_json::json!(2.5),
-        serde_json::json!({"count": 2, "sleep": true}),
+        serde_json::json!({"count": 2, "sleep": "no"}),
+        serde_json::json!({"count": 2, "spread": 1}),
         serde_json::json!("8"),
     ] {
         assert!(

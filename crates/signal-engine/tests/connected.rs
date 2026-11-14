@@ -110,6 +110,7 @@ fn plan(connections: &[(&str, &str)]) -> Result<ExecutionPlan, Vec<GraphError>> 
         ],
         connections: connections.iter().map(|(f, t)| conn(f, t)).collect(),
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &probe_registry(), 0)
 }

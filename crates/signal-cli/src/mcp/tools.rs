@@ -384,10 +384,10 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "slot_voices",
         group: Group::Patch,
-        description: "Writes a slot's `voices` (ADR 0044): a count from 1 to 64 makes it polyphonic (its content copied per voice, notes into its `alloc` port spread over them, outputs summed), {count, legato} with the allocator's legato, null makes it mono again. Adding or removing voices is a Replace live; a change of the count an ordinary edit. Judged by the gain guard like any patch.",
+        description: "Writes a slot's `voices` (ADR 0044): a count from 1 to 64 makes it polyphonic (its content copied per voice, notes into its `alloc` port spread over them, outputs summed), {count, legato, sleep} with the allocator's legato and sleeping voices (default true: only sounding voices are computed), null makes it mono again. Adding or removing voices is a Replace live; a change of the count an ordinary edit. Judged by the gain guard like any patch.",
         schema: || {
             object(
-                json!({"slot": {"type": "string"}, "voices": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 64}, {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 64}, "legato": {"type": "boolean"}}, "required": ["count"]}, {"type": "null"}]}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                json!({"slot": {"type": "string"}, "voices": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 64}, {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 64}, "legato": {"type": "boolean"}, "sleep": {"type": "boolean"}}, "required": ["count"]}, {"type": "null"}]}, "level": {"type": "string"}, "base": {"type": "string"}}),
                 &["slot", "voices"],
             )
         },

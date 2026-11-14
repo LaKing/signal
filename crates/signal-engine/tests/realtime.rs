@@ -77,6 +77,7 @@ struct Seen {
     lines: Vec<String>,
     meters: Vec<Meter>,
     parameters: Vec<(String, ParameterValue)>,
+    sleeps: Vec<(String, bool)>,
     frontier: Frame,
 }
 
@@ -89,6 +90,9 @@ impl ControlSink for Seen {
     }
     fn parameter(&mut self, port: &signal_core::PortAddress, value: ParameterValue) {
         self.parameters.push((port.to_string(), value));
+    }
+    fn sleep(&mut self, members: &signal_core::InstanceAddress, asleep: bool) {
+        self.sleeps.push((members.to_string(), asleep));
     }
     fn frontier(&mut self, next_frame: Frame) {
         self.frontier = next_frame;
@@ -616,4 +620,56 @@ fn the_threaded_null_driver_hands_the_runner_back() {
     let runner = driver.stop().unwrap().expect("the runner comes back");
     assert!(driver.stop().unwrap().is_none());
     assert_eq!(driver.output().len() as u64, runner.next_frame().0 * 2);
+}
+
+/// ADR 0044 §11: a sleep group's state reaches the control side by its
+/// members address (observation only): `/g`, silent and driven by `/drv`
+/// at 0, sleeps from frame 64; `/drv` at 1 from frame 1000 wakes it.
+#[test]
+fn sleep_group_states_are_observed() {
+    let mut root = signal_graph::CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst_with("drv", "test.dc", &[("value", 0.0)]),
+            inst_with("g", "test.dc", &[("value", 0.0)]),
+            inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
+        ],
+        connections: vec![conn("g.out", "out.l"), conn("drv.out", "out.r")],
+        ..Default::default()
+    };
+    root.sleep = vec![signal_graph::SleepDef {
+        members: "g".to_owned(),
+        driver: "drv.out".to_owned(),
+        rest: 64,
+    }];
+    let plan = signal_graph::build_plan(&root, &[], &common::latent_registry(), 0).unwrap();
+    let (runner, mut controller) = realtime(&plan, &registry(), config()).unwrap();
+    let mut driver = NullDriver::new(RATE, 2, 3);
+    driver.start(runner).unwrap();
+    controller
+        .send_event(
+            port_addr("/drv.value"),
+            EventPayload::Set(1.0),
+            Stamp::At(Frame(1_000)),
+        )
+        .unwrap();
+    let mut seen = Seen::default();
+    let mut slept = false;
+    // In runs of 100 frames, so that a callback ends while it sleeps.
+    for _ in 0..20 {
+        driver
+            .run(100, || {
+                poll(&mut controller, &mut seen);
+                slept |= seen.sleeps.iter().any(|(g, a)| g == "/g" && *a);
+            })
+            .unwrap();
+    }
+    driver.stop().unwrap();
+    poll(&mut controller, &mut seen);
+    assert!(slept, "{:?}", seen.sleeps);
+    assert_eq!(
+        seen.sleeps.last(),
+        Some(&("/g".to_owned(), false)),
+        "woken by /drv"
+    );
 }

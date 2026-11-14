@@ -24,6 +24,25 @@ pub struct CompositeDef {
     /// What it exposes to the composite that contains it.
     #[serde(default)]
     pub exports: Exports,
+    /// Its sleep groups (ADR 0044 §11, `docs/semantics.md` §17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sleep: Vec<SleepDef>,
+}
+
+/// A sleep group (ADR 0044 §11): the primitive instances under one of the
+/// composite's instances, which are not called while the group is asleep.
+/// Domain-free: frames, ports, instances and exact zero.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SleepDef {
+    /// The instance whose primitive instances are the group's members: a
+    /// local name.
+    pub members: String,
+    /// The driver: a signal output of another of the composite's instances,
+    /// `inst.port`, that wakes the group at 0.5 or more.
+    pub driver: String,
+    /// The rest length *R* in frames, at least 1: the group falls asleep
+    /// only at multiples of it, after *R* quiet frames.
+    pub rest: u64,
 }
 
 /// An instance of a module inside a composite.

@@ -40,6 +40,9 @@ pub(crate) const MAX_VOICES: u32 = 64;
 /// ADR 0044 §4–5: the generated composite's allocator, unpack and sum types.
 const ALLOCATOR: &str = "std.voice_alloc";
 const UNPACK: &str = "std.unpack64";
+/// A poly slot's voices' rest length *R* (ADR 0044 §11): 1024 frames,
+/// 21.3 ms at 48 kHz.
+const SLEEP_REST: u64 = 1024;
 const PACK: &str = "std.pack64";
 const REDUCE: &str = "std.reduce64";
 
@@ -586,6 +589,8 @@ pub struct SlotVoices {
     pub count: u32,
     /// The allocator's legato.
     pub legato: bool,
+    /// Whether its voices sleep while silent (ADR 0044 §11).
+    pub sleep: bool,
     /// The generated definition its instance is of (`poly:/synth` at the root, `poly:rack/synth` in the composite `rack`).
     pub definition: String,
     /// Each voice's address relative to the slot's (`v0`, `v1`, …); empty
@@ -1468,6 +1473,7 @@ fn resolve_def(
             resolution.voices = Some(SlotVoices {
                 count: voices.count,
                 legato: voices.legato,
+                sleep: voices.sleep,
                 definition: poly_name(name, slot_name),
                 voices: Vec::new(),
             });
@@ -2515,6 +2521,24 @@ fn generate(
             name: target,
             from: format!("{sum}.sum"),
         });
+    }
+    // ADR 0044 §11: one sleep group per voice, driven by its element of
+    // the allocator's `active`.
+    if voices.sleep {
+        def.instances.push(InstanceDef {
+            name: "each_active".to_owned(),
+            module: UNPACK.to_owned(),
+            ..InstanceDef::default()
+        });
+        def.connections
+            .push(wire("alloc.active".to_owned(), "each_active.in".to_owned()));
+        for e in 0..n {
+            def.sleep.push(signal_graph::SleepDef {
+                members: format!("v{e}"),
+                driver: format!("each_active.e{e}"),
+                rest: SLEEP_REST,
+            });
+        }
     }
     // The content's parameters outside the interface, under their own
     // names, so `set` and live edits reach every voice.

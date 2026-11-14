@@ -280,3 +280,113 @@ pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
         }
     }
 }
+
+/// ADR 0044 §11: every sleep group has a primitive member, and its members
+/// are not latent, sinks or sources (whose calls cover every block); its
+/// driver is a signal output outside it; groups are disjoint; and nothing
+/// in a group reaches its driver or, through instances outside it, the
+/// group again, so the group runs as one unit after its driver.
+pub(crate) fn sleep_groups(graph: &FlatGraph) -> Result<(), Vec<GraphError>> {
+    let mut errors = Vec::new();
+    let mut next: BTreeMap<InstanceAddress, Vec<InstanceAddress>> = BTreeMap::new();
+    for connection in &graph.connections {
+        next.entry(connection.from.instance())
+            .or_default()
+            .push(connection.to.instance());
+    }
+    for (g, (group, (scope, written))) in graph.sleep.iter().zip(&graph.sleep_declared).enumerate()
+    {
+        let error = |reason: String| GraphError::SleepGroup {
+            scope: scope.clone(),
+            members: written.clone(),
+            reason,
+        };
+        let members: BTreeSet<&InstanceAddress> = graph
+            .instances
+            .keys()
+            .filter(|a| group.contains(a))
+            .collect();
+        if members.is_empty() {
+            errors.push(error("it has no primitive instance".into()));
+            continue;
+        }
+        if let Some((address, _)) = graph.instances.iter().find(|(a, i)| {
+            members.contains(a)
+                && (i.descriptor.latency.is_some()
+                    || i.descriptor.sink.is_some()
+                    || i.descriptor.source.is_some())
+        }) {
+            errors.push(error(format!(
+                "{address} is latent, a sink or a source, which cannot sleep"
+            )));
+            continue;
+        }
+        let driver = group.driver.instance();
+        let shape = graph.instances.get(&driver).and_then(|i| {
+            i.descriptor
+                .ports
+                .iter()
+                .find(|p| p.name == group.driver.port())
+                .map(|p| p.shape)
+        });
+        if members.contains(&driver) {
+            errors.push(error(format!(
+                "its driver {} is inside the group",
+                group.driver
+            )));
+            continue;
+        }
+        if shape != Some(PortShape::Signal) {
+            errors.push(error(format!(
+                "its driver {} is not a signal output",
+                group.driver
+            )));
+            continue;
+        }
+        if let Some(other) = graph.sleep[..g]
+            .iter()
+            .find(|o| o.contains(&group.members) || group.contains(&o.members))
+        {
+            errors.push(error(format!(
+                "it overlaps the sleep group of {}",
+                other.members
+            )));
+            continue;
+        }
+        // Everything the group reaches outside itself, and whether that
+        // comes back into the group or reaches the driver.
+        let mut seen: BTreeSet<InstanceAddress> = BTreeSet::new();
+        let mut stack: Vec<InstanceAddress> = members
+            .iter()
+            .flat_map(|m| next.get(*m).into_iter().flatten())
+            .filter(|a| !members.contains(a))
+            .cloned()
+            .collect();
+        let mut back = None;
+        while let Some(a) = stack.pop() {
+            if !seen.insert(a.clone()) {
+                continue;
+            }
+            for b in next.get(&a).into_iter().flatten() {
+                if members.contains(b) {
+                    back.get_or_insert_with(|| a.clone());
+                } else if !seen.contains(b) {
+                    stack.push(b.clone());
+                }
+            }
+        }
+        if seen.contains(&driver) {
+            errors.push(error(format!(
+                "the group reaches its driver {}",
+                group.driver
+            )));
+        } else if let Some(a) = back {
+            errors.push(error(format!("its outputs come back into it through {a}")));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}

@@ -110,6 +110,7 @@ fn plan(registry: &Registry, module: &str) -> ExecutionPlan {
         instances: vec![instance("x", module), instance("out", "std.audio_out")],
         connections: Vec::new(),
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 0).unwrap()
 }

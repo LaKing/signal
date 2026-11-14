@@ -2040,6 +2040,7 @@ fn definition(
                                 Ok(count) => model::VoicesSpec {
                                     count,
                                     legato: false,
+                                    sleep: true,
                                 },
                                 Err(message) => {
                                     problems.push((v.span().start, format!("{instance}: {message}")));

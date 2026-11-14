@@ -1176,6 +1176,7 @@ pub fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> Exe
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &latent_registry(), 1).unwrap()
 }

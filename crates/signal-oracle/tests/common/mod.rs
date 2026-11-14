@@ -18,7 +18,7 @@ use signal_engine::{Engine, EngineConfig, HookPoint, Schedule, ScheduleStats};
 use signal_graph::ExecutionPlan;
 use signal_oracle::{
     Connection, DiscardReason, FaultReason, Graph, Instance, InstanceEnd, Output, ParameterEnd,
-    Record, Script, Source,
+    Record, Script, Sleep, Source,
 };
 use signal_output::render_blocks;
 
@@ -68,6 +68,15 @@ pub fn graph_of(plan: &ExecutionPlan, seed: u64) -> Graph {
         version: plan.version,
         instances: shuffled(instances, seed),
         connections: shuffled(connections, seed ^ 0x9e37_79b9),
+        sleep: plan
+            .sleep_groups
+            .iter()
+            .map(|g| Sleep {
+                members: g.members.clone(),
+                driver: g.driver.clone(),
+                rest: g.rest,
+            })
+            .collect(),
     }
 }
 

@@ -36,6 +36,7 @@ fn plan(registry: &Registry) -> ExecutionPlan {
         ],
         connections: vec![connection("mic.l", "out.l"), connection("mic.r", "out.r")],
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 0).unwrap()
 }

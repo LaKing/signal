@@ -442,3 +442,89 @@ fn runner_with_blocks(threads: usize, rt: RtOptions) {
         assert!(runner.schedule_stats().worker_tasks > 0);
     }
 }
+
+/// ADR 0044 §11: four sleep groups, falling asleep and woken by their
+/// driver, across swaps that keep them and one that changes *R*: blocks and
+/// swaps allocate nothing, on one thread and on eight.
+#[test]
+fn sleep_groups_allocate_nothing() {
+    let sleeping = |rest: u64, version: u64| {
+        let mut instances = vec![
+            inst_with("drv", "test.dc", &[("value", 0.0)]),
+            inst("sum", "test.add"),
+            inst("rec", "test.recorder"),
+        ];
+        let mut connections = vec![conn("sum.out", "rec.zeta"), conn("drv.out", "rec.alpha")];
+        let mut sleep = Vec::new();
+        for g in 0..4 {
+            instances.push(inst_with(&format!("g{g}"), "test.dc", &[("value", 0.0)]));
+            connections.push(conn(
+                &format!("g{g}.out"),
+                if g % 2 == 0 { "sum.a" } else { "sum.b" },
+            ));
+            sleep.push(signal_graph::SleepDef {
+                members: format!("g{g}"),
+                driver: "drv.out".to_owned(),
+                rest,
+            });
+        }
+        connections.retain(|c| c.to != "sum.a" || c.from == "g0.out");
+        connections.retain(|c| c.to != "sum.b" || c.from == "g1.out");
+        let root = signal_graph::CompositeDef {
+            name: "project".to_owned(),
+            instances,
+            connections,
+            sleep,
+            ..Default::default()
+        };
+        let mut plan = signal_graph::build_plan(&root, &[], &common::latent_registry(), 0).unwrap();
+        plan.version = version;
+        plan
+    };
+    for threads in [1, 8] {
+        let mut engine = engine_threads(&sleeping(16, 0), 1_000, threads, vec![]);
+        engine.set_task_hook(Some(guard_workers_with_workers));
+        let registry = registry();
+        let mut swaps = [
+            None,
+            Some(sleeping(16, 1)),
+            None,
+            Some(sleeping(32, 2)),
+            None,
+            None,
+        ]
+        .into_iter();
+        let mut old = Vec::new();
+        for (round, k) in [7usize, 64, 256, 3, 128, 1].into_iter().enumerate() {
+            let start = engine.next_frame().0;
+            let mut swap = swaps
+                .next()
+                .flatten()
+                .map(|plan| engine.prepare_swap(&plan, &registry).unwrap());
+            let value = if round % 2 == 0 { 0.0 } else { 1.0 };
+            let event = ext(
+                start + k as u64 / 2,
+                round as u64 + 1,
+                "/drv.value",
+                EventPayload::Set(value),
+            );
+            let guard = Guard::start();
+            engine.push_external(event).unwrap();
+            assert_eq!(engine.run_block(k), k);
+            engine.drain_log(&mut |_| {});
+            if let Some(swap) = swap.as_mut() {
+                engine.commit_swap(swap, engine.next_frame()).unwrap();
+            }
+            let counts = guard.counts();
+            drop(guard);
+            assert!(
+                counts.is_zero(),
+                "{threads} threads, block {round} (k = {k}): {counts:?}"
+            );
+            old.extend(swap);
+            drop(engine.reclaim_externals().collect::<Vec<_>>());
+        }
+        assert!(engine.sleep_states().count() == 4);
+    }
+    assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0);
+}

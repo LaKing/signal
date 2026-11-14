@@ -87,6 +87,7 @@ fn example_loads_into_the_description_model() {
                 connection("voice.out", "out.r", Some(0.5)),
             ],
             exports: Exports::default(),
+            sleep: Vec::new(),
         }
     );
     assert_eq!(
@@ -128,6 +129,7 @@ fn example_loads_into_the_description_model() {
                     },
                 ],
             },
+            sleep: Vec::new(),
         }]
     );
 }

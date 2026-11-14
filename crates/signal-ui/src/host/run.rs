@@ -1,7 +1,7 @@
 //! The run: its build, install, poll and stop, the instances the fault guard
 //! mutes, and the device wait.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -30,6 +30,7 @@ pub(super) struct Observed<'a> {
     pub(super) values: &'a mut BTreeMap<PortAddress, ParameterValue>,
     pub(super) reports: &'a mut Vec<Report>,
     pub(super) muted: &'a mut Vec<Muted>,
+    pub(super) sleeps: &'a mut Vec<(String, bool)>,
 }
 
 /// An instance the fault guard muted (`docs/semantics.md` §7, §14): it is
@@ -162,6 +163,9 @@ impl ControlSink for Observed<'_> {
             });
         }
     }
+    fn sleep(&mut self, members: &signal_core::InstanceAddress, asleep: bool) {
+        self.sleeps.push((members.to_string(), asleep));
+    }
     fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
         match self.values.get_mut(port) {
             Some(known) => *known = value,
@@ -245,6 +249,9 @@ pub(super) struct Run {
     pub(super) muted: Vec<Muted>,
     /// Signal.app's note for them (`app.muted`), made when they change.
     pub(super) muted_note: Option<String>,
+    /// The members addresses of the sleep groups asleep now, as observed
+    /// (ADR 0044 §11): `describe.asleep` and the `sleep` pushes.
+    pub(super) asleep: BTreeSet<String>,
     /// The log records the runner and the engine had dropped when last
     /// polled; once it grows, a fault record may have been lost.
     pub(super) log_dropped: u64,
@@ -650,6 +657,7 @@ impl Host {
             failure_reported: false,
             muted: Vec::new(),
             muted_note: None,
+            asleep: BTreeSet::new(),
             log_dropped: 0,
             log_lost: false,
             fault: None,
@@ -696,6 +704,7 @@ impl Host {
             values: &mut self.live.values,
             reports: &mut self.reports,
             muted: &mut self.muted,
+            sleeps: &mut self.sleeps,
         };
         let meters = &mut self.meters;
         run.controller
@@ -737,6 +746,26 @@ impl Host {
                 run.muted_note = muted_message(&run.muted, run.log_lost);
             }
         }
+        // ADR 0044 §11: the voices asleep, pushed when they change; a swap
+        // starts them over (its groups are reported within a few callbacks).
+        let before = run.asleep.clone();
+        if swapped {
+            run.asleep.clear();
+        }
+        for (members, asleep) in self.sleeps.drain(..) {
+            if asleep {
+                run.asleep.insert(members);
+            } else {
+                run.asleep.remove(&members);
+            }
+        }
+        if run.asleep != before {
+            let push = json!({"type": "sleep", "asleep": run.asleep.iter().collect::<Vec<_>>()});
+            self.broadcast(&push);
+        }
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
         if let Some(failure) = status.failure
             && !run.failure_reported
         {

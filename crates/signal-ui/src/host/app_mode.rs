@@ -322,6 +322,7 @@ impl Host {
             failure_reported: false,
             muted: Vec::new(),
             muted_note: None,
+            asleep: std::collections::BTreeSet::new(),
             log_dropped: 0,
             log_lost: false,
             fault: None,

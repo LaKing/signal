@@ -153,10 +153,17 @@ outputs = { out = "sum_out.sum" }
 parameters = { level = ["v0.level", "v1.level", "v2.level"], tone = ["v0.tone", "v1.tone", "v2.tone"] }
 "#;
 
-/// Test 2: the generated composite plans exactly as the hand-written one.
+/// Test 2: the generated composite plans exactly as the hand-written one
+/// (without sleep groups, which a composite's file does not write).
 #[test]
 fn a_poly_slot_plans_as_its_explicit_composite() {
-    let generated = planned(&poly("3", ", level = -6, set = { tone = 2 }"), &[]);
+    let generated = planned(
+        &poly(
+            "{ count = 3, sleep = false }",
+            ", level = -6, set = { tone = 2 }",
+        ),
+        &[],
+    );
     let explicit = planned(
         &host("{ module = \"explicit\", level = -6, tone = 2 }"),
         &[("composites/explicit.toml", EXPLICIT)],
@@ -258,7 +265,7 @@ fn voices_is_checked_at_the_value() {
     for (voices, message) in [
         ("0", "`voices` is a count from 1 to 64; 0 is outside it"),
         ("65", "`voices` is a count from 1 to 64; 65 is outside it"),
-        ("{ count = 2, sleep = true }", "`sleep` is not yet built"),
+        ("{ count = 2, sleep = 1 }", "expected a boolean"),
         (
             "{ count = 2, assign = \"lowest\" }",
             "only `\"rotate\"` is built",
@@ -524,4 +531,38 @@ fn the_graph_gives_the_generated_level() {
         "a voice opens into the content"
     );
     assert_eq!(inside["slot"], "/synth");
+}
+
+/// ADR 0044 §11: by default each voice is a sleep group, driven by its
+/// element of the allocator's `active` through `each_active`, R = 1024.
+#[test]
+fn voices_sleep_by_default_one_group_each() {
+    let plan = planned(&poly("3", ""), &[]).plan;
+    let groups: Vec<(String, String, u64)> = plan
+        .sleep_groups
+        .iter()
+        .map(|g| (g.members.to_string(), g.driver.to_string(), g.rest))
+        .collect();
+    let expected: Vec<(String, String, u64)> = (0..3)
+        .map(|e| {
+            (
+                format!("/synth/v{e}"),
+                format!("/synth/each_active.e{e}"),
+                1024,
+            )
+        })
+        .collect();
+    assert_eq!(groups, expected);
+    assert!(
+        plan.sources[&"/synth/each_active.in".parse().unwrap()]
+            .iter()
+            .any(|s| s.from.to_string() == "/synth/alloc.active")
+    );
+    let off = planned(&poly("{ count = 3, sleep = false }", ""), &[]).plan;
+    assert!(off.sleep_groups.is_empty());
+    assert!(
+        !off.instances
+            .iter()
+            .any(|i| i.address.as_str() == "/synth/each_active")
+    );
 }

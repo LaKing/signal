@@ -47,6 +47,7 @@ fn plan_with(
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, 1).unwrap()
 }

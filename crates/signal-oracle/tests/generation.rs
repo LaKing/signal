@@ -100,6 +100,7 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], registry, version).unwrap()
 }

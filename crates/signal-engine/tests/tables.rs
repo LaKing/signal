@@ -120,6 +120,7 @@ fn plan(tables: &[Option<Table>]) -> ExecutionPlan {
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     let mut plan = build_plan(&root, &[], &tables_registry(), 1).unwrap();
     for instance in &mut plan.instances {

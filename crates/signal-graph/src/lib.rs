@@ -31,11 +31,11 @@ use signal_core::{Direction, PortAddress, PortShape, Registry};
 
 pub use def::{
     CompositeDef, ConnectionDef, ExportValue, Exports, InputExport, InstanceDef, OutputExport,
-    ParameterExport, ScopeDef,
+    ParameterExport, ScopeDef, SleepDef,
 };
 pub use error::{GraphError, GraphWarning, PlanBudget, Restriction};
 pub use flatten::ModulePort;
-pub use plan::{ExecutionPlan, PlanInstance, Source};
+pub use plan::{ExecutionPlan, PlanInstance, SleepGroup, Source};
 
 /// The most instances, composite or primitive, a plan flattens to: about 9
 /// times the largest benchmark project's 30 041 (`signal bench
@@ -111,6 +111,8 @@ pub fn build_plan(
     validate::budget(&graph)?;
     validate::validate(&graph, &converted, &mut warnings)?;
     let schedule = schedule::schedule(&graph).map_err(|error| vec![error])?;
+    // ADR 0044 §11: sleep groups, once the graph is known to be acyclic.
+    validate::sleep_groups(&graph)?;
     warnings.extend(
         schedule::unreachable(&graph)
             .into_iter()
@@ -149,6 +151,7 @@ pub fn build_plan(
         });
     }
 
+    let sleep_groups = std::mem::take(&mut graph.sleep);
     let instances = graph
         .instances
         .into_iter()
@@ -168,6 +171,7 @@ pub fn build_plan(
         schedule: schedule.order,
         state_outputs: schedule.state_outputs,
         sources,
+        sleep_groups,
         warnings,
     })
 }

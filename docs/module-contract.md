@@ -20,6 +20,8 @@
 
 The module never sees addresses, other instances, the graph, suspension, or the wall clock. Domain concepts (tempo, musical time, protocols) belong in library modules, never in the core (ADR 0001, 0003).
 
+**Calls need not cover every frame.** A suspended instance (`semantics.md` §6) and a member of an asleep sleep group (§17, ADR 0044 §11) are not called for some frames, and their time stops. A primitive never assumes that its calls cover every frame of the run, nor counts frames that were not handed to it. This needs nothing new from a primitive.
+
 ## The two feedthrough classes
 
 | Class | Trait | Contract | Calls per frame |

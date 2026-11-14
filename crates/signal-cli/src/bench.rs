@@ -1647,6 +1647,7 @@ fn voices_graph(kick: &CompositeDef, n: usize) -> Result<CompositeDef, Failure> 
             .collect(),
         connections: Vec::new(),
         exports: kick.exports.clone(),
+        sleep: Vec::new(),
     };
     let mut outputs = Vec::new();
     for i in 0..n {

@@ -377,6 +377,7 @@ pub fn composite(
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     }
 }
 

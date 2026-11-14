@@ -55,6 +55,11 @@ impl Base {
         self.value
     }
 
+    /// No ramp running or pending: advancing changes nothing.
+    pub(crate) fn is_steady(&self) -> bool {
+        self.ramp.is_none() && self.pending.is_none()
+    }
+
     /// §4a step 1, on a frame the instance runs: a running ramp moves to its
     /// value `b + (to − b)·c(i/N)`, or to exactly `to` once `i ≥ N`. Then a ramp
     /// held while the instance was suspended starts, before the frame's events

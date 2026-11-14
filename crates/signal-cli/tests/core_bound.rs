@@ -71,6 +71,7 @@ fn plan(instances: Vec<InstanceDef>, mut connections: Vec<ConnectionDef>) -> Exe
         instances,
         connections,
         exports: Exports::default(),
+        sleep: Vec::new(),
     };
     build_plan(&root, &[], &registry(), 1).unwrap()
 }
