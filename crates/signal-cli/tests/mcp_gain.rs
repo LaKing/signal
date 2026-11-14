@@ -508,3 +508,27 @@ fn a_slot_load_into_a_gain_s_fan_in_is_guarded() {
     assert!(!mcp.file("project.toml").contains("load = "));
     assert!(mcp.finish().success());
 }
+
+/// ADR 0035 §3 (phase 1's note): an included project's sink is planned as
+/// its `std.audio_tap`, whose gain reaches the host's sink; its override
+/// (`/inc/out.gain`, a control since phase 3) is held at the ceiling too.
+#[test]
+fn an_include_s_tap_gain_is_held_at_the_ceiling() {
+    let host = format!(
+        "{HEAD}[instances]\ninc = {{ project = \"inc\" }}\nout = {{ module = \"std.audio_out\", gain = 0.25 }}\n\n[wiring]\nconnections = [\n  {{ from = \"inc.l\", to = \"out.l\" }},\n  {{ from = \"inc.r\", to = \"out.r\" }},\n]\n"
+    );
+    let dir = project(&host, "gain-include");
+    std::fs::create_dir_all(dir.join("inc")).unwrap();
+    std::fs::write(dir.join("inc/project.toml"), tone("0.2")).unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    refused(
+        &mut mcp,
+        "set_parameter",
+        json!({"address": "/inc/out.gain", "value": 2}),
+    );
+    mcp.ok(
+        "set_parameter",
+        json!({"address": "/inc/out.gain", "value": 0.1}),
+    );
+    assert!(mcp.finish().success());
+}

@@ -1,5 +1,7 @@
 //! The gain ceiling (ADR 0029 §3, `docs/agent-interface.md` "Safety"): no
-//! tool may cause a `std.audio_out` gain above `--max-gain`.
+//! tool may cause a `std.audio_out` gain above `--max-gain`, nor the gain
+//! of an included project's sink, planned as its `std.audio_tap` (ADR 0035
+//! §3), which a host reaches through `set` or a wire.
 //!
 //! A sink's effective gain is `clamp(base · m, 0, 4)` where `m` is the sum
 //! of its gain port's signal connections, or the base alone when nothing is
@@ -32,6 +34,10 @@ use signal_project::{Project, SourceFile};
 
 /// The parameter every `std.audio_out` gain is.
 const SINK: &str = "std.audio_out";
+/// ADR 0035 §3: an included project's sink is planned as its tap, whose
+/// `gain` (range `[0, 4]`, as the sink's) reaches the host's sink through
+/// the include's outputs, so the ceiling bounds it too (phase 1's note).
+const TAP: &str = "std.audio_tap";
 const GAIN: &str = "gain";
 /// The gain's declared range ends at 4: the effective gain never exceeds it.
 const CLAMP: f64 = 4.0;
@@ -106,7 +112,11 @@ impl Gains {
             }
         }
         let mut ports = BTreeMap::new();
-        for sink in plan.instances.iter().filter(|i| i.type_name == SINK) {
+        for sink in plan
+            .instances
+            .iter()
+            .filter(|i| i.type_name == SINK || i.type_name == TAP)
+        {
             let address = format!("{}.{GAIN}", sink.address);
             let gain_sources: Vec<_> = plan
                 .sources
