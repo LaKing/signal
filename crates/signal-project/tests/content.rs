@@ -1558,3 +1558,84 @@ fn a_slot_inheriting_the_run_s_seed_keeps_its_streams() {
         problems(&bad)
     );
 }
+
+/// ADR 0035 §1, §7, §13 (phase 4): a `.signal` file included plays from its
+/// unpacked copy, as the folder it was packed from does (audio bit for
+/// bit), and its diagnostics name it; the watcher names an outside one's
+/// file; `pack` takes one inside the folder as a file, `pack --embed`
+/// embeds one from outside unpacked; a session's copy holds its files.
+#[test]
+fn a_signal_file_includes_as_its_folder_does() {
+    let folder = noisy_host("signal-folder", "", false, 48_000);
+    let base = scratch("signal-include");
+    let archive = signal_project::archive::pack(&folder.join("noisy")).unwrap();
+    let inside = base.join("inside");
+    let host = fs::read_to_string(folder.join("project.toml"))
+        .unwrap()
+        .replace("project = \"noisy\"", "project = \"parts/noisy.signal\"");
+    write(&inside, &[("project.toml", &host)]);
+    fs::create_dir_all(inside.join("parts")).unwrap();
+    fs::write(inside.join("parts/noisy.signal"), &archive).unwrap();
+    let outside = base.join("outside");
+    write(
+        &outside,
+        &[(
+            "project.toml",
+            &host.replace("parts/noisy.signal", "../noisy.signal"),
+        )],
+    );
+    fs::write(base.join("noisy.signal"), &archive).unwrap();
+
+    let want = alone(&folder, None, 4_096);
+    for dir in [&inside, &outside] {
+        let got = alone(dir, None, 4_096);
+        assert_eq!(bits(&got[0]), bits(&want[0]), "{}", dir.display());
+        assert_eq!(bits(&got[1]), bits(&want[1]), "{}", dir.display());
+        let included = load(dir).included_projects();
+        assert_eq!(included.len(), 1);
+        assert!(included[0].path.ends_with("noisy.signal"));
+    }
+
+    // The watcher follows the outside file, not its unpacked copy.
+    let watched = signal_project::live::include_dirs(&outside);
+    assert_eq!(watched.len(), 1, "{watched:?}");
+    assert_eq!(watched[0].0, Path::new("../noisy.signal"));
+    assert!(watched[0].1.is_file());
+
+    // Packing: inside, the file itself; from outside, embedded unpacked.
+    let packed = signal_project::archive::pack(&inside).unwrap();
+    let into = scratch("signal-include-packed");
+    let _ = fs::remove_dir_all(&into);
+    let unpacked = signal_project::archive::unpack(&packed, &into).unwrap();
+    assert!(unpacked.files.iter().any(|f| f == "parts/noisy.signal"));
+    assert_eq!(bits(&alone(&into, None, 4_096)[0]), bits(&want[0]));
+    assert!(signal_project::archive::pack(&outside).is_err());
+    let embedded = signal_project::archive::pack_embedded(&outside, None).unwrap();
+    let into = scratch("signal-include-embedded");
+    let _ = fs::remove_dir_all(&into);
+    let unpacked = signal_project::archive::unpack(&embedded, &into).unwrap();
+    assert!(
+        unpacked
+            .files
+            .iter()
+            .any(|f| f == "includes/m/project.toml"),
+        "{:?}",
+        unpacked.files
+    );
+    assert_eq!(bits(&alone(&into, None, 4_096)[1]), bits(&want[1]));
+
+    // A session's copy holds the archive's files.
+    let copy = load(&outside).session_copy();
+    assert!(copy.iter().any(|f| f.path == "includes/m/project.toml"));
+
+    // A broken archive is located at the entry.
+    fs::write(base.join("noisy.signal"), b"not a zip").unwrap();
+    let found = problems(&outside);
+    assert!(
+        has(
+            &found,
+            &["project.toml", "../noisy.signal", "does not unpack"]
+        ),
+        "{found:#?}"
+    );
+}

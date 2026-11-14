@@ -108,7 +108,7 @@ impl ProjectWatcher {
                     .filter(|(path, state)| last.get(*path) != Some(*state))
                     .map(|(path, _)| path.clone())
                     .chain(last.keys().filter(|path| !now.contains_key(*path)).cloned())
-                    .map(|path| shown.join(path)),
+                    .map(|path| under(shown, path)),
             );
             *last = now;
         }
@@ -164,7 +164,7 @@ impl FolderState {
         for (shown, folder) in include_dirs(dir) {
             for (path, state) in snapshot(&folder).unwrap_or_default() {
                 if !is_presentation(&path) {
-                    files.insert(shown.join(path), state);
+                    files.insert(under(&shown, path), state);
                 }
             }
         }
@@ -176,11 +176,22 @@ impl FolderState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp(Option<(Option<SystemTime>, u64)>);
 
+/// `path`, a file of the include the host reaches by `shown`, as the host
+/// names it: `shown` itself for a `.signal` include's file (the empty path).
+fn under(shown: &Path, path: PathBuf) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        shown.to_owned()
+    } else {
+        shown.join(path)
+    }
+}
+
 /// ADR 0035 §7: the folders of the projects `dir`'s project includes or
 /// loads into slots, and theirs in turn, that lie outside `dir` (one inside
 /// is watched with it), each with the path the host reaches it by
 /// (`../studio`), at most [`crate::MAX_DEPTH`] deep, each folder once. A
-/// `.signal` archive or a folder that does not exist names none.
+/// `.signal` include outside `dir` names its file, watched as one (what it
+/// holds is its own); a folder that does not exist names none.
 pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
     let Ok(root) = fs::canonicalize(dir) else {
         return Vec::new();
@@ -196,12 +207,18 @@ pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
             continue;
         };
         for written in crate::included_paths(&files) {
-            if written.ends_with(".signal") {
-                continue;
-            }
             let Ok(canonical) = fs::canonicalize(folder.join(&written)) else {
                 continue;
             };
+            if canonical.is_file() {
+                // A `.signal` include: its file is watched (outside `dir`),
+                // and what it holds is its own.
+                if !seen.contains(&canonical) && !canonical.starts_with(&root) {
+                    found.push((shown.join(&written), canonical.clone()));
+                }
+                seen.push(canonical);
+                continue;
+            }
             if seen.contains(&canonical) {
                 continue;
             }
@@ -219,6 +236,12 @@ pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
 
 fn snapshot(dir: &Path) -> io::Result<Snapshot> {
     let mut files = Snapshot::new();
+    // A `.signal` include's file: itself, by the empty path.
+    let metadata = fs::metadata(dir)?;
+    if metadata.is_file() {
+        files.insert(PathBuf::new(), (metadata.modified().ok(), metadata.len()));
+        return Ok(files);
+    }
     let mut folders = vec![dir.to_owned()];
     while let Some(folder) = folders.pop() {
         for entry in fs::read_dir(&folder)? {

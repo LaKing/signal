@@ -480,7 +480,8 @@ fn waits(error: &io::Error) -> bool {
 /// ADR 0035 §10: the `ui/` folder of the project the top-level instance
 /// `key` of the project in `dir` includes (`project = "…"`) or loads into
 /// its slot (a project `load`), read from its `project.toml` as it is now;
-/// `None` for anything else (a `.signal` archive is not served).
+/// `None` for anything else. A `.signal` include's is its unpacked copy's
+/// (`signal_project::include_folder`).
 pub(crate) fn include_ui(dir: &Path, key: &str) -> Option<PathBuf> {
     let text =
         signal_project::read_regular_to_string(dir.join(signal_project::PROJECT_FILE)).ok()?;
@@ -496,10 +497,7 @@ pub(crate) fn include_ui(dir: &Path, key: &str) -> Option<PathBuf> {
                 .and_then(toml::Value::as_str)
                 .filter(|load| signal_project::is_project_path(load))
         })?;
-    if written.ends_with(".signal") {
-        return None;
-    }
-    Some(dir.join(written).join("ui"))
+    Some(signal_project::include_folder(dir, written)?.join("ui"))
 }
 
 pub(crate) fn file(root: &Path, relative: &str) -> Option<PathBuf> {

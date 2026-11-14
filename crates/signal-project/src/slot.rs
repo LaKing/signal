@@ -2736,10 +2736,7 @@ pub fn content_names(
             settable,
         });
     }
-    if load.ends_with(".signal") {
-        return None;
-    }
-    let loaded = Project::load(&dir.join(load)).ok()?;
+    let loaded = Project::load(&crate::include_folder(dir, load)?).ok()?;
     project_content(&loaded, registry)
 }
 

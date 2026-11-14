@@ -562,12 +562,8 @@ pub fn prepare_include(
             ))
         })?
         .to_owned();
-    if path.ends_with(".signal") {
-        return Err(invalid(format!(
-            "`{key}` includes an archive: unpack it into a folder first"
-        )));
-    }
-    let source_dir = dir.join(&path);
+    let source_dir = crate::include_folder(dir, &path)
+        .ok_or_else(|| invalid(format!("`{key}`: `{path}` does not unpack")))?;
     let source = project_sources(&source_dir)?;
     let text = |path: &str| {
         source

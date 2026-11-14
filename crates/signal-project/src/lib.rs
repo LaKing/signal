@@ -70,7 +70,9 @@ use toml::Spanned;
 
 pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
-pub use include::{IncludeInfo, MAX_DEPTH, included_paths, is_root as is_included_root};
+pub use include::{
+    IncludeInfo, MAX_DEPTH, include_folder, included_paths, is_root as is_included_root,
+};
 pub use library::{LIBRARY_FOLDER, Library, LibraryComposite, is_library_file};
 pub use pattern::{
     MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,

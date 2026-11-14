@@ -76,7 +76,7 @@ pub enum ArchiveError {
     NoProjectFile,
     /// The project includes projects from outside its folder (ADR 0035
     /// §13), which [`pack`] cannot hold ([`pack_embedded`] embeds them), or
-    /// a `.signal` include: their paths as written.
+    /// an embedded one's own outside includes: their paths as written.
     Includes(Vec<String>),
     /// The bytes are not a zip archive (or one this reader cannot read).
     NotAnArchive(String),
@@ -275,6 +275,11 @@ fn inside_includes(dir: &Path, root: &Path) -> Result<BTreeMap<String, PathBuf>,
                 continue;
             };
             let prefix = relative.to_string_lossy().replace('\\', "/");
+            if canonical.is_file() {
+                // A `.signal` include inside the folder: the file itself.
+                found.insert(prefix, canonical);
+                continue;
+            }
             for (name, path) in project_files(&canonical)? {
                 found.insert(format!("{prefix}/{name}"), path);
             }
@@ -320,8 +325,7 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
         let outside: Vec<String> = crate::include::included_paths(&sources)
             .into_iter()
             .filter(|written| {
-                written.ends_with(".signal")
-                    || !fs::canonicalize(dir.join(written)).is_ok_and(|f| f.starts_with(&root))
+                !fs::canonicalize(dir.join(written)).is_ok_and(|f| f.starts_with(&root))
             })
             .collect();
         if !outside.is_empty() {
@@ -342,8 +346,9 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
 /// and the `project` (or `load`) values naming them rewritten to that path
 /// (only those values, with `toml_edit`), so the archive renders as the
 /// folder does. One folder included twice is embedded once. An include
-/// inside the folder is packed as it is; an outside include of an embedded
-/// project, or a `.signal` include, is refused (not built yet).
+/// inside the folder is packed as it is (a `.signal` one as its file); one
+/// from outside that is a `.signal` file is embedded unpacked; an outside
+/// include of an embedded project is refused (not built yet).
 pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
     let mut files = project_files(dir)?;
     let root = fs::canonicalize(dir).map_err(io_error(dir))?;
@@ -400,16 +405,26 @@ pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveErr
                 if !crate::is_project_path(&written) && key == "load" {
                     continue;
                 }
-                if written.ends_with(".signal") {
-                    refused.push(written);
-                    continue;
-                }
                 let Ok(folder) = fs::canonicalize(dir.join(&written)) else {
                     continue;
                 };
                 if folder.starts_with(&root) {
                     continue;
                 }
+                // ADR 0035 §13: a `.signal` include is embedded unpacked.
+                let folder = if folder.is_file() {
+                    match unpacked_include(&folder)
+                        .and_then(|f| fs::canonicalize(&f).map_err(io_error(&f)))
+                    {
+                        Ok(unpacked) => unpacked,
+                        Err(why) => {
+                            refused.push(format!("{written} ({why})"));
+                            continue;
+                        }
+                    }
+                } else {
+                    folder
+                };
                 let at = match embedded.get(&folder) {
                     Some(at) => at.clone(),
                     None => {
@@ -773,6 +788,45 @@ pub fn unique_folder(parent: &Path, stem: &str) -> Result<PathBuf, ArchiveError>
             Err(error) => return Err(io_error(&dir)(error)),
         }
     }
+}
+
+/// ADR 0035 §7: the folder a `.signal` include `file` plays from, unpacked
+/// read-only under the system's temporary folder in a folder named after
+/// the archive's FNV-1a 64 (`signal-include-<hash>`), so the same bytes
+/// reuse one folder and a changed file unpacks into another. Left for the
+/// system to clean, since any number of hosts may play it.
+pub fn unpacked_include(file: &Path) -> Result<PathBuf, ArchiveError> {
+    let bytes = read_archive(file)?;
+    let parent = std::env::temp_dir();
+    let at = parent.join(format!(
+        "signal-include-{:016x}",
+        signal_core::fnv1a64(&bytes)
+    ));
+    if at.join(PROJECT_FILE).is_file() {
+        return Ok(at);
+    }
+    let fresh = unique_folder(&parent, "signal-include-new")?;
+    let unpacked = unpack(&bytes, &fresh).and_then(|unpacked| {
+        for name in &unpacked.files {
+            let path = fresh.join(name);
+            let mut permissions = fs::metadata(&path).map_err(io_error(&path))?.permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&path, permissions).map_err(io_error(&path))?;
+        }
+        Ok(())
+    });
+    if let Err(error) = unpacked {
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(error);
+    }
+    // Another host may have unpacked the same bytes meanwhile: keep its.
+    if fs::rename(&fresh, &at).is_err() {
+        let _ = fs::remove_dir_all(&fresh);
+        if !at.join(PROJECT_FILE).is_file() {
+            return Err(io_error(&at)(io::Error::other("could not unpack here")));
+        }
+    }
+    Ok(at)
 }
 
 /// A `.signal` file unpacked into a temporary folder for one run (`signal

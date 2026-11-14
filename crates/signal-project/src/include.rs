@@ -139,6 +139,18 @@ fn key(def: &str, instance: &str) -> String {
     }
 }
 
+/// ADR 0035 §7: the folder an include written `written` in a file of the
+/// folder `dir` plays from: the folder it names, or a `.signal` file's
+/// unpacked copy ([`crate::archive::unpacked_include`]); `None` for an
+/// archive that does not unpack.
+pub fn include_folder(dir: &Path, written: &str) -> Option<PathBuf> {
+    if written.ends_with(".signal") {
+        crate::archive::unpacked_include(&dir.join(written)).ok()
+    } else {
+        Some(dir.join(written))
+    }
+}
+
 /// `text`, the file of definition `def`, with the `project` (or a slot's
 /// `load`) value of each instance whose key is in `folders` set to its
 /// folder there; `None` when nothing changes.
@@ -292,16 +304,6 @@ impl Content {
                     },
                     (None, None) => continue,
                 };
-                if written.ends_with(".signal") {
-                    error(
-                        diagnostics,
-                        at,
-                        format!(
-                            "{name}: `{written}`: a `.signal` file cannot be included yet (ADR 0035, phase 4); `signal unpack` it and name the folder"
-                        ),
-                    );
-                    continue;
-                }
                 let Some(dir) = dir else {
                     error(
                         diagnostics,
@@ -326,7 +328,25 @@ impl Content {
                         ),
                     ));
                 }
-                let canonical = match fs::canonicalize(dir.join(path)) {
+                // ADR 0035 §7: a `.signal` include plays from its unpacked
+                // copy.
+                let archive = written.ends_with(".signal");
+                let folder = if archive {
+                    match crate::archive::unpacked_include(&dir.join(path)) {
+                        Ok(folder) => folder,
+                        Err(why) => {
+                            error(
+                                diagnostics,
+                                at,
+                                format!("{name}: `{written}` does not unpack: {why}"),
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    dir.join(path)
+                };
+                let canonical = match fs::canonicalize(folder) {
                     Ok(canonical) if canonical.join(PROJECT_FILE).is_file() => canonical,
                     _ => {
                         error(
@@ -365,7 +385,9 @@ impl Content {
                 }
                 // A file of the include is named as the path was written:
                 // relative to this folder, or absolute.
-                let shown = if path.is_absolute() {
+                let shown = if archive {
+                    written.clone()
+                } else if path.is_absolute() {
                     canonical.display().to_string()
                 } else {
                     relative(dir, &canonical)
