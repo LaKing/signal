@@ -116,6 +116,7 @@ fn plan(tables: &[Option<Table>]) -> ExecutionPlan {
         });
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

@@ -77,6 +77,7 @@ fn example_loads_into_the_description_model() {
     assert_eq!(
         project.root,
         CompositeDef {
+            seed: None,
             name: String::new(),
             instances: vec![
                 instance("out", "std.audio_out", &[("gain", 0.5)]),
@@ -93,6 +94,7 @@ fn example_loads_into_the_description_model() {
     assert_eq!(
         project.composites,
         [CompositeDef {
+            seed: None,
             name: "voice".to_owned(),
             instances: vec![
                 instance("high", "std.sine_osc", &[("freq", 441.0)]),

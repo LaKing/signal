@@ -410,6 +410,7 @@ fn port_address(dotted: &str) -> PortAddress {
 
 fn composite(spec: &Spec) -> CompositeDef {
     CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: spec
             .nodes

@@ -735,6 +735,7 @@ mod tests {
         let mut registry = Registry::new();
         signal_std::register(&mut registry).unwrap();
         let root = CompositeDef {
+            seed: None,
             name: "project".to_owned(),
             instances: vec![InstanceDef {
                 name: "sparks".to_owned(),

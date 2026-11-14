@@ -27,6 +27,11 @@ pub struct CompositeDef {
     /// Its sleep groups (ADR 0044 §11, `docs/semantics.md` §17).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sleep: Vec<SleepDef>,
+    /// ADR 0035 §11: makes every instance of it a scope root with this seed
+    /// (`[composite] seed`), unless the instance is one of its own; `None`
+    /// (the default) changes nothing. Generic: any composite may declare it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 /// A sleep group (ADR 0044 §11): the primitive instances under one of the

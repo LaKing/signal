@@ -588,6 +588,11 @@ pub(crate) struct CompositeSection {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub(crate) inside_of: Option<Spanned<String>>,
+    /// ADR 0035 §11: every instance of the composite is a scope root with
+    /// this seed (`signal vendor --include` writes the included project's).
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub(crate) seed: Option<u64>,
 }
 
 /// `[wiring]`.

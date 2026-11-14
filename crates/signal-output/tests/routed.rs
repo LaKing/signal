@@ -56,6 +56,7 @@ fn plan(registry: &Registry, cue: bool) -> ExecutionPlan {
         connections.push(connection("b.out", "cue.r"));
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

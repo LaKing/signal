@@ -90,6 +90,7 @@ impl DirectPrimitive for FloodReverse {
 /// included.
 fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

@@ -113,6 +113,7 @@ fn try_plan(
         instances.push(inst("w2", "test.watch"));
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections: connections

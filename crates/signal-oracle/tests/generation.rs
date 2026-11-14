@@ -96,6 +96,7 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
         });
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

@@ -43,6 +43,7 @@ fn runner_process_with_vector_streams_allocates_and_frees_nothing() {
         scale: None,
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("clock", "std.transport", &[("bpm", 400.0)]),

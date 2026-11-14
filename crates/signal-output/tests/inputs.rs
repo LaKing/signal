@@ -29,6 +29,7 @@ fn plan(registry: &Registry) -> ExecutionPlan {
         scale: None,
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("mic", "std.audio_in"),

@@ -61,6 +61,7 @@ fn plan(follow: Option<&str>, prefer: Option<&str>, version: u64) -> ExecutionPl
         connections.push(wire(&format!("{host}.position"), "pf.a", None));
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("h1", "std.playhead", &[("bpm", 120.0)]),

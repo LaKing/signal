@@ -71,6 +71,16 @@ expression: text
         "name": {
           "description": "The composite's name: its file name without `.toml`, used as the module\nreference of its instances.",
           "type": "string"
+        },
+        "seed": {
+          "default": null,
+          "description": "ADR 0035 §11: every instance of the composite is a scope root with\nthis seed (`signal vendor --include` writes the included project's).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

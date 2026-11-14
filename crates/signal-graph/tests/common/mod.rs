@@ -373,6 +373,7 @@ pub fn composite(
     connections: Vec<ConnectionDef>,
 ) -> CompositeDef {
     CompositeDef {
+        seed: None,
         name: name.to_owned(),
         instances,
         connections,

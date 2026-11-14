@@ -60,6 +60,7 @@ fn plan(freq: Option<f64>, tone: bool, version: u64) -> ExecutionPlan {
         instances.push(instance("deck", "voice", &[]));
         connections.push(wire("deck.out", "out.r"));
         defs.push(CompositeDef {
+            seed: None,
             name: "voice".to_owned(),
             instances: vec![instance("osc", "std.sine_osc", &[("freq", freq)])],
             connections: Vec::new(),
@@ -74,6 +75,7 @@ fn plan(freq: Option<f64>, tone: bool, version: u64) -> ExecutionPlan {
         });
     }
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

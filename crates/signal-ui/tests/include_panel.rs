@@ -154,8 +154,7 @@ fn an_include_s_panel_is_read_and_served() {
     )
     .unwrap();
     fs::create_dir_all(source.join("inc/patterns")).unwrap();
-    let beat =
-        "schema_version = 1\nkind = \"steps\"\nsteps = 16\nstep = 0.25\n\n[lanes]\nkick = \"x...x...x...x...\"\n";
+    let beat = "schema_version = 1\nkind = \"steps\"\nsteps = 16\nstep = 0.25\n\n[lanes]\nkick = \"x...x...x...x...\"\n";
     fs::write(source.join("inc/patterns/beat.toml"), beat).unwrap();
     let mut rig = rig(
         "include-served",

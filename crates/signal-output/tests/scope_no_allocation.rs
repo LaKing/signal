@@ -42,6 +42,7 @@ fn runner_process_with_scopes_allocates_and_frees_nothing() {
         scale: None,
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("a", "std.sine_osc", Some(440.0)),

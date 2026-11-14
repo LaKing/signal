@@ -108,6 +108,7 @@ fn plan(registry: &Registry) -> ExecutionPlan {
         scale: None,
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("tone", "std.sine_osc"),

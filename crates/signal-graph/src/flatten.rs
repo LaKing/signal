@@ -19,7 +19,7 @@ use signal_core::{
     Registry, Snap, StreamKey, ValueLabel, converter_shape, snap_value,
 };
 
-use crate::def::{CompositeDef, ConnectionDef, InstanceDef, SleepDef};
+use crate::def::{CompositeDef, ConnectionDef, InstanceDef, ScopeDef, SleepDef};
 use crate::error::{GraphError, GraphWarning, PlanBudget};
 use crate::plan::SleepGroup;
 
@@ -473,11 +473,15 @@ impl<'a> Flattener<'a> {
 
         let errors_before = self.errors.len();
         stack.push(def.name.as_str());
-        if let Some(scope) = instance.scope {
+        // The instance's own scope, else its composite's `seed` (ADR 0035 §11).
+        let scope = instance
+            .scope
+            .or(def.seed.map(|seed| ScopeDef { seed: Some(seed) }));
+        if let Some(scope) = scope {
             self.scopes.push((address.clone(), scope.seed));
         }
         let interface = self.expand(def, Some(address), stack);
-        if instance.scope.is_some() {
+        if scope.is_some() {
             self.scopes.pop();
         }
         stack.pop();

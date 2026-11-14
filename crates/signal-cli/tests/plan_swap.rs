@@ -40,6 +40,7 @@ fn conn(from: &str, to: &str) -> ConnectionDef {
 
 fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

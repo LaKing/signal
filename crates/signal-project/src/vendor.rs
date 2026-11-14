@@ -511,6 +511,276 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
     Ok(prepared)
 }
 
+/// ADR 0035 §11: the top-level include `key` of the project in `dir`
+/// (`key = { project = "<path>" }`) turned into the host's own text, as
+/// `name` (default `key`): the included `project.toml` becomes
+/// `composites/<name>.toml` with `[composite] seed` its seed scope (so the
+/// copy draws the streams the include drew), its sinks their taps
+/// (`std.audio_tap`, its channels exported as the include's were), its
+/// composites and patterns copied (one with a name the host has with
+/// another text as `<name>_<x>`, references rewritten), its `set` folded
+/// into the copied entries, and the entry `module = "<name>"` with its
+/// exported values. The host renders bit-identically. Its panel is not
+/// copied (the host's panel shows an include's; a composite's has none).
+pub fn prepare_include(
+    dir: &Path,
+    key: &str,
+    name: Option<&str>,
+    library: &Library,
+) -> Result<Prepared, VendorError> {
+    let files = project_sources(dir)?;
+    let host_text = files
+        .iter()
+        .find(|f| f.path == PROJECT_FILE)
+        .map(|f| f.text.clone())
+        .unwrap_or_default();
+    let mut host = parse(PROJECT_FILE, &host_text)?;
+    let invalid = |m: String| VendorError::InvalidName(m);
+    let top = name.unwrap_or(key).to_owned();
+    if !valid_name(&top) {
+        return Err(invalid(format!(
+            "invalid composite name `{top}`; names use a-z, 0-9, _ and start with a-z"
+        )));
+    }
+    let entry = host
+        .get("instances")
+        .and_then(|i| i.get(key))
+        .and_then(Item::as_value)
+        .and_then(Value::as_inline_table)
+        .ok_or_else(|| {
+            invalid(format!(
+                "no include `{key}` written inline at the top level"
+            ))
+        })?
+        .clone();
+    let path = entry
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            invalid(format!(
+                "`{key}` includes no project (`project = \"<path>\"`)"
+            ))
+        })?
+        .to_owned();
+    if path.ends_with(".signal") {
+        return Err(invalid(format!(
+            "`{key}` includes an archive: unpack it into a folder first"
+        )));
+    }
+    let source_dir = dir.join(&path);
+    let source = project_sources(&source_dir)?;
+    let text = |path: &str| {
+        source
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.text.clone())
+    };
+    let source_project = parse(
+        &format!("{path}/{PROJECT_FILE}"),
+        &text(PROJECT_FILE).unwrap_or_default(),
+    )?;
+    let seed = match entry.get("seed").and_then(Value::as_integer) {
+        Some(seed) => seed,
+        None => source_project
+            .get("project")
+            .and_then(|p| p.get("seed"))
+            .and_then(Item::as_integer)
+            .unwrap_or(0),
+    };
+    let have = |path: &str| {
+        files
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.text.clone())
+    };
+    let taken = |path: &str| have(path).is_some() || dir.join(path).exists();
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+    let mut patterns: BTreeMap<String, String> = BTreeMap::new();
+    let mut copies: Vec<(String, String)> = Vec::new();
+    let mut reused: Vec<String> = Vec::new();
+    for file in &source {
+        for (prefix, names) in [(COMPOSITES, &mut renamed), ("patterns", &mut patterns)] {
+            let Some(stem) = file
+                .path
+                .strip_prefix(&format!("{prefix}/"))
+                .and_then(|n| n.strip_suffix(".toml"))
+            else {
+                continue;
+            };
+            let at = format!("{prefix}/{stem}.toml");
+            let new = match have(&at) {
+                Some(existing) if existing == file.text => {
+                    reused.push(at);
+                    stem.to_owned()
+                }
+                Some(_) => format!("{top}_{stem}"),
+                None => stem.to_owned(),
+            };
+            names.insert(stem.to_owned(), new);
+        }
+    }
+    let composite_path = format!("{COMPOSITES}/{top}.toml");
+    if taken(&composite_path) || renamed.values().any(|v| *v == top) {
+        return Err(VendorError::Exists(composite_path));
+    }
+    let retarget = |document: &mut DocumentMut| {
+        rewrite(document, &renamed);
+        if let Some(instances) = document
+            .get_mut("instances")
+            .and_then(Item::as_table_like_mut)
+        {
+            for (_, entry) in instances.iter_mut() {
+                if let Some(pattern) = entry.as_table_like_mut().and_then(|e| e.get_mut("pattern"))
+                    && let Some(new) = pattern.as_str().and_then(|p| patterns.get(p)).cloned()
+                {
+                    replace(pattern, &new);
+                }
+            }
+        }
+    };
+    for file in &source {
+        for (prefix, names) in [(COMPOSITES, &renamed), ("patterns", &patterns)] {
+            let Some(stem) = file
+                .path
+                .strip_prefix(&format!("{prefix}/"))
+                .and_then(|n| n.strip_suffix(".toml"))
+            else {
+                continue;
+            };
+            let new = names.get(stem).cloned().unwrap_or_else(|| stem.to_owned());
+            let at = format!("{prefix}/{new}.toml");
+            if reused.contains(&at) {
+                continue;
+            }
+            let mut document = parse(&file.path, &file.text)?;
+            if prefix == COMPOSITES {
+                if let Some(item) = document
+                    .get_mut("composite")
+                    .and_then(Item::as_table_like_mut)
+                    .and_then(|c| c.get_mut("name"))
+                {
+                    replace(item, &new);
+                }
+                retarget(&mut document);
+            }
+            if taken(&at) {
+                return Err(VendorError::Exists(at));
+            }
+            copies.push((at, document.to_string()));
+        }
+    }
+
+    // The root as a composite: sinks as their taps, `set` folded in.
+    let mut document = source_project.clone();
+    document.remove("schema_version");
+    document.remove("project");
+    retarget(&mut document);
+    let mut sinks: Vec<String> = Vec::new();
+    if let Some(instances) = document
+        .get_mut("instances")
+        .and_then(Item::as_table_like_mut)
+    {
+        for (instance, item) in instances.iter_mut() {
+            if let Some(module) = item.as_table_like_mut().and_then(|e| e.get_mut("module"))
+                && module.as_str() == Some("std.audio_out")
+            {
+                replace(module, "std.audio_tap");
+                sinks.push(instance.get().to_owned());
+            }
+        }
+    }
+    if let Some(set) = entry.get("set").and_then(Value::as_inline_table) {
+        for (target, value) in set.iter() {
+            let Some((instance, parameter)) = target.split_once('.') else {
+                continue;
+            };
+            let Some(x) = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|i| i as f64))
+            else {
+                continue;
+            };
+            if let Some(table) = document
+                .get_mut("instances")
+                .and_then(|i| i.get_mut(instance))
+                .and_then(Item::as_value_mut)
+                .and_then(Value::as_inline_table_mut)
+            {
+                table.insert(parameter, crate::write::number(x));
+            } else {
+                return Err(invalid(format!(
+                    "`{key}`'s set names `{target}`, not an inline entry of its project: fold it by hand"
+                )));
+            }
+        }
+    }
+    // A root without `[exports] outputs` exports its sink's channels (ADR
+    // 0035 §3): written out, from the tap.
+    let has_outputs = document
+        .get("exports")
+        .and_then(|e| e.get("outputs"))
+        .is_some();
+    let exports = if has_outputs || sinks.is_empty() {
+        String::new()
+    } else if let [sink] = sinks.as_slice() {
+        if document.get("exports").is_some() {
+            if let Some(table) = document
+                .get_mut("exports")
+                .and_then(Item::as_table_like_mut)
+            {
+                let mut outputs = toml_edit::InlineTable::new();
+                outputs.insert("l", Value::from(format!("{sink}.l_out")));
+                outputs.insert("r", Value::from(format!("{sink}.r_out")));
+                table.insert("outputs", Item::Value(Value::InlineTable(outputs)));
+            }
+            String::new()
+        } else {
+            format!("\n[exports]\noutputs = {{ l = \"{sink}.l_out\", r = \"{sink}.r_out\" }}\n")
+        }
+    } else {
+        return Err(invalid(format!(
+            "`{key}`'s project has several sinks: name its outputs in its [exports] first"
+        )));
+    };
+    let composite_text = format!(
+        "schema_version = 1\n\n# Copied from the include `{key}` (`{path}`) by `signal vendor --include` (ADR 0035 §11).\n[composite]\nname = {}\nseed = {seed}\n\n{}{exports}",
+        Value::from(top.as_str()),
+        document.to_string().trim_start()
+    );
+    copies.push((composite_path, composite_text));
+
+    // The entry: the composite, with the values set on it.
+    let table = host
+        .get_mut("instances")
+        .and_then(|i| i.get_mut(key))
+        .and_then(Item::as_value_mut)
+        .and_then(Value::as_inline_table_mut)
+        .ok_or_else(|| invalid(format!("no include `{key}`")))?;
+    for reserved in ["project", "seed", "set"] {
+        table.remove(reserved);
+    }
+    let mut rebuilt = toml_edit::InlineTable::new();
+    rebuilt.insert("module", Value::from(top.as_str()));
+    for (k, v) in table.iter() {
+        rebuilt.insert(k, v.clone());
+    }
+    rebuilt.fmt();
+    *table = rebuilt;
+    let edits = vec![(PROJECT_FILE.to_owned(), host.to_string())];
+    let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
+    let prepared = Prepared {
+        copies,
+        edits,
+        reused,
+        files,
+        loaded_before,
+    };
+    if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+        return Err(VendorError::Invalid(diagnostics));
+    }
+    Ok(prepared)
+}
+
 /// A project's panel as the part of slot `slot` holding it: the marker
 /// written, each binding on a port an export of `project` reaches rebound
 /// to that export (`.name`), the others kept (paths inside the content).

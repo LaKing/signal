@@ -47,6 +47,7 @@ fn wire(from: &str, to: &str, scale: f64) -> ConnectionDef {
 /// after the gate falls).
 fn member() -> CompositeDef {
     CompositeDef {
+        seed: None,
         name: "member".to_owned(),
         instances: vec![
             instance("osc", "std.sine_osc", &[("freq", 220.0)]),
@@ -91,6 +92,7 @@ fn member() -> CompositeDef {
 /// The root: `drv` drives the group `grp` and gates its envelope.
 fn plan(rest: u64, version: u64) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("drv", "std.const", &[("value", 0.0)]),

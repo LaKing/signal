@@ -150,6 +150,7 @@ fn wire(from: &str, to: &str, scale: f64) -> ConnectionDef {
 /// and `wp` on its right channel through a `std.add`, ADR 0054).
 fn plan(source: &str, version: u64) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             instance("c", "std.const", &[("value", 0.5)]),

@@ -1661,7 +1661,7 @@ impl Builder<'_> {
             name
         };
         let templates = self.templates;
-        let (def, mut spans, problems) = definition(
+        let (mut def, mut spans, problems) = definition(
             file,
             defined,
             name_span,
@@ -1670,6 +1670,7 @@ impl Builder<'_> {
             parsed.exports,
             templates,
         );
+        def.seed = parsed.composite.seed;
         for (offset, message) in problems {
             self.error(file, offset, message);
         }

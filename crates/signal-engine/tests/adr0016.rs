@@ -159,6 +159,7 @@ fn invalid_schedule_is_refused() {
 #[test]
 fn cycle_without_state_output_is_rejected() {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![inst("a", "test.gain"), inst("b", "test.gain")],
         connections: vec![conn("a.out", "b.in"), conn("b.out", "a.in")],
@@ -266,6 +267,7 @@ fn conflicting_sets_follow_the_merge_port_order_not_the_names() {
     assert_eq!(base_after_one_frame("a", "b", "a"), 0.25);
 
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst_with("a", "test.setter", &[("value", 0.25)]),
@@ -367,6 +369,7 @@ fn a_source_fanned_into_two_merge_ports_arrives_in_port_order() {
     assert_eq!(String::from_utf8(rendered.log).unwrap(), expected);
 
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![inst("src", "test.pair"), inst("seq", "test.sequence")],
         connections: vec![conn("src.out", "seq.in"), conn("src.out", "seq.in")],

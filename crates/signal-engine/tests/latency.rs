@@ -139,6 +139,7 @@ fn registry() -> Registry {
 /// The frame counter into `lat`, `lat` into the recorder.
 fn latent_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("count", "test.frames"),
@@ -331,6 +332,7 @@ fn the_manifest_records_same_machine_instances() {
 /// `lat.<second>` (`polls` or `settles`) into its `zeta`.
 fn mixed_plan(registry: &Registry, second: &str) -> signal_graph::ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("count", "test.frames"),
@@ -647,6 +649,7 @@ fn lossy_registry() -> Registry {
 
 fn lossy_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("count", "test.frames"),
@@ -830,6 +833,7 @@ fn a_latent_module_without_a_result_is_refused() {
         })
         .unwrap();
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("count", "test.frames"),
@@ -853,6 +857,7 @@ fn a_latent_module_without_a_result_is_refused() {
 /// Two `test.mixed_latent` instances, `a` and `b`, on the frame counter.
 fn two_latent_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("count", "test.frames"),

@@ -67,6 +67,7 @@ fn plan(instances: Vec<InstanceDef>, mut connections: Vec<ConnectionDef>) -> Exe
     }
     let instances = planned;
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

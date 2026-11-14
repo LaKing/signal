@@ -117,6 +117,7 @@ fn types() -> Registry {
 #[test]
 fn out_of_order_emission_keeps_each_frames_order() {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst_with("flood", "test.flood_set_reverse", &[("count", 3.0)]),
@@ -161,6 +162,7 @@ fn dense(count: f64, fanout: usize) -> ExecutionPlan {
     // run as well.
     connections.push(conn("r0.out", "sink.zeta"));
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

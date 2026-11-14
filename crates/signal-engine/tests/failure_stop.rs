@@ -357,6 +357,7 @@ fn a_module_whose_panic_payload_panics_is_only_faulted() {
                 })
                 .unwrap();
             let definition = signal_graph::CompositeDef {
+                seed: None,
                 name: "project".to_owned(),
                 instances: vec![
                     inst("a", "test.cascading_panic"),

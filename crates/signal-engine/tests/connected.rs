@@ -102,6 +102,7 @@ fn conn(from: &str, to: &str) -> ConnectionDef {
 /// `test.trigger` `t`.
 fn plan(connections: &[(&str, &str)]) -> Result<ExecutionPlan, Vec<GraphError>> {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             inst("p", "test.probe"),

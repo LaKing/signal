@@ -16,14 +16,19 @@ pub(crate) struct VendorArgs {
     /// The project folder.
     project: PathBuf,
     /// The library composite, `lib.<name>` (`signal modules` lists them);
-    /// none with `--slot`.
-    #[arg(required_unless_present = "slot")]
+    /// none with `--slot` or `--include`.
+    #[arg(required_unless_present_any = ["slot", "include"])]
     composite: Option<String>,
     /// ADR 0037 phase 4, ADR 0051 §10: instead, make top-level slot SLOT,
     /// which links a project (`load = "<path>"`), hold its own copy of it
     /// (its inside, composites, patterns and panel as the slot's part).
-    #[arg(long, conflicts_with_all = ["composite", "name"])]
+    #[arg(long, conflicts_with_all = ["composite", "name", "include"])]
     slot: Option<String>,
+    /// ADR 0035 §11: instead, turn the top-level include INCLUDE (`project =
+    /// "<path>"`) into the project's own composite (named by `--as`, default
+    /// INCLUDE) with its seed, so the project renders the same.
+    #[arg(long, conflicts_with = "composite")]
+    include: Option<String>,
     /// The name of the copy (default: its name without `lib.`). The library
     /// composites it uses keep their names without `lib.`.
     #[arg(long = "as")]
@@ -35,6 +40,13 @@ pub(crate) fn run(args: &VendorArgs, json: bool) -> Result<(), Failure> {
     let vendored = match (&args.slot, &args.composite) {
         (Some(slot), _) => vendor::prepare_slot(&args.project, slot, Library::builtin())
             .and_then(|prepared| vendor::write(&args.project, prepared, Library::builtin())),
+        (None, _) if args.include.is_some() => vendor::prepare_include(
+            &args.project,
+            args.include.as_deref().unwrap_or_default(),
+            args.name.as_deref(),
+            Library::builtin(),
+        )
+        .and_then(|prepared| vendor::write(&args.project, prepared, Library::builtin())),
         (None, Some(composite)) => vendor::vendor(
             &args.project,
             composite,

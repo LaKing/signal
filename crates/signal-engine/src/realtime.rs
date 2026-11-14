@@ -1564,6 +1564,7 @@ mod tests {
             scope: None,
         };
         let root = CompositeDef {
+            seed: None,
             name: "root".to_owned(),
             instances: vec![instance("half", "unit.half"), instance("out", "unit.sink")],
             connections: vec![ConnectionDef {

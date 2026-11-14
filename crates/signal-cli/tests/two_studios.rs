@@ -426,3 +426,75 @@ fn signal_lib_interfaces() -> Vec<(String, String)> {
         })
         .collect()
 }
+
+/// Copies the folder `from` to `to`.
+fn copy_folder(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_folder(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// ADR 0035 test 11 (its `vendor --include` half): both includes of a copy
+/// of two-studios turned into the host's own composites (`[composite]
+/// seed`, sinks as taps) render the same audio and log, bit for bit.
+#[test]
+fn vendoring_the_includes_renders_the_same() {
+    let base = scratch("vendor-include");
+    copy_folder(&host(), &base.join("two-studios"));
+    copy_folder(&studio(), &base.join("studio"));
+    let dir = base.join("two-studios");
+    let render = |out: &str| -> Value {
+        let out = base.join(out);
+        let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args([
+                "render",
+                &dir.display().to_string(),
+                "--frames",
+                "24000",
+                "--threads",
+                "1",
+                "--out",
+                &out.display().to_string(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap()
+    };
+    let before = render("before");
+    for (include, name) in [("studio", None), ("studio_transport", Some("st"))] {
+        let mut args = vec![
+            "vendor".to_owned(),
+            dir.display().to_string(),
+            "--include".to_owned(),
+            include.to_owned(),
+        ];
+        if let Some(name) = name {
+            args.extend(["--as".to_owned(), name.to_owned()]);
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    assert!(text.contains("studio = { module = \"studio\" }"), "{text}");
+    assert!(
+        text.contains("studio_transport = { module = \"st\" }"),
+        "{text}"
+    );
+    let composite = fs::read_to_string(dir.join("composites/studio.toml")).unwrap();
+    assert!(composite.contains("seed = 11"), "{composite}");
+    assert!(composite.contains("std.audio_tap"), "{composite}");
+    let after = render("after");
+    assert_eq!(after["audio_fnv1a64"], before["audio_fnv1a64"]);
+    assert_eq!(after["log_fnv1a64"], before["log_fnv1a64"]);
+}

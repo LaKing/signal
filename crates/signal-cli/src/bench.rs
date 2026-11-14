@@ -1638,6 +1638,7 @@ fn voices_graph(kick: &CompositeDef, n: usize) -> Result<CompositeDef, Failure> 
         .find(|i| i.name == "drums")
         .ok_or_else(|| Failure::Internal("the kick project has no `drums`".to_owned()))?;
     let mut root = CompositeDef {
+        seed: None,
         name: kick.name.clone(),
         instances: kick
             .instances

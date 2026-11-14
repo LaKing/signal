@@ -43,6 +43,7 @@ fn plan_with(
     connections: Vec<ConnectionDef>,
 ) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

@@ -1172,6 +1172,7 @@ pub fn scaled(from: &str, to: &str, scale: f64) -> ConnectionDef {
 /// The plan of a project (a root composite) of fixture instances.
 pub fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> ExecutionPlan {
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances,
         connections,

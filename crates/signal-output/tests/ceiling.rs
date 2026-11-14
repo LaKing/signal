@@ -27,6 +27,7 @@ fn plan(registry: &Registry, scale: f64, gain: f64) -> ExecutionPlan {
         scale: Some(scale),
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![
             InstanceDef {

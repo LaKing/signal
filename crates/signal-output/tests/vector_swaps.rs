@@ -106,6 +106,7 @@ fn plan(registry: &Registry, module: &str) -> ExecutionPlan {
         scope: None,
     };
     let root = CompositeDef {
+        seed: None,
         name: "project".to_owned(),
         instances: vec![instance("x", module), instance("out", "std.audio_out")],
         connections: Vec::new(),
