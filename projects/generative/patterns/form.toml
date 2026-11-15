@@ -1,0 +1,16 @@
+# The piece's form (ADR 0056 §4): five kinds of section, 8 bars each, and
+# how likely each is to follow each. Recurrence (groove and peak return),
+# contrast (a breakdown between), development (intro → groove → build →
+# peak). `start` is where the chain stands before the first section: the
+# meter's first section_start moves it to the intro.
+schema_version = 1
+kind = "chain"
+states = ["start", "intro", "groove", "build", "peak", "breakdown"]
+
+[weights]
+start = [0, 1, 0, 0, 0, 0]
+intro = [0, 0, 8, 2, 0, 0]
+groove = [0, 0, 3, 5, 0, 2]
+build = [0, 0, 2, 0, 8, 0]
+peak = [0, 0, 3, 0, 3, 4]
+breakdown = [0, 1, 4, 5, 0, 0]

@@ -76,7 +76,8 @@ pub use include::{
 };
 pub use library::{LIBRARY_FOLDER, Library, LibraryComposite, is_library_file};
 pub use pattern::{
-    MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,
+    CHAIN, MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STATES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS,
+    SAMPLE, STEPS, pattern_kind, sample_file,
 };
 pub use schema::schema;
 pub use slot::{
@@ -563,6 +564,17 @@ impl Project {
         let Some((settings, mut root, mut root_spans)) = root else {
             return Err(builder.diagnostics);
         };
+        // ADR 0056 §1: a sample pattern's WAV, read from the folder (a
+        // project read without one has none: planning it says so).
+        let mut patterns = patterns;
+        if let Some(dir) = dir {
+            for (file, pattern) in patterns.values_mut() {
+                if let Err(why) = pattern.read_sample(dir, settings.sample_rate) {
+                    let offset = pattern.file.as_ref().map_or(0, |(_, at)| *at);
+                    builder.error(*file, offset, why);
+                }
+            }
+        }
         let mut composites = composites;
         let names: BTreeSet<&str> = composites.iter().map(|(c, _)| c.name.as_str()).collect();
         builder.check_pins(&root_spans, &names);
@@ -1023,6 +1035,34 @@ impl Project {
             }
         }
         tables
+    }
+
+    /// ADR 0056 §1: each sample pattern's WAV file, by its path in the
+    /// folder, with the FNV-1a 64 of its bytes: a render's
+    /// `project_file_hashes` gain them (a sample is a project file).
+    pub fn sample_file_hashes(&self) -> BTreeMap<String, String> {
+        self.sample_files()
+            .into_iter()
+            .map(|(path, bytes)| (path, format!("{:016x}", signal_core::fnv1a64(&bytes))))
+            .collect()
+    }
+
+    /// ADR 0056 §1: the project's own sample files as read (an include's
+    /// stay its own), by path in the folder: a session copies them into
+    /// each version.
+    pub fn sample_files(&self) -> Vec<(String, std::sync::Arc<[u8]>)> {
+        let mut files: Vec<(String, std::sync::Arc<[u8]>)> = Vec::new();
+        for (name, (_, pattern)) in &self.patterns {
+            if name.contains('/') {
+                continue;
+            }
+            if let (Some((path, _)), Some(bytes)) = (&pattern.file, &pattern.bytes)
+                && !files.iter().any(|(p, _)| p == path)
+            {
+                files.push((path.clone(), bytes.clone()));
+            }
+        }
+        files
     }
 
     /// The `gpu` pins (M2.7-2) of `plan`'s instances (a plan of this

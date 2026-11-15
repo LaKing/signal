@@ -24,6 +24,16 @@ pub const NOTES: &str = "notes";
 /// The `kind` of a step pattern.
 pub const STEPS: &str = "steps";
 
+/// A chain pattern's kind (ADR 0056 §4): named states and the weights of
+/// each move.
+pub const CHAIN: &str = "chain";
+
+/// The most states a chain has.
+pub const MAX_STATES: usize = 64;
+
+/// A sample pattern's kind (ADR 0056 §1): a WAV file in the project folder.
+pub const SAMPLE: &str = "sample";
+
 /// The longest note pattern, in beats.
 pub const MAX_LENGTH: f64 = 65_536.0;
 /// The most notes in a pattern.
@@ -46,6 +56,118 @@ pub(crate) struct Pattern {
     /// (start, key); `steps`: `[level, c₀ … c₍steps−1₎]` per lane in file
     /// order, each cell 0 (rest), 1 (hit) or 2 (accent).
     pub(crate) rows: Table,
+    /// `sample`: its WAV file (relative to the project folder) and the
+    /// value's offset; the rows are read from it when the project is loaded
+    /// from its folder ([`Pattern::read_sample`]).
+    pub(crate) file: Option<(String, usize)>,
+    /// `sample`: the FNV-1a 64 of the WAV's bytes, once read.
+    pub(crate) hash: Option<String>,
+    /// `sample`: the WAV's bytes, once read: a session copies them.
+    pub(crate) bytes: Option<std::sync::Arc<[u8]>>,
+}
+
+impl Pattern {
+    /// ADR 0056 §1: reads a sample pattern's WAV from `dir`: header
+    /// `[channels, rate]`, one row per frame. Refuses a file outside the
+    /// folder, unreadable, of more than two channels, at another rate than
+    /// `rate`, or longer than a table holds.
+    pub(crate) fn read_sample(&mut self, dir: &std::path::Path, rate: u32) -> Result<(), String> {
+        let Some((file, _)) = &self.file else {
+            return Ok(());
+        };
+        let path = dir.join(file);
+        let bytes = crate::read_regular(&path).map_err(|e| format!("{file}: {e}"))?;
+        let reader = hound::WavReader::new(std::io::Cursor::new(&bytes))
+            .map_err(|e| format!("{file}: not a WAV file ({e})"))?;
+        let spec = reader.spec();
+        if !(1..=2).contains(&spec.channels) {
+            return Err(format!(
+                "{file}: {} channels; a sample is mono or stereo",
+                spec.channels
+            ));
+        }
+        if spec.sample_rate != rate {
+            return Err(format!(
+                "{file}: {} Hz; the project plays at {rate} Hz (a sample is not resampled)",
+                spec.sample_rate
+            ));
+        }
+        let values: Vec<f64> = match spec.sample_format {
+            hound::SampleFormat::Float => reader
+                .into_samples::<f32>()
+                .map(|s| s.map(f64::from))
+                .collect::<Result<_, _>>(),
+            hound::SampleFormat::Int => {
+                let scale = 1.0 / f64::from(1u32 << (spec.bits_per_sample.clamp(1, 32) - 1));
+                reader
+                    .into_samples::<i32>()
+                    .map(|s| s.map(|v| f64::from(v) * scale))
+                    .collect::<Result<_, _>>()
+            }
+        }
+        .map_err(|e| format!("{file}: {e}"))?;
+        if values.len() > signal_core::MAX_TABLE_VALUES {
+            return Err(format!(
+                "{file}: {} samples; a sample holds at most {}",
+                values.len(),
+                signal_core::MAX_TABLE_VALUES
+            ));
+        }
+        self.rows =
+            Table::new(usize::from(spec.channels), values).map_err(|e| format!("{file}: {e}"))?;
+        self.header = vec![f64::from(spec.channels), f64::from(rate)];
+        self.hash = Some(format!("{:016x}", signal_core::fnv1a64(&bytes)));
+        self.bytes = Some(bytes.into());
+        Ok(())
+    }
+}
+
+/// A sample pattern file (`kind = "sample"`, ADR 0056 §1): the WAV it reads.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SampleFile {
+    #[schemars(schema_with = "schema_version")]
+    schema_version: Spanned<i64>,
+    #[schemars(schema_with = "sample_kind")]
+    #[allow(dead_code)]
+    kind: String,
+    /// The WAV file, relative to the project folder (no `..`).
+    #[schemars(with = "String")]
+    file: Spanned<String>,
+}
+
+fn sample_kind(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "const": SAMPLE })
+}
+
+/// A sample: no rows until its file is read.
+fn sample(file: SampleFile) -> Result<Pattern, Vec<Problem>> {
+    let mut problems = Vec::new();
+    check_version(&file.schema_version, &mut problems);
+    let path = file.file.get_ref();
+    let inside = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !inside || !path.to_ascii_lowercase().ends_with(".wav") {
+        problems.push((
+            file.file.span().start,
+            format!("file `{path}` is not a WAV file inside the project folder (a relative path ending in .wav)"),
+        ));
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    Ok(Pattern {
+        kind: SAMPLE,
+        header: Vec::new(),
+        rows: Table::new(1, Vec::new()).map_err(|e| vec![(0, e.to_string())])?,
+        file: Some((path.clone(), file.file.span().start)),
+        hash: None,
+        bytes: None,
+    })
 }
 
 /// A note pattern file (`kind = "notes"`).
@@ -115,6 +237,28 @@ pub(crate) struct StepsFile {
     levels: BTreeMap<Spanned<String>, Spanned<f64>>,
 }
 
+/// A chain pattern file (`kind = "chain"`, ADR 0056 §4): its states in
+/// order, and for each the weights of moving to every state.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChainFile {
+    #[schemars(schema_with = "schema_version")]
+    schema_version: Spanned<i64>,
+    #[schemars(schema_with = "chain_kind")]
+    #[allow(dead_code)]
+    kind: String,
+    /// The states, in order: state 0 is the first.
+    #[schemars(with = "Vec<String>")]
+    states: Spanned<Vec<Spanned<String>>>,
+    /// Per state, the weight of each next state, in `states`' order.
+    #[schemars(with = "BTreeMap<String, Vec<f64>>")]
+    weights: Spanned<BTreeMap<Spanned<String>, Spanned<Vec<f64>>>>,
+}
+
+fn chain_kind(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "const": CHAIN })
+}
+
 fn levels(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "object",
@@ -134,8 +278,14 @@ fn steps_kind(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "const": STEPS })
 }
 
-/// The kind ([`NOTES`] or [`STEPS`]) of the pattern file `text`, if it is a
-/// valid one (`project-format.md` §12).
+/// ADR 0056 §1: the WAV file a sample pattern's `text` reads, if it is a
+/// valid sample pattern.
+pub fn sample_file(text: &str) -> Option<String> {
+    parse(text).ok()?.file.map(|(file, _)| file)
+}
+
+/// The kind ([`NOTES`], [`STEPS`], [`CHAIN`] or [`SAMPLE`]) of the pattern
+/// file `text`, if it is a valid one (`project-format.md` §12).
 pub fn pattern_kind(text: &str) -> Option<&'static str> {
     parse(text).ok().map(|p| p.kind)
 }
@@ -161,15 +311,21 @@ pub(crate) fn parse(text: &str) -> Result<Pattern, Vec<Problem>> {
     let Some(kind) = probe.kind else {
         return Err(vec![(
             0,
-            format!("a pattern file needs `kind`: \"{NOTES}\" or \"{STEPS}\""),
+            format!(
+                "a pattern file needs `kind`: \"{NOTES}\", \"{STEPS}\", \"{CHAIN}\" or \"{SAMPLE}\""
+            ),
         )]);
     };
     match kind.get_ref().as_str() {
         Some(NOTES) => notes(toml::from_str(text).map_err(syntax)?),
         Some(STEPS) => steps(toml::from_str(text).map_err(syntax)?),
+        Some(CHAIN) => chain(toml::from_str(text).map_err(syntax)?),
+        Some(SAMPLE) => sample(toml::from_str(text).map_err(syntax)?),
         _ => Err(vec![(
             kind.span().start,
-            format!("unknown pattern kind; it is \"{NOTES}\" or \"{STEPS}\""),
+            format!(
+                "unknown pattern kind; it is \"{NOTES}\", \"{STEPS}\", \"{CHAIN}\" or \"{SAMPLE}\""
+            ),
         )]),
     }
 }
@@ -184,6 +340,87 @@ fn check_version(version: &Spanned<i64>, problems: &mut Vec<Problem>) {
             ),
         ));
     }
+}
+
+/// A chain: header `[states]`, one row per state of its weights.
+fn chain(file: ChainFile) -> Result<Pattern, Vec<Problem>> {
+    let mut problems = Vec::new();
+    check_version(&file.schema_version, &mut problems);
+    let states_at = file.states.span().start;
+    let states = file.states.into_inner();
+    if states.is_empty() || states.len() > MAX_STATES {
+        problems.push((states_at, format!("a chain has 1 to {MAX_STATES} states")));
+    }
+    for (i, state) in states.iter().enumerate() {
+        if !valid_name(state.get_ref()) {
+            problems.push((
+                state.span().start,
+                format!(
+                    "invalid state name `{}`; names use a-z, 0-9, _ and start with a-z",
+                    state.get_ref()
+                ),
+            ));
+        }
+        if states[..i].iter().any(|s| s.get_ref() == state.get_ref()) {
+            problems.push((
+                state.span().start,
+                format!("state `{}` is listed twice", state.get_ref()),
+            ));
+        }
+    }
+    let weights_at = file.weights.span().start;
+    let weights = file.weights.into_inner();
+    for name in weights.keys() {
+        if !states.iter().any(|s| s.get_ref() == name.get_ref()) {
+            problems.push((
+                name.span().start,
+                format!("`{}` in [weights] is not a state", name.get_ref()),
+            ));
+        }
+    }
+    let mut values = Vec::with_capacity(states.len() * states.len());
+    for state in &states {
+        let Some((_, row)) = weights
+            .iter()
+            .find(|(name, _)| name.get_ref() == state.get_ref())
+        else {
+            problems.push((
+                weights_at,
+                format!("[weights] has no row for state `{}`", state.get_ref()),
+            ));
+            continue;
+        };
+        if row.get_ref().len() != states.len() {
+            problems.push((
+                row.span().start,
+                format!(
+                    "`{}` has {} weights; a row has one per state ({})",
+                    state.get_ref(),
+                    row.get_ref().len(),
+                    states.len()
+                ),
+            ));
+        }
+        if row.get_ref().iter().any(|w| !(w.is_finite() && *w >= 0.0)) {
+            problems.push((
+                row.span().start,
+                "a weight is a finite number, at least 0".to_owned(),
+            ));
+        }
+        values.extend(row.get_ref().iter().copied());
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let rows = Table::new(states.len(), values).map_err(|e| vec![(0, e.to_string())])?;
+    Ok(Pattern {
+        kind: CHAIN,
+        header: vec![states.len() as f64],
+        rows,
+        file: None,
+        hash: None,
+        bytes: None,
+    })
 }
 
 fn notes(file: NotesFile) -> Result<Pattern, Vec<Problem>> {
@@ -270,6 +507,9 @@ fn notes(file: NotesFile) -> Result<Pattern, Vec<Problem>> {
         kind: NOTES,
         header: vec![length],
         rows,
+        file: None,
+        hash: None,
+        bytes: None,
     })
 }
 
@@ -379,6 +619,9 @@ fn steps(file: StepsFile) -> Result<Pattern, Vec<Problem>> {
         kind: STEPS,
         header: vec![steps as f64, step],
         rows,
+        file: None,
+        hash: None,
+        bytes: None,
     })
 }
 

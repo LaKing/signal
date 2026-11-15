@@ -211,7 +211,7 @@ Hashes are 16 lowercase hex digits. Provenance is read when the render runs, not
 
 ## 8. JSON Schema
 
-`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the five file kinds: `project.toml`, a composite, a pattern file of `kind = "notes"` or `kind = "steps"` (§12), and an interface template (§14). Module references are restricted to the registry's type names, the library composites' `lib.<name>` (§4) or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
+`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the five file kinds: `project.toml`, a composite, a pattern file of `kind = "notes"`, `"steps"`, `"chain"` or `"sample"` (§12), and an interface template (§14). Module references are restricted to the registry's type names, the library composites' `lib.<name>` (§4) or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
 
 ## 9. Setup (machine settings)
 
@@ -336,7 +336,7 @@ One table per graph level: `[top]` for the top level, `[composite.<name>]` for a
 
 ## 12. Pattern files (`patterns/<name>.toml`)
 
-A **pattern** is note or step data as text (ADR 0028): what a piano roll or a step grid edits. It is data, not logic, and never holds an expression (ADR 0010). Pattern files are project files (§1): every `.toml` file directly in `patterns/` is loaded and validated whether an instance names it or not, hashed into a render's manifest (§7), copied into a session for every plan version (`session-format.md` §3), packed into a `.signal` file (§10) and watched: a changed pattern is applied to a running project as a live edit. `<name>` is the file name without `.toml`, `[a-z][a-z0-9_]*`; an instance names it with `pattern = "<name>"` (§4). **Unknown keys are errors**, as everywhere.
+A **pattern** is note or step data as text (ADR 0028): what a piano roll or a step grid edits; a chain's weights or a sample's file (ADR 0056) are patterns too. It is data, not logic, and never holds an expression (ADR 0010). Pattern files are project files (§1): every `.toml` file directly in `patterns/` is loaded and validated whether an instance names it or not, hashed into a render's manifest (§7), copied into a session for every plan version (`session-format.md` §3), packed into a `.signal` file (§10) and watched: a changed pattern is applied to a running project as a live edit. `<name>` is the file name without `.toml`, `[a-z][a-z0-9_]*`; an instance names it with `pattern = "<name>"` (§4). **Unknown keys are errors**, as everywhere.
 
 ### Notes (`kind = "notes"`)
 
@@ -413,6 +413,44 @@ hat = 0.6
 | `[levels]` | table, optional | `<lane> = <number>`: a lane's level, its hit value, 0 to 1 (integer or float). Every key must name a lane of `[lanes]` (an error naming the key otherwise). A lane not listed has level 1. |
 
 The loop is `steps · step` beats. A player places step *i* on its tick, `round_half_up(i · step · ppq)` (`std.step_seq8`, with swing delaying the even steps by whole ticks). When `step · ppq` is not a whole number of ticks, a step can land on the loop's end or past it (steps that round up to the loop end, or the last step delayed by swing); it then **wraps** and plays on the next loop's first ticks, where it falls in time (from the second loop on). No step of a pattern is ever lost. A whole number of ticks per step never wraps. A player's playhead (`std.step_seq8`'s `step`) shows the loop position: on each tick, the latest step whose tick (without swing) is at or before it. A wrapped step fires without moving the playhead back, so when wrapped hits share a tick with the next loop's steps, the playhead shows the next loop's.
+
+### Chains (`kind = "chain"`)
+
+ADR 0056 §4: a state machine's moves, for `std.markov`.
+
+```toml
+schema_version = 1
+kind = "chain"
+states = ["intro", "groove", "build"]
+
+[weights]
+intro = [0, 3, 1]
+groove = [0, 1, 2]
+build = [1, 2, 0]
+```
+
+| Key | Type | Rules |
+|---|---|---|
+| `states` | array of strings, required | 1 to 64 names `[a-z][a-z0-9_]*`, distinct, in order: state 0 is the first. |
+| `[weights]` | table, required | One row per state, `<state> = [w₀, …]`: as many weights as states, each finite and at least 0, the weight of moving to each state in `states`' order. A row of zeros stays put. A key that is no state is an error, so is a state without a row. |
+
+Its source: header `[states]`, one row of weights per state, in `states`' order.
+
+### Samples (`kind = "sample"`)
+
+ADR 0056 §1: a WAV file in the project folder, for `std.sampler`.
+
+```toml
+schema_version = 1
+kind = "sample"
+file = "samples/texture.wav"
+```
+
+| Key | Type | Rules |
+|---|---|---|
+| `file` | string, required | A relative path ending in `.wav`, no `..`: the WAV, mono or stereo, 16/24/32-bit integer or 32-bit float, at the project's `sample_rate` (it is not resampled), at most 2²⁰ values (`MAX_TABLE_VALUES`). |
+
+The WAV is read when the project is read from its folder (a project read without one, `Project::from_sources`, has no frames: planning an instance of it is refused with the reason); it is a **project file**: `signal pack` packs it, a render hashes it into `project_file_hashes` under its path, and a session copies it, byte for byte, into every version's copy (`session-format.md` §3), so a replay needs nothing outside the session. An edit of the pattern file is a swap, as any pattern's; an edit of the WAV alone is read with the next reload of the project (it is not watched on its own). Its source: header `[channels, rate]`, one row per frame.
 
 ### The source the library compiles
 

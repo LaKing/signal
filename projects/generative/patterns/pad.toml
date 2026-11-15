@@ -1,0 +1,7 @@
+# A held A3 each bar; the harmony transposes it.
+schema_version = 1
+kind = "notes"
+length = 4
+notes = [
+  { key = 57, start = 0, length = 3.8, velocity = 0.6 },
+]

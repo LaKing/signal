@@ -28,6 +28,8 @@ toml_edit = { workspace = true }
 # Reading a project's files without blocking on a FIFO (`read_regular`).
 libc = { workspace = true }
 schemars = { workspace = true }
+# ADR 0056 §1: a sample pattern's WAV, read when the project is loaded.
+hound = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

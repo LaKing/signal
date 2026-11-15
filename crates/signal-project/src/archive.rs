@@ -224,8 +224,22 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
     }
     // ADR 0038 §3: a capture slot's render file is a project file wherever
     // in the folder it lies; one missing is left out (the render says so).
-    if let Ok(text) = fs::read_to_string(dir.join(PROJECT_FILE)) {
-        for relative in crate::render_paths(&text) {
+    let mut extra: Vec<String> = fs::read_to_string(dir.join(PROJECT_FILE))
+        .map(|text| crate::render_paths(&text))
+        .unwrap_or_default();
+    // ADR 0056 §1: a sample pattern's WAV is a project file too.
+    for (relative, path) in &files {
+        if relative.starts_with("patterns/")
+            && relative.ends_with(".toml")
+            && let Ok(text) = crate::read_regular_to_string(path)
+            && let Some(file) = crate::sample_file(&text)
+            && !extra.contains(&file)
+        {
+            extra.push(file);
+        }
+    }
+    {
+        for relative in extra {
             // Every component, folders included, as the walk above judges
             // them: a link anywhere on the way is refused, so no file
             // outside the folder is read.

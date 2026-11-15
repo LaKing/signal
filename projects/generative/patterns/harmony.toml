@@ -1,0 +1,10 @@
+# The chords, one a bar (ADR 0056 §4): Am, F, C, G as roots over A.
+schema_version = 1
+kind = "chain"
+states = ["am", "f", "c", "g"]
+
+[weights]
+am = [0, 5, 2, 3]
+f = [2, 0, 4, 4]
+c = [3, 2, 0, 5]
+g = [7, 3, 0, 0]

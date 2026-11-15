@@ -1,0 +1,6 @@
+# A swelling texture (ADR 0056 §1): rendered from this folder's own
+# moog_voice (220 Hz, noise and a fifth, slow contours) for 1.5 s,
+# normalised to a 0.5 peak and faded, 16-bit mono at 48 kHz.
+schema_version = 1
+kind = "sample"
+file = "samples/texture.wav"

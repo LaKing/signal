@@ -1,0 +1,186 @@
+# Generative (M5, ADR 0056): a piece of at least 20 minutes that is never
+# the same bar twice in a row but recognisably one piece.
+#
+#   clock (std.playhead, 100 bpm) ─ position ─► meter (4/4, 8-bar sections)
+#   meter.section_start ─► form (std.markov over intro, groove, build, peak,
+#                          breakdown: patterns/form.toml)
+#   meter.bar_start ─► harmony (std.markov over Am, F, C, G) ─► chord ratio
+#   drums, bass, pad, lead sequencers follow the playhead; bass and pad are
+#   transposed by the chord; a sampled texture (patterns/texture.toml) each
+#   bar at the chord's pitch
+#   each layer × its level in the current section (std.table8, eased)
+#   ─► lib.mixer ─► dc block ─► tanh ─► out
+#
+# The form decides which layers sound: recurrence (grooves and peaks come
+# back), contrast (breakdowns between), development (intro → groove →
+# build → peak). The seed decides the path; another seed, another piece.
+#
+# Safe gain: the bus is limited by tanh and the output is at 0.25.
+schema_version = 1
+
+[project]
+name = "generative"
+sample_rate = 48000
+seed = 2026
+
+[instances]
+clock = { module = "std.playhead", bpm = 100 }
+meter = { module = "std.meter", beats_per_bar = 4, bars_per_section = 8, sections_per_phrase = 4 }
+form = { module = "std.markov", pattern = "form" }
+harmony = { module = "std.markov", pattern = "harmony" }
+chord = { module = "std.table8", interp = 0, v0 = 1, v1 = 0.793700526, v2 = 1.189207115, v3 = 0.890898718 }
+
+# The sequencers, following the playhead.
+drums = { module = "std.step_seq8", pattern = "drums" }
+bass_seq = { module = "std.note_seq", pattern = "bass" }
+pad_seq = { module = "std.note_seq", pattern = "pad" }
+lead_seq = { module = "std.note_seq", pattern = "lead" }
+bass_hz = { module = "std.mul" }
+pad_hz = { module = "std.mul" }
+
+# The voices.
+kick = { module = "kick909" }
+snare = { module = "snare909" }
+clap = { module = "clap909" }
+hats = { module = "hat909" }
+bass = { module = "moog_voice", cutoff = 220, env_amount = 1400, f_decay = 160, a_release = 80, osc2_detune = 5, volume = -3 }
+pad = { module = "moog_voice", cutoff = 700, env_amount = 300, emphasis = 0.2, a_attack = 900, a_decay = 1000, a_sustain = 0.8, a_release = 1600, f_attack = 1200, osc2_detune = 702, osc3_octave = 0, osc3_detune = 1200, volume = -9 }
+lead = { module = "moog_voice", cutoff = 1400, env_amount = 1800, glide = 60, a_attack = 8, a_release = 200, osc3_level = 0.2, volume = -8 }
+tex = { module = "std.sampler", pattern = "texture", gain = 0.8 }
+
+# The arrangement: each layer's level in each state of the form (start,
+# intro, groove, build, peak, breakdown), eased over 300 ms.
+kick_level = { module = "std.table8", interp = 0, v0 = 0, v1 = 0, v2 = 0.9, v3 = 1, v4 = 1, v5 = 0 }
+kick_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+kick_amp = { module = "std.mul" }
+snare_level = { module = "std.table8", interp = 0, v0 = 0, v1 = 0, v2 = 0.5, v3 = 0.9, v4 = 1, v5 = 0 }
+snare_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+snare_amp = { module = "std.mul" }
+clap_level = { module = "std.table8", interp = 0, v0 = 0, v1 = 0, v2 = 0, v3 = 0.4, v4 = 1, v5 = 0 }
+clap_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+clap_amp = { module = "std.mul" }
+hats_level = { module = "std.table8", interp = 0, v0 = 0.3, v1 = 0.3, v2 = 0.45, v3 = 0.9, v4 = 1, v5 = 0.25 }
+hats_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+hats_amp = { module = "std.mul" }
+bass_level = { module = "std.table8", interp = 0, v0 = 0, v1 = 0, v2 = 0.7, v3 = 0.9, v4 = 1, v5 = 0.45 }
+bass_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+bass_amp = { module = "std.mul" }
+pad_level = { module = "std.table8", interp = 0, v0 = 1, v1 = 1, v2 = 0.35, v3 = 0.5, v4 = 0.7, v5 = 1 }
+pad_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+pad_amp = { module = "std.mul" }
+lead_level = { module = "std.table8", interp = 0, v0 = 0, v1 = 0, v2 = 0, v3 = 0.35, v4 = 1, v5 = 0 }
+lead_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+lead_amp = { module = "std.mul" }
+tex_level = { module = "std.table8", interp = 0, v0 = 0.8, v1 = 0.8, v2 = 0.2, v3 = 0.5, v4 = 0.5, v5 = 1 }
+tex_ease = { module = "std.lag", rise_ms = 300, fall_ms = 300 }
+tex_amp = { module = "std.mul" }
+
+# The mix: drums, bass, pad through a reverb, lead through the echo with the texture.
+drum_mix = { module = "std.mix" }
+top_mix = { module = "std.mix" }
+echo = { module = "tape_delay" }
+room = { module = "std.fdn_reverb" }
+bus = { module = "lib.mixer", a_level = -7, b_level = -6, c_level = -4, d_level = -6 }
+dc = { module = "std.dc_block" }
+limiter = { module = "std.tanh_shaper", drive = 1 }
+dc_r = { module = "std.dc_block" }
+limiter_r = { module = "std.tanh_shaper", drive = 1 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  # Time: bars and sections, the form and the chords.
+  { from = "clock.position", to = "meter.position" },
+  { from = "meter.section_start", to = "form.step" },
+  { from = "meter.bar_start", to = "harmony.step" },
+  { from = "harmony.state", to = "chord.pos" },
+  { from = "clock.position", to = "drums.follow" },
+  { from = "clock.position", to = "bass_seq.follow" },
+  { from = "clock.position", to = "pad_seq.follow" },
+  { from = "clock.position", to = "lead_seq.follow" },
+  # The drums.
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "clap.trigger" },
+  { from = "drums.t3", to = "clap.velocity" },
+  { from = "drums.t4", to = "hats.closed" },
+  { from = "drums.t4", to = "hats.closed_velocity" },
+  { from = "drums.t5", to = "hats.open" },
+  { from = "drums.t5", to = "hats.open_velocity" },
+  # Bass and pad follow the chord; the lead stays in A.
+  { from = "bass_seq.hz", to = "bass_hz.a" },
+  { from = "chord.out", to = "bass_hz.b" },
+  { from = "bass_hz.out", to = "bass.hz" },
+  { from = "bass_seq.gate", to = "bass.gate" },
+  { from = "bass_seq.velocity", to = "bass.velocity" },
+  { from = "pad_seq.hz", to = "pad_hz.a" },
+  { from = "chord.out", to = "pad_hz.b" },
+  { from = "pad_hz.out", to = "pad.hz" },
+  { from = "pad_seq.gate", to = "pad.gate" },
+  { from = "pad_seq.velocity", to = "pad.velocity" },
+  { from = "lead_seq.hz", to = "lead.hz" },
+  { from = "lead_seq.gate", to = "lead.gate" },
+  { from = "lead_seq.velocity", to = "lead.velocity" },
+  # The texture each bar, pitched with the chord.
+  { from = "meter.bar_start", to = "tex.trigger" },
+  { from = "chord.out", to = "tex.rate" },
+  # The arrangement.
+  { from = "form.state", to = "kick_level.pos" },
+  { from = "kick_level.out", to = "kick_ease.in" },
+  { from = "kick_ease.out", to = "kick_amp.b" },
+  { from = "form.state", to = "snare_level.pos" },
+  { from = "snare_level.out", to = "snare_ease.in" },
+  { from = "snare_ease.out", to = "snare_amp.b" },
+  { from = "form.state", to = "clap_level.pos" },
+  { from = "clap_level.out", to = "clap_ease.in" },
+  { from = "clap_ease.out", to = "clap_amp.b" },
+  { from = "form.state", to = "hats_level.pos" },
+  { from = "hats_level.out", to = "hats_ease.in" },
+  { from = "hats_ease.out", to = "hats_amp.b" },
+  { from = "form.state", to = "bass_level.pos" },
+  { from = "bass_level.out", to = "bass_ease.in" },
+  { from = "bass_ease.out", to = "bass_amp.b" },
+  { from = "form.state", to = "pad_level.pos" },
+  { from = "pad_level.out", to = "pad_ease.in" },
+  { from = "pad_ease.out", to = "pad_amp.b" },
+  { from = "form.state", to = "lead_level.pos" },
+  { from = "lead_level.out", to = "lead_ease.in" },
+  { from = "lead_ease.out", to = "lead_amp.b" },
+  { from = "form.state", to = "tex_level.pos" },
+  { from = "tex_level.out", to = "tex_ease.in" },
+  { from = "tex_ease.out", to = "tex_amp.b" },
+  { from = "kick.out", to = "kick_amp.a" },
+  { from = "snare.out", to = "snare_amp.a" },
+  { from = "clap.out", to = "clap_amp.a" },
+  { from = "hats.out", to = "hats_amp.a" },
+  { from = "bass.out", to = "bass_amp.a" },
+  { from = "pad.out", to = "pad_amp.a" },
+  { from = "lead.out", to = "lead_amp.a" },
+  { from = "tex.l", to = "tex_amp.a" },
+  # The mix.
+  { from = "kick_amp.out", to = "drum_mix.a" },
+  { from = "snare_amp.out", to = "drum_mix.b" },
+  { from = "clap_amp.out", to = "drum_mix.c" },
+  { from = "hats_amp.out", to = "drum_mix.d" },
+  { from = "drum_mix.out", to = "bus.a_l" },
+  { from = "drum_mix.out", to = "bus.a_r" },
+  { from = "bass_amp.out", to = "bus.b_l" },
+  { from = "bass_amp.out", to = "bus.b_r" },
+  { from = "pad_amp.out", to = "room.in_l" },
+  { from = "pad_amp.out", to = "room.in_r" },
+  { from = "room.out_l", to = "bus.c_l" },
+  { from = "room.out_r", to = "bus.c_r" },
+  { from = "lead_amp.out", to = "echo.in" },
+  { from = "echo.out", to = "top_mix.a" },
+  { from = "tex_amp.out", to = "top_mix.b" },
+  { from = "top_mix.out", to = "bus.d_l" },
+  { from = "top_mix.out", to = "bus.d_r" },
+  { from = "bus.l", to = "dc.in" },
+  { from = "dc.out", to = "limiter.in" },
+  { from = "limiter.out", to = "out.l" },
+  { from = "bus.r", to = "dc_r.in" },
+  { from = "dc_r.out", to = "limiter_r.in" },
+  { from = "limiter_r.out", to = "out.r" },
+]

@@ -1,0 +1,22 @@
+# Four bars of a pentatonic line in A, heard in builds and peaks.
+schema_version = 1
+kind = "notes"
+length = 16
+notes = [
+  { key = 69, start = 0, length = 0.5, velocity = 0.8 },
+  { key = 72, start = 0.5, length = 0.5, velocity = 0.7 },
+  { key = 76, start = 1, length = 1, velocity = 0.8 },
+  { key = 74, start = 2.5, length = 0.5, velocity = 0.6 },
+  { key = 72, start = 3, length = 1, velocity = 0.7 },
+  { key = 69, start = 4, length = 0.5, velocity = 0.8 },
+  { key = 67, start = 4.5, length = 0.5, velocity = 0.6 },
+  { key = 64, start = 5, length = 1.5, velocity = 0.7 },
+  { key = 67, start = 7, length = 1, velocity = 0.6 },
+  { key = 69, start = 8, length = 0.5, velocity = 0.8 },
+  { key = 72, start = 8.5, length = 0.5, velocity = 0.7 },
+  { key = 79, start = 9, length = 1, velocity = 0.8 },
+  { key = 76, start = 10.5, length = 0.5, velocity = 0.6 },
+  { key = 74, start = 11, length = 1, velocity = 0.7 },
+  { key = 72, start = 12, length = 1, velocity = 0.7 },
+  { key = 69, start = 13, length = 2.5, velocity = 0.8 },
+]

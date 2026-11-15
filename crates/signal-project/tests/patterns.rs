@@ -208,7 +208,7 @@ fn pattern_files_are_validated_at_their_text() {
         ),
         (
             MELODY.replace("kind = \"notes\"", "kind = \"chords\""),
-            "patterns/melody.toml:2:8: error: unknown pattern kind; it is \"notes\" or \"steps\"",
+            "patterns/melody.toml:2:8: error: unknown pattern kind; it is \"notes\", \"steps\", \"chain\" or \"sample\"",
         ),
         (
             MELODY.replace("schema_version = 1", "schema_version = 2"),
@@ -499,8 +499,8 @@ fn every_example_of_the_format_loads() {
         .collect();
     assert_eq!(
         examples.len(),
-        3,
-        "the notes, inline notes and steps examples"
+        5,
+        "the notes, inline notes, steps, chain and sample examples"
     );
     for (i, example) in examples.iter().enumerate() {
         assert!(

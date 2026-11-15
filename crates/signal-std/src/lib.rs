@@ -29,6 +29,9 @@
 //! | `std.audio_tap_mono`, `std.audio_tap_quad`, `std.audio_tap_5_1`, `std.audio_tap_7_1` | [`AudioTapMono`], [`AudioTapQuad`], [`AudioTap51`], [`AudioTap71`] | direct, their taps (ADR 0035 §3) | `io` |
 //! | `std.spectrum512`, `std.spectrum2048` | [`Spectrum`] | direct, a windowed magnitude spectrum as a vector of N/2 bins with its peak (ADR 0055) | `analysis` |
 //! | `std.latency_probe` | [`LatencyProbe`] | direct, a click out and its return found: a round trip in frames (ADR 0055) | `analysis` |
+//! | `std.meter` | [`Meter`] | direct, bars, sections and phrases from a position in beats, with their start events (ADR 0056) | `event` |
+//! | `std.markov` | [`Markov`] | direct, a seeded state machine stepping by a chain pattern's weights (ADR 0056) | `event` |
+//! | `std.sampler` | [`Sampler`] | direct, plays a sample pattern (a WAV) on a trigger at a rate, looping or not (ADR 0056) | `generator` |
 //! | `std.device_out1` … `std.device_out64`, `std.device_out_tap1` … `std.device_out_tap64` | [`device_out::DeviceOut`], [`device_out::DeviceOutTap`] | direct, a discrete layout's sink (inputs `c1…cN`) and its tap (ADR 0038 §2) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
@@ -202,11 +205,13 @@ mod latency_probe;
 mod lfo;
 mod line;
 mod logic;
+mod markov;
 mod mass_spring;
 mod math;
 mod memory;
 mod merge;
 mod mesh2d;
+mod meter;
 mod mix;
 mod modal;
 mod mul;
@@ -223,6 +228,7 @@ mod playhead;
 mod prefer;
 mod random;
 mod sample_hold;
+mod sampler;
 mod sine_osc;
 mod spectrum;
 mod state;
@@ -273,11 +279,13 @@ pub use lag::Lag;
 pub use latency_probe::LatencyProbe;
 pub use lfo::Lfo;
 pub use logic::{And, Compare, Not, Or, Select};
+pub use markov::Markov;
 pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
 pub use memory::{BUFFER_CAPACITIES, Buffer, Buffer1k, Buffer1m, Buffer64k, Table};
 pub use merge::Merge;
 pub use mesh2d::Mesh2d;
+pub use meter::Meter;
 pub use mix::Mix;
 pub use modal::Modal;
 pub use mul::Mul;
@@ -291,6 +299,7 @@ pub use playhead::Playhead;
 pub use prefer::Prefer;
 pub use random::Random;
 pub use sample_hold::SampleHold;
+pub use sampler::Sampler;
 pub use sine_osc::SineOsc;
 pub use spectrum::Spectrum;
 pub use state::{Counter, Integrator, Phasor};
@@ -537,6 +546,9 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Spectrum<512>>(),
         direct::<Spectrum<2048>>(),
         direct::<LatencyProbe>(),
+        direct::<Meter>(),
+        direct::<Markov>(),
+        direct::<Sampler>(),
     ] {
         registry.register(module_type)?;
     }
@@ -544,6 +556,10 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     // table when the plan is built.
     registry.set_table_rule("std.note_seq", pattern::NOTE_RULE);
     registry.set_table_rule("std.step_seq8", pattern::STEP_RULE);
+    // ADR 0056 §4: the chain's moves.
+    registry.set_table_rule("std.markov", markov::CHAIN_RULE);
+    // ADR 0056 §1, §2: a sample pattern's WAV, read with the project.
+    registry.set_table_rule("std.sampler", sampler::SAMPLE_RULE);
     // ADR 0033: a sequencer counts ticks or follows a position, not both.
     registry.exclusive_inputs("std.note_seq", "tick", "follow");
     registry.exclusive_inputs("std.step_seq8", "tick", "follow");
@@ -996,6 +1012,9 @@ mod tests {
     /// M4 (ADR 0055): the analysis types.
     const ANALYSIS: [&str; 3] = ["std.spectrum512", "std.spectrum2048", "std.latency_probe"];
 
+    /// M5 (ADR 0056): hierarchical time, state, samples.
+    const GENERATIVE: [&str; 3] = ["std.meter", "std.markov", "std.sampler"];
+
     /// M2.10 (the owner's list): the native DSP primitives, with their
     /// categories.
     const DSP: [(&str, &str); 6] = [
@@ -1086,6 +1105,7 @@ mod tests {
                 + PREFER.len()
                 + SHAPER_OS8.len()
                 + ANALYSIS.len()
+                + GENERATIVE.len()
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()
@@ -1103,6 +1123,7 @@ mod tests {
             .chain(PREFER)
             .chain(SHAPER_OS8)
             .chain(ANALYSIS)
+            .chain(GENERATIVE)
             .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
         {
@@ -1134,6 +1155,7 @@ mod tests {
                 + PREFER.len()
                 + SHAPER_OS8.len()
                 + ANALYSIS.len()
+                + GENERATIVE.len()
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()

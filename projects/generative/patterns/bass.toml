@@ -1,0 +1,17 @@
+# Two bars of bass in A; the harmony transposes it.
+schema_version = 1
+kind = "notes"
+length = 8
+notes = [
+  { key = 33, start = 0, length = 0.45, velocity = 1 },
+  { key = 33, start = 0.75, length = 0.2, velocity = 0.6 },
+  { key = 45, start = 1.5, length = 0.4, velocity = 0.7 },
+  { key = 33, start = 2, length = 0.45, velocity = 0.9 },
+  { key = 40, start = 3, length = 0.4, velocity = 0.7 },
+  { key = 43, start = 3.5, length = 0.4, velocity = 0.6 },
+  { key = 33, start = 4, length = 0.45, velocity = 1 },
+  { key = 33, start = 4.75, length = 0.2, velocity = 0.6 },
+  { key = 45, start = 5.5, length = 0.4, velocity = 0.7 },
+  { key = 43, start = 6, length = 0.45, velocity = 0.8 },
+  { key = 40, start = 7, length = 0.9, velocity = 0.7 },
+]

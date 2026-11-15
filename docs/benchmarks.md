@@ -1269,3 +1269,15 @@ A steal's step is smaller than a fresh note's own attack in every case (the enve
 - In `projects/studio-poly` no voice ever sleeps: its pad's `a_release` of 900 ms falls to `std.adsr`'s flush level (1e-9) only after about 18 s, and each voice plays again within 4 s. Its render is the same with `sleep = true` as with `sleep = false`, and its golden is unchanged.
 - **On the device** (ADR 0044 test 15, 2026-11-14, operator; SSL 2+ Mk II at 48 kHz at the device's own buffer, never set by Signal: 512 frames while another app held it, 128 after): a silent copy of studio-poly (`gain = 0`, peak 0.0 checked offline) with 16 voices and the pad's `a_release` and `f_release` at 120 ms, so voices sleep between their chords (60 s offline: 24.2 s with sleep against 32.4 s without). **10 minutes** (`signal play --seconds 600`, 12 threads, workgroup): **0 xruns**, 0 stream errors, worst callback 0.596 of its period (p99 0.41, median 0.31), no clipped samples, no late commands. **The load follows the sounding voices** (20 s each, one thread, 128 frames): median 0.40 of the period with sleep against 0.52 with `sleep = false` (worst 0.746 against 0.790, 0 xruns each); at about 1.6 % of a core per voice, some 7 of the 16 voices are asleep at a time on average.
 
+
+### `projects/generative`, 20 minutes (M5, ADR 0056)
+
+**Release build, 2026-11-15** (operator; Apple M5 Max, macOS 27, the machine otherwise idle but for Signal.app): `signal render projects/generative --seconds 1200 --block 256` (57 600 000 frames at 48 kHz).
+
+| Threads | Wall time | Real time | `audio_fnv1a64` |
+|---:|---:|---:|---|
+| 4 | 97.5 s | 12.3× | `9b7e43c900739956` |
+| 1 | 255.5 s | 4.7× | `9b7e43c900739956` |
+
+- **Measurement:** the same audio on 1 and 4 threads; a copy with a report slot added (the form's and the chord's state) renders the same `audio.wav`. The form over the 62 sections of that seed: 2 intros, 21 grooves, 14 builds, 18 peaks, 7 breakdowns, the first section the intro; the 20 minutes peak at −13.8 dBFS; section RMS: intro −42 dB, breakdown −38 dB, groove −29 dB, build −28 dB, peak −27.5 dB.
+- **Assumption:** the loudness spread between groove, build and peak is small because the kick and the bass carry most of the energy in all three; what changes between them is the arrangement (clap, lead, texture). Whether that contrast is audible is the owner's listening review.

@@ -199,6 +199,10 @@ pub(crate) fn render_project(
     provenance
         .project_file_hashes
         .extend(project.include_file_hashes());
+    // ADR 0056 §1: a sample pattern's WAV is a project file.
+    provenance
+        .project_file_hashes
+        .extend(project.sample_file_hashes());
     provenance.included_projects = project.included_projects();
     provenance.library_interface_hashes = project.library_interface_hashes();
     provenance.render_input_hashes = input_hashes;

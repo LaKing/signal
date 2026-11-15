@@ -4,6 +4,45 @@ expression: text
 ---
 {
   "$defs": {
+    "ChainFile": {
+      "additionalProperties": false,
+      "description": "A chain pattern file (`kind = \"chain\"`, ADR 0056 §4): its states in\norder, and for each the weights of moving to every state.",
+      "properties": {
+        "kind": {
+          "const": "chain",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "states": {
+          "description": "The states, in order: state 0 is the first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "weights": {
+          "additionalProperties": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "description": "Per state, the weight of each next state, in `states`' order.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "states",
+        "weights"
+      ],
+      "type": "object"
+    },
     "CompositeFile": {
       "additionalProperties": false,
       "description": "A Signal composite file, `composites/<name>.toml`.",
@@ -567,11 +606,13 @@ expression: text
             "std.latency_probe",
             "std.lfo",
             "std.log",
+            "std.markov",
             "std.mass_spring",
             "std.max",
             "std.merge",
             "std.mesh2d",
             "std.mesh2d_audio",
+            "std.meter",
             "std.min",
             "std.mix",
             "std.mod",
@@ -609,6 +650,7 @@ expression: text
             "std.route",
             "std.sample_hold",
             "std.sample_rate",
+            "std.sampler",
             "std.scale",
             "std.select",
             "std.sign",
@@ -994,6 +1036,30 @@ expression: text
       ],
       "type": "object"
     },
+    "SampleFile": {
+      "additionalProperties": false,
+      "description": "A sample pattern file (`kind = \"sample\"`, ADR 0056 §1): the WAV it reads.",
+      "properties": {
+        "file": {
+          "description": "The WAV file, relative to the project folder (no `..`).",
+          "type": "string"
+        },
+        "kind": {
+          "const": "sample",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "file"
+      ],
+      "type": "object"
+    },
     "SlotSpec": {
       "anyOf": [
         {
@@ -1193,6 +1259,12 @@ expression: text
     },
     {
       "$ref": "#/$defs/StepsFile"
+    },
+    {
+      "$ref": "#/$defs/ChainFile"
+    },
+    {
+      "$ref": "#/$defs/SampleFile"
     },
     {
       "$ref": "#/$defs/InterfaceFile"

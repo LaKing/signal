@@ -512,6 +512,9 @@ fn hex(hash: u64) -> String {
 }
 
 /// The FNV-1a 64 of each file, by path.
+/// A version's sample files (ADR 0056 §1): path in the folder, bytes.
+type SampleFiles = Vec<(String, std::sync::Arc<[u8]>)>;
+
 fn file_hashes(files: &[SourceFile]) -> BTreeMap<String, String> {
     files
         .iter()
@@ -882,7 +885,7 @@ pub struct SessionRecorder {
     machine: Machine,
     /// The files (`Project::session_copy`) and plan of every version (none
     /// without history).
-    versions: Vec<(Vec<SourceFile>, ExecutionPlan)>,
+    versions: Vec<(Vec<SourceFile>, ExecutionPlan, SampleFiles)>,
     /// How many versions there have been: the next version's number.
     version_count: u64,
     /// Whether versions and commands are kept, to be written as a session.
@@ -921,6 +924,9 @@ impl SessionRecorder {
         provenance
             .project_file_hashes
             .extend(initial.include_file_hashes());
+        provenance
+            .project_file_hashes
+            .extend(initial.sample_file_hashes());
         provenance.included_projects = initial.included_projects();
         provenance.library_interface_hashes = initial.library_interface_hashes();
         if i64::try_from(seed).is_err() {
@@ -936,7 +942,7 @@ impl SessionRecorder {
             provenance,
             machine: Machine::here(Vec::new()),
             state: State::new(&plan, 0),
-            versions: vec![(initial.session_copy(), plan)],
+            versions: vec![(initial.session_copy(), plan, initial.sample_files())],
             version_count: 1,
             history: true,
             edits: Vec::new(),
@@ -1133,7 +1139,8 @@ impl SessionRecorder {
         if !self.history {
             return Ok(version);
         }
-        self.versions.push((project.session_copy(), plan));
+        self.versions
+            .push((project.session_copy(), plan, project.sample_files()));
         // ADR 0027 §4: the library composites of every version, so a swap
         // that brings one in is recorded too (`Session::library_hashes`).
         self.provenance
@@ -1169,7 +1176,7 @@ impl SessionRecorder {
     /// Whether any version has a module with a declared latency: only then
     /// does a session hold boundary records.
     pub fn latent(&self) -> bool {
-        latent(&self.versions.iter().map(|(_, p)| p).collect::<Vec<_>>())
+        latent(&self.versions.iter().map(|(_, p, _)| p).collect::<Vec<_>>())
     }
 
     /// Records the outcomes at latent modules' due blocks (M2.7-4). Written
@@ -1240,7 +1247,7 @@ impl SessionRecorder {
             .enumerate()
             .map(|(i, e)| (i + 1, e.clone()))
             .collect();
-        let plans: Vec<ExecutionPlan> = self.versions.iter().map(|(_, p)| p.clone()).collect();
+        let plans: Vec<ExecutionPlan> = self.versions.iter().map(|(_, p, _)| p.clone()).collect();
         let mut diagnostics = validate(&numbered, &plans);
         diagnostics.extend(end_errors(&numbered, self.end));
         if !diagnostics.is_empty() {
@@ -1302,9 +1309,17 @@ impl SessionRecorder {
                 .versions
                 .iter()
                 .enumerate()
-                .map(|(version, (files, _))| VersionOut {
-                    version: version as u64,
-                    files: file_hashes(files),
+                .map(|(version, (files, _, samples))| {
+                    let mut files = file_hashes(files);
+                    files.extend(
+                        samples
+                            .iter()
+                            .map(|(path, bytes)| (path.clone(), hex(fnv1a64(bytes)))),
+                    );
+                    VersionOut {
+                        version: version as u64,
+                        files,
+                    }
                 })
                 .collect(),
         };
@@ -1313,14 +1328,17 @@ impl SessionRecorder {
         fs::create_dir_all(dir).map_err(io(dir))?;
         let path = dir.join(SESSION_FILE);
         fs::write(&path, text).map_err(io(&path))?;
-        for (version, (files, _)) in self.versions.iter().enumerate() {
+        for (version, (files, _, samples)) in self.versions.iter().enumerate() {
             let root = dir.join(version_dir(version as u64));
-            for file in files {
-                let path = root.join(&file.path);
+            let texts = files.iter().map(|f| (f.path.as_str(), f.text.as_bytes()));
+            // ADR 0056 §1: a version's sample files beside its texts.
+            let bytes = samples.iter().map(|(p, b)| (p.as_str(), &b[..]));
+            for (relative, content) in texts.chain(bytes) {
+                let path = root.join(relative);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(io(parent))?;
                 }
-                fs::write(&path, &file.text).map_err(io(&path))?;
+                fs::write(&path, content).map_err(io(&path))?;
             }
         }
         let mut log = String::new();
@@ -1523,7 +1541,7 @@ impl LiveRecorder {
             self.recorder.set_boundaries(boundaries);
         }
         if let Some(history) = self.inputs.take()
-            && let Some((_, plan)) = self.recorder.versions.first()
+            && let Some((_, plan, _)) = self.recorder.versions.first()
         {
             let sources = plan_sources(plan);
             self.recorder
@@ -1839,7 +1857,8 @@ impl Session {
                 Err(error) => return Err(error),
             };
             // ADR 0035 §13: with its includes' files under `includes/`.
-            let present = file_hashes(&project.session_copy());
+            let mut present = file_hashes(&project.session_copy());
+            present.extend(project.sample_file_hashes());
             for (path, hash) in &present {
                 match entry.files.get(path) {
                     Some(recorded) if recorded == hash => {}
