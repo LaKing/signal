@@ -122,6 +122,33 @@ pub(crate) struct PlayArgs {
     /// unless written). Repeatable; a `dmx` role without one is not sent.
     #[arg(long, value_name = "ROLE=IP[:PORT][/UNIVERSE]", value_parser = parse_artnet_arg)]
     pub(crate) artnet: Vec<(String, signal_output::ArtNetTarget)>,
+    /// Takes the `osc` slots of role ROLE from OSC messages received on
+    /// this address (ADR 0057 §1), for this run only: `--osc
+    /// surface=0.0.0.0:9000`; a value `<name>` of the slot reads the last
+    /// `/<role>/<name>` message's number. Repeatable; a role without one
+    /// reads 0.
+    #[arg(long, value_name = "ROLE=IP:PORT", value_parser = parse_osc_arg)]
+    pub(crate) osc: Vec<(String, String)>,
+    /// Takes the `midi` slots of role ROLE from the MIDI sources whose
+    /// names contain NAME (`*`: every source) through CoreMIDI (ADR 0057
+    /// §1, §3), for this run only: `--midi keys=Arturia`. Repeatable; a
+    /// role without one reads 0.
+    #[arg(long, value_name = "ROLE=NAME")]
+    pub(crate) midi: Vec<String>,
+}
+
+/// `--osc`'s value: `role=IP:PORT`.
+pub(crate) fn parse_osc_arg(text: &str) -> Result<(String, String), String> {
+    let (role, address) = text
+        .split_once('=')
+        .ok_or_else(|| format!("`{text}` is not ROLE=IP:PORT (surface=0.0.0.0:9000)"))?;
+    if !signal_project::device::valid_role(role) {
+        return Err(format!("`{role}` is not a role: [a-z][a-z0-9_]*"));
+    }
+    address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| format!("`{address}` is not IP:PORT"))?;
+    Ok((role.to_owned(), address.to_owned()))
 }
 
 /// `--artnet`'s value: `role=IP[:PORT][/UNIVERSE]`.
@@ -316,6 +343,14 @@ struct Control<'a> {
     edits: Edits,
     /// ADR 0057 §2: the data sinks' frames and their Art-Net sender.
     artnet: Option<(signal_output::DataFrames, signal_output::ArtNetSender)>,
+    /// ADR 0057 §1: the OSC listeners (kept for the run) and the control
+    /// sides' records, taken into the session when the run starts.
+    /// ADR 0057 §3: with them, the MIDI feeds, kept for the run.
+    osc: (
+        Vec<signal_output::osc::OscListener>,
+        Vec<signal_output::inputs::InputRecord>,
+        Vec<signal_audio::midi_in::MidiFeed>,
+    ),
 }
 
 impl Control<'_> {
@@ -672,6 +707,89 @@ pub(crate) fn run(
             .map_err(|e| Failure::Io(format!("Art-Net socket: {e}")))?;
         Some((runner.send_data(signal_output::data_hop(rate)), sender))
     };
+    // ADR 0057 §1: the `osc` slots, each from its role's listener; a
+    // capture side like an audio one, recorded with the session.
+    let record_frames = signal_ui::player::input_record_frames(rate, args.record_session.is_some());
+    let mut osc_listeners = Vec::new();
+    let mut osc_records = Vec::new();
+    let mut osc_inputs = Vec::new();
+    let mut midi_feeds = Vec::new();
+    for side in signal_project::device::control_sides(&project, &plan) {
+        // ADR 0057 §3: a `midi` slot, from the CoreMIDI sources named.
+        if side.kind == signal_project::device::MIDI {
+            let filter = args
+                .midi
+                .iter()
+                .filter_map(|m| m.split_once('='))
+                .find(|(role, _)| *role == side.role)
+                .map(|(_, name)| name.to_owned());
+            let Some(filter) = filter else {
+                eprintln!(
+                    "signal: {} ({}): reads 0 (nothing binds it: --midi {}=NAME)",
+                    side.role, side.address, side.role
+                );
+                continue;
+            };
+            let (feed, source) = signal_audio::midi_in::MidiFeed::start(&filter, &side.ports)
+                .map_err(|e| Failure::Io(format!("MIDI for {}: {e}", side.role)))?;
+            eprintln!(
+                "signal: {} ({}): MIDI from {}",
+                side.role,
+                side.address,
+                if feed.sources.is_empty() {
+                    format!("no source named `{filter}` yet")
+                } else {
+                    feed.sources.join(", ")
+                }
+            );
+            let (input, record) = signal_output::inputs::RunInput::new(
+                side.address.clone(),
+                side.ports.len(),
+                Box::new(source),
+                (args.buffer as usize).max(signal_output::MAX_CALLBACK_FRAMES),
+                record_frames,
+            );
+            osc_inputs.push(input);
+            osc_records.extend(record);
+            midi_feeds.push(feed);
+            continue;
+        }
+        let Some((_, address)) = args.osc.iter().find(|(role, _)| *role == side.role) else {
+            eprintln!(
+                "signal: {} ({}): reads 0 (nothing binds it: --osc {}=IP:PORT)",
+                side.role, side.address, side.role
+            );
+            continue;
+        };
+        let route = signal_output::osc::OscRoute {
+            role: side.role.clone(),
+            names: side.ports.clone(),
+        };
+        let (listener, mut sources) = signal_output::osc::listen(address, &[route])
+            .map_err(|e| Failure::Io(format!("OSC on {address}: {e}")))?;
+        eprintln!(
+            "signal: {} ({}): OSC on {}, /{}/{{{}}}",
+            side.role,
+            side.address,
+            listener.local,
+            side.role,
+            side.ports.join(",")
+        );
+        let Some(source) = sources.pop() else {
+            continue;
+        };
+        let (input, record) = signal_output::inputs::RunInput::new(
+            side.address.clone(),
+            side.ports.len(),
+            Box::new(source),
+            (args.buffer as usize).max(signal_output::MAX_CALLBACK_FRAMES),
+            record_frames,
+        );
+        osc_inputs.push(input);
+        osc_records.extend(record);
+        osc_listeners.push(listener);
+    }
+    runner.set_inputs(osc_inputs);
     if let Some(error) = runner.waiter_error() {
         eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
     }
@@ -702,6 +820,7 @@ pub(crate) fn run(
         rate,
         edits: Edits::default(),
         artnet,
+        osc: (osc_listeners, osc_records, midi_feeds),
     };
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -933,7 +1052,12 @@ fn play_null(
         .map_err(|e| Failure::Internal(e.to_string()))?;
     // ADR 0038 §9: the null driver captures nothing; a recorded session
     // says its sources read 0.
-    control.live.set_inputs(Vec::new());
+    control.live.set_inputs(
+        std::mem::take(&mut control.osc.1)
+            .into_iter()
+            .map(|record| (record, None))
+            .collect(),
+    );
     eprintln!(
         "signal: playing {} at {rate} Hz with the null driver; press Enter to stop",
         args.project.display()
@@ -1132,10 +1256,13 @@ fn play_device(
     }
     driver.start(runner).map_err(|e| device(&e))?;
     // ADR 0038 §9: a recorded session records what the sources read.
-    control.live.set_inputs(signal_ui::player::input_records(
-        driver.take_input_records(),
-        &captures,
-    ));
+    let mut records = signal_ui::player::input_records(driver.take_input_records(), &captures);
+    records.extend(
+        std::mem::take(&mut control.osc.1)
+            .into_iter()
+            .map(|r| (r, None)),
+    );
+    control.live.set_inputs(records);
     let shared = driver.joined().is_some_and(|j| j.shared);
     eprintln!(
         "signal: playing {} at {rate} Hz on '{}' (buffer {} frames{}); press Enter to stop",

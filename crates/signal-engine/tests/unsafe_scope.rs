@@ -1,6 +1,6 @@
-//! AGENTS.md rule 9 (ADR 0017, ADR 0019 §4, ADR 0020, ADR 0036): `unsafe`
-//! code appears only in the four audited modules, and `#![allow(unsafe_code)]`
-//! only there.
+//! AGENTS.md rule 9 (ADR 0017, ADR 0019 §4, ADR 0020, ADR 0036, ADR 0057
+//! §3): `unsafe` code appears only in the five audited modules, and
+//! `#![allow(unsafe_code)]` only there.
 //! Every `.rs` file under `crates/` and `lab/` is read; comment lines are
 //! skipped, so prose may name the word.
 
@@ -8,11 +8,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The audited modules, relative to the repository root.
-const AUDITED: [&str; 4] = [
+const AUDITED: [&str; 5] = [
     "crates/signal-contract/src/alloc_counter.rs",
     "crates/signal-audio/src/rt_thread.rs",
     "crates/signal-engine/src/shared.rs",
     "crates/signal-audio/src/device_props.rs",
+    "crates/signal-audio/src/midi_in.rs",
 ];
 
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -81,7 +82,7 @@ fn unsafe_appears_only_in_the_audited_modules() {
         offenders.is_empty(),
         "the keyword outside the audited modules:\n{offenders:#?}"
     );
-    // The four audited modules do use it.
+    // The audited modules do use it.
     for module in AUDITED {
         assert!(audited_found.iter().any(|f| f == module), "{module}");
     }
@@ -131,6 +132,29 @@ fn device_props_only_reads_with_safety_comments() {
     assert!(
         !code.iter().any(|l| l.contains("SetPropertyData")),
         "device_props.rs sets a property"
+    );
+}
+
+/// ADR 0057 §3: every use of the keyword in `midi_in.rs` follows a
+/// `SAFETY:` comment, and the module only receives: it sends nothing but
+/// through its own virtual source (`MIDIReceived`), never `MIDISend`.
+#[test]
+fn midi_in_only_receives_with_safety_comments() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = fs::read_to_string(root.join(AUDITED[4])).unwrap();
+    let (uses, missing) = without_safety_comments(&text);
+    assert!(uses >= 10, "midi_in.rs uses the keyword {uses} times");
+    assert!(
+        missing.is_empty(),
+        "without a SAFETY comment:\n{missing:#?}"
+    );
+    let code: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    assert!(
+        !code.iter().any(|l| l.contains("MIDISend")),
+        "midi_in.rs sends to a device"
     );
 }
 

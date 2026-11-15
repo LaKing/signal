@@ -183,6 +183,13 @@ impl Runner {
         self.inputs = inputs;
     }
 
+    /// More capture sides beside those set ([`set_inputs`](Runner::set_inputs)):
+    /// a driver's audio inputs beside a run's control inputs (ADR 0057 §1).
+    /// Control thread, before the Runner goes to its driver.
+    pub fn add_inputs(&mut self, inputs: Vec<RunInput>) {
+        self.inputs.extend(inputs);
+    }
+
     /// Runs one callback: `out` holds `out.len() / channels` frames of
     /// `channels` interleaved device channels. The engine runs them
     /// ([`signal_engine::Runner::process`]); each frame's audio-sink channels

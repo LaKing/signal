@@ -1579,7 +1579,8 @@ impl Driver for CoreAudioDriver {
             self.records.extend(opened.records);
             self.captured.push(opened.capture);
         }
-        runner.set_inputs(run_inputs);
+        // Beside a run's control inputs (ADR 0057 §1), set before.
+        runner.add_inputs(run_inputs);
         let fade = fade_frames(self.choice.sample_rate);
         runner.fade_in(fade);
         let workers = runner.workers();

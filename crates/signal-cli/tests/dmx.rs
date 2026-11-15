@@ -110,7 +110,7 @@ fn a_dmx_slot_names_its_channels() {
         "keys = { device = { kind = \"laser\", play = [\"a\"] } }",
         "",
     );
-    assert!(said(render(&dir, "10")).contains("supplies `audio` and `dmx`"));
+    assert!(said(render(&dir, "10")).contains("supplies `audio`, `dmx`, `osc` and `midi`"));
 }
 
 /// ADR 0057 §2, phase 1's live exit: a run sends each DMX frame as an

@@ -61,7 +61,7 @@ pub struct AudioIn;
 #[derive(Clone, Debug, Default)]
 pub struct AudioInMono;
 
-fn copy(inputs: &Inputs<'_>, outputs: &mut Outputs<'_>, rows: usize) {
+pub(crate) fn copy(inputs: &Inputs<'_>, outputs: &mut Outputs<'_>, rows: usize) {
     for row in 0..rows {
         let x = inputs.external(row);
         for (n, out) in outputs.signal(row).iter_mut().enumerate() {

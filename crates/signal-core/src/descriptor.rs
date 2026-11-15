@@ -357,6 +357,9 @@ pub enum SinkKind {
 pub enum SourceKind {
     /// Reads audio from the driver's input.
     Audio,
+    /// Values a driver takes from elsewhere than audio (ADR 0057 §1: a
+    /// control surface's). The engine attaches no meaning to it.
+    Data,
 }
 
 /// Everything a module type declares about itself, available without an instance.

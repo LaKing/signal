@@ -1053,10 +1053,11 @@ pub(crate) struct DeviceSpec {
     #[serde(default)]
     #[schemars(with = "Option<PlaySpec>")]
     pub(crate) play: Option<Spanned<PlaySpec>>,
-    /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7).
+    /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7); a
+    /// control slot's values, by name (`kind = "osc"`, ADR 0057 §1).
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
-    pub(crate) capture: Option<Spanned<String>>,
+    #[schemars(with = "Option<PlaySpec>")]
+    pub(crate) capture: Option<Spanned<PlaySpec>>,
     /// What it is for, `[a-z][a-z0-9_]*`; `main` when absent.
     #[serde(default)]
     #[schemars(with = "Option<String>")]

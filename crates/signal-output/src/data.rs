@@ -33,7 +33,11 @@ pub struct DataSide {
     pub slot: String,
     /// The slot's role.
     pub role: String,
-    /// Its channels' names, in DMX order from 1.
+    /// The slot's kind: `dmx` for a data sink; `osc` or `midi` for a
+    /// control source (ADR 0057 §1).
+    pub kind: String,
+    /// Its channels' names, in DMX order from 1 (a control source's values,
+    /// in output order).
     pub ports: Vec<String>,
 }
 

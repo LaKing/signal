@@ -1793,12 +1793,12 @@ fn device_slot(
         fine = false;
     }
     let kind = spec.kind.as_ref().map_or("audio", |k| k.get_ref().as_str());
-    if kind != "audio" && kind != device::DMX {
+    if !["audio", device::DMX, device::OSC, device::MIDI].contains(&kind) {
         let at = spec.kind.as_ref().map_or(at, |k| k.span().start);
         problems.push((
             at,
             format!(
-                "{instance}: device kind `{kind}` is not built; this version supplies `audio` and `dmx`"
+                "{instance}: device kind `{kind}` is not built; this version supplies `audio`, `dmx`, `osc` and `midi`"
             ),
         ));
         fine = false;
@@ -1843,6 +1843,24 @@ fn device_slot(
         Some(role) => role.get_ref().clone(),
         None => signal_output::MAIN.to_owned(),
     };
+    // ADR 0057 §1: an `osc` or `midi` slot captures values by name, and
+    // plays nothing.
+    if kind == device::OSC || kind == device::MIDI {
+        let discrete = matches!(
+            spec.capture.as_ref().map(Spanned::get_ref),
+            Some(model::PlaySpec::Discrete(_))
+        );
+        if spec.play.is_some() || !discrete {
+            problems.push((
+                at,
+                format!(
+                    "{instance}: {} `{kind}` slot captures its values by name, `capture = [\"cutoff\", \"x\", …]`, and plays nothing",
+                    if kind == device::OSC { "an" } else { "a" }
+                ),
+            ));
+            fine = false;
+        }
+    }
     let mut ports = Vec::new();
     let module = match (&spec.play, &spec.capture) {
         (Some(play), _) => match play.get_ref() {
@@ -1867,10 +1885,44 @@ fn device_slot(
             },
         },
         // ADR 0038 §7: a capture side plans as a source.
-        (None, Some(capture)) => match device::planned_source(capture.get_ref()) {
-            Ok(module) => Some(module.to_owned()),
-            Err(reason) => {
-                problems.push((capture.span().start, format!("{instance}: {reason}")));
+        (None, Some(capture)) => match capture.get_ref() {
+            model::PlaySpec::Layout(layout) => match device::planned_source(layout) {
+                Ok(module) => Some(module.to_owned()),
+                Err(reason) => {
+                    problems.push((capture.span().start, format!("{instance}: {reason}")));
+                    None
+                }
+            },
+            // ADR 0057 §1: named values, a control slot's composite.
+            model::PlaySpec::Discrete(names) if kind == device::OSC || kind == device::MIDI => {
+                // ADR 0057 §1: a `midi` slot's names are MIDI's vocabulary.
+                let unknown = names
+                    .iter()
+                    .find(|n| kind == device::MIDI && !signal_output::midi::is_midi_name(n));
+                let problem = match unknown {
+                    Some(name) => Some(format!(
+                        "`{name}` is not a MIDI value; a `midi` slot captures note_gate, note_key, note_velocity, bend, clock_position, clock_running, clock_tempo and cc0 … cc127"
+                    )),
+                    None => device::discrete_problem(names),
+                };
+                match problem {
+                    Some(reason) => {
+                        problems.push((capture.span().start, format!("{instance}: {reason}")));
+                        None
+                    }
+                    None => {
+                        ports = names.clone();
+                        Some(device::discrete_name(instance))
+                    }
+                }
+            }
+            model::PlaySpec::Discrete(_) => {
+                problems.push((
+                    capture.span().start,
+                    format!(
+                        "{instance}: a discrete capture layout is not built yet; this version captures `mono` and `stereo` audio, and `osc` values by name"
+                    ),
+                ));
                 None
             }
         },
@@ -1916,7 +1968,10 @@ fn device_slot(
             model::PlaySpec::Discrete(_) => device::DISCRETE.to_owned(),
         }),
         ports,
-        capture: spec.capture.as_ref().map(|c| c.get_ref().clone()),
+        capture: spec.capture.as_ref().map(|c| match c.get_ref() {
+            model::PlaySpec::Layout(layout) => layout.clone(),
+            model::PlaySpec::Discrete(_) => device::DISCRETE.to_owned(),
+        }),
         render: render.map(|r| r.get_ref().clone()),
     };
     Some((slot, module))

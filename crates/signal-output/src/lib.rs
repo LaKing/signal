@@ -56,6 +56,8 @@ mod driver;
 pub mod fade;
 pub mod inputs;
 pub mod layouts;
+pub mod midi;
+pub mod osc;
 mod render;
 pub mod routing;
 mod runner;

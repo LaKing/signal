@@ -179,8 +179,12 @@ fn what_is_not_built_or_not_valid_is_refused_with_its_reason() {
             "cue: invalid role `Cue`",
         ),
         (
+            "{ device = { play = \"stereo\", kind = \"laser\" } }",
+            "cue: device kind `laser` is not built",
+        ),
+        (
             "{ device = { play = \"stereo\", kind = \"midi\" } }",
-            "cue: device kind `midi` is not built",
+            "cue: a `midi` slot captures its values by name",
         ),
         (
             "{ device = { role = \"cue\" } }",

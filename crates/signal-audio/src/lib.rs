@@ -45,6 +45,7 @@ pub mod device_props;
 mod input;
 mod join;
 mod map;
+pub mod midi_in;
 pub mod rt_thread;
 mod scheduling;
 mod secondary;

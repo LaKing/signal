@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 
 use signal_core::{Direction, InstanceAddress, PortShape, SinkKind, SourceKind};
 use signal_graph::{
-    CompositeDef, ExecutionPlan, Exports, InputExport, InstanceDef, ParameterExport,
+    CompositeDef, ExecutionPlan, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
 };
 use signal_output::{CaptureSide, MAIN, PlaySide};
 
@@ -111,6 +111,16 @@ pub const MAX_DISCRETE: usize = 64;
 /// The kind of a DMX (Art-Net) device slot (ADR 0057 §2).
 pub const DMX: &str = "dmx";
 
+/// The kind of an OSC control device slot (ADR 0057 §1).
+pub const OSC: &str = "osc";
+
+/// The kind of a MIDI control device slot (ADR 0057 §1, §3).
+pub const MIDI: &str = "midi";
+
+/// The instance inside a control slot's composite that is its source: the
+/// slot `/surface` captures at `/surface/capture`.
+pub const DISCRETE_SOURCE: &str = "capture";
+
 /// A device slot as written: its role and its sides' layouts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSlot {
@@ -161,6 +171,29 @@ pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
 /// its written ports exported onto `std.device_out<N>`'s `c1…cN`, with
 /// `gain`. Named `device:<instance>`, a name no file can give.
 pub(crate) fn discrete_composite(instance: &str, ports: &[String], kind: &str) -> CompositeDef {
+    // ADR 0057 §1: a control slot is a source, its values exported out.
+    if kind == OSC || kind == MIDI {
+        return CompositeDef {
+            name: discrete_name(instance),
+            instances: vec![InstanceDef {
+                name: DISCRETE_SOURCE.to_owned(),
+                module: format!("std.control_in{}", ports.len()),
+                ..InstanceDef::default()
+            }],
+            exports: Exports {
+                outputs: ports
+                    .iter()
+                    .enumerate()
+                    .map(|(k, port)| OutputExport {
+                        name: port.clone(),
+                        from: format!("{DISCRETE_SOURCE}.c{}", k + 1),
+                    })
+                    .collect(),
+                ..Exports::default()
+            },
+            ..CompositeDef::default()
+        };
+    }
     // ADR 0057 §2: a data slot's sink takes no gain.
     let data = kind == DMX;
     let module = if data {
@@ -323,6 +356,27 @@ pub fn data_sides(project: &Project, plan: &ExecutionPlan) -> Vec<signal_output:
                 address: i.address.clone(),
                 slot: slot_of_sink(&i.address).unwrap_or_default().to_owned(),
                 role: slot.map_or_else(String::new, |d| d.role.clone()),
+                kind: slot.map_or_else(String::new, |d| d.kind.clone()),
+                ports: slot.map(|d| d.ports.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// Every control source of `plan` (ADR 0057 §1: an `osc` slot's) with its
+/// slot's role and value names. In plan order.
+pub fn control_sides(project: &Project, plan: &ExecutionPlan) -> Vec<signal_output::DataSide> {
+    let devices = project.device_slots();
+    plan.instances
+        .iter()
+        .filter(|i| matches!(i.descriptor.source, Some(SourceKind::Data)))
+        .map(|i| {
+            let slot = slot_of_sink(&i.address).and_then(|name| devices.get(name));
+            signal_output::DataSide {
+                address: i.address.clone(),
+                slot: slot_of_sink(&i.address).unwrap_or_default().to_owned(),
+                role: slot.map_or_else(String::new, |d| d.role.clone()),
+                kind: slot.map_or_else(String::new, |d| d.kind.clone()),
                 ports: slot.map(|d| d.ports.clone()).unwrap_or_default(),
             }
         })
@@ -351,7 +405,7 @@ pub fn main_side(sides: &[PlaySide]) -> Option<&PlaySide> {
 pub fn slot_of_sink(address: &InstanceAddress) -> Option<&str> {
     top_level_name(address).or_else(|| {
         let (slot, sink) = address.as_str().strip_prefix('/')?.split_once('/')?;
-        (sink == DISCRETE_SINK).then_some(slot)
+        (sink == DISCRETE_SINK || sink == DISCRETE_SOURCE).then_some(slot)
     })
 }
 
