@@ -602,7 +602,7 @@ impl Project {
             if slot.ports.is_empty() {
                 continue;
             }
-            let def = device::discrete_composite(instance, &slot.ports);
+            let def = device::discrete_composite(instance, &slot.ports, &slot.kind);
             let spans = locate::DefSpans {
                 file: root_spans.file,
                 devices: BTreeMap::new(),
@@ -1792,17 +1792,32 @@ fn device_slot(
         ));
         fine = false;
     }
-    if let Some(kind) = &spec.kind
-        && kind.get_ref() != "audio"
-    {
+    let kind = spec.kind.as_ref().map_or("audio", |k| k.get_ref().as_str());
+    if kind != "audio" && kind != device::DMX {
+        let at = spec.kind.as_ref().map_or(at, |k| k.span().start);
         problems.push((
-            kind.span().start,
+            at,
             format!(
-                "{instance}: device kind `{}` is not built; this version supplies `audio`",
-                kind.get_ref()
+                "{instance}: device kind `{kind}` is not built; this version supplies `audio` and `dmx`"
             ),
         ));
         fine = false;
+    }
+    // ADR 0057 §2: a `dmx` slot plays named channels only.
+    if kind == device::DMX {
+        let discrete = matches!(
+            spec.play.as_ref().map(Spanned::get_ref),
+            Some(model::PlaySpec::Discrete(_))
+        );
+        if spec.capture.is_some() || !discrete {
+            problems.push((
+                at,
+                format!(
+                    "{instance}: a `dmx` slot plays its channels by name, `play = [\"red\", \"green\", …]`, and captures nothing"
+                ),
+            ));
+            fine = false;
+        }
     }
     if let (Some(_), Some(capture)) = (&spec.play, &spec.capture) {
         problems.push((
@@ -1894,6 +1909,7 @@ fn device_slot(
     }
     let module = module.filter(|_| fine)?;
     let slot = device::DeviceSlot {
+        kind: kind.to_owned(),
         role,
         play: spec.play.as_ref().map(|p| match p.get_ref() {
             model::PlaySpec::Layout(layout) => layout.clone(),

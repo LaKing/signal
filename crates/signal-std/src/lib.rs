@@ -32,6 +32,7 @@
 //! | `std.meter` | [`Meter`] | direct, bars, sections and phrases from a position in beats, with their start events (ADR 0056) | `event` |
 //! | `std.markov` | [`Markov`] | direct, a seeded state machine stepping by a chain pattern's weights (ADR 0056) | `event` |
 //! | `std.sampler` | [`Sampler`] | direct, plays a sample pattern (a WAV) on a trigger at a rate, looping or not (ADR 0056) | `generator` |
+//! | `std.data_out1` … `std.data_out64` | `data_out::DataOut` | direct, a data slot's sink (`SinkKind::Data`, inputs `c1…cN`; ADR 0057) | `io` |
 //! | `std.device_out1` … `std.device_out64`, `std.device_out_tap1` … `std.device_out_tap64` | [`device_out::DeviceOut`], [`device_out::DeviceOutTap`] | direct, a discrete layout's sink (inputs `c1…cN`) and its tap (ADR 0038 §2) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
@@ -187,6 +188,7 @@ mod clock_div;
 mod comb;
 mod constant;
 mod count;
+mod data_out;
 mod dc_block;
 mod delay;
 pub mod device_out;
@@ -578,6 +580,13 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         registry.register(*module_type)?;
     }
     for (sink, tap) in device_out::sink_taps() {
+        registry.set_sink_tap(sink, tap);
+    }
+    // ADR 0057 §2: the data slots' sinks, each width's, tapped as discrete.
+    for module_type in data_out::types() {
+        registry.register(*module_type)?;
+    }
+    for (sink, tap) in data_out::sink_taps() {
         registry.set_sink_tap(sink, tap);
     }
     for (name, ns) in COST_NS {
@@ -1109,10 +1118,12 @@ mod tests {
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()
+                + data_out::types().len()
         );
         let vectors = vector::types()
             .iter()
             .chain(device_out::types())
+            .chain(data_out::types())
             .map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
@@ -1159,6 +1170,7 @@ mod tests {
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()
+                + data_out::types().len()
         );
 
         // A type registered first under a std name blocks that name.

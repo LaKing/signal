@@ -15,6 +15,7 @@ use signal_engine::{
 use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Conversion, RenderError, to_device};
+use crate::data::{DataSinks, DataTrack};
 use crate::inputs::RunInput;
 use crate::vectors::{VectorTap, VectorTaps, VectorTrack};
 
@@ -121,8 +122,18 @@ pub fn render_blocks_tapped(
     taps: &[VectorTap],
     plans: &[ExecutionPlan],
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
-    render_inner(engine, frames, block, before, taps, plans, None, Vec::new())
-        .map(|(render, tracks, _)| (render, tracks))
+    render_inner(
+        engine,
+        frames,
+        block,
+        before,
+        taps,
+        plans,
+        None,
+        Vec::new(),
+        None,
+    )
+    .map(|(render, tracks, _, _)| (render, tracks))
 }
 
 /// ADR 0038 §2: the `WAVE_FORMAT_EXTENSIBLE` speaker mask of a layout of
@@ -229,9 +240,31 @@ pub fn render_fed(
     sides: Option<(&InstanceAddress, &[InstanceAddress])>,
     inputs: Vec<RunInput>,
 ) -> Result<(Render, Vec<SideRender>), RenderError> {
+    render_fed_data(engine, frames, sides, inputs, None).map(|(render, sides, _)| (render, sides))
+}
+
+/// [`render_fed`] with the data sinks' DMX frames every `hop` frames
+/// (ADR 0057 §2; none without a hop).
+pub fn render_fed_data(
+    engine: &mut Engine,
+    frames: u64,
+    sides: Option<(&InstanceAddress, &[InstanceAddress])>,
+    inputs: Vec<RunInput>,
+    hop: Option<u64>,
+) -> Result<(Render, Vec<SideRender>, Vec<DataTrack>), RenderError> {
     let block = engine.config().block_capacity;
-    render_inner(engine, frames, block, |_| Ok(None), &[], &[], sides, inputs)
-        .map(|(render, _, sides)| (render, sides))
+    render_inner(
+        engine,
+        frames,
+        block,
+        |_| Ok(None),
+        &[],
+        &[],
+        sides,
+        inputs,
+        hop,
+    )
+    .map(|(render, _, sides, data)| (render, sides, data))
 }
 
 /// [`render`] of a project with several play sides (ADR 0038 §9): `main`
@@ -255,8 +288,9 @@ pub fn render_sides(
         &[],
         Some((main, others)),
         Vec::new(),
+        None,
     )
-    .map(|(render, _, sides)| (render, sides))
+    .map(|(render, _, sides, _)| (render, sides))
 }
 
 /// [`render_blocks_tapped`] of a plan of several play sides (ADR 0038):
@@ -276,9 +310,15 @@ pub fn render_blocks_tapped_main(
     inputs: Vec<RunInput>,
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
     let sides = main.map(|m| (m, &[][..]));
-    render_inner(engine, frames, block, before, taps, plans, sides, inputs)
-        .map(|(render, tracks, _)| (render, tracks))
+    render_inner(
+        engine, frames, block, before, taps, plans, sides, inputs, None,
+    )
+    .map(|(render, tracks, _, _)| (render, tracks))
 }
+
+/// What the renders' one body gives: the render, the vector tracks, the
+/// other play sides and the data sinks' DMX frames.
+type Rendered = (Render, Vec<VectorTrack>, Vec<SideRender>, Vec<DataTrack>);
 
 /// The main sink and the other play sides of a routed render.
 type Sides<'a> = Option<(&'a InstanceAddress, &'a [InstanceAddress])>;
@@ -295,7 +335,8 @@ fn render_inner(
     plans: &[ExecutionPlan],
     sides: Sides<'_>,
     inputs: Vec<RunInput>,
-) -> Result<(Render, Vec<VectorTrack>, Vec<SideRender>), RenderError> {
+    data: Option<u64>,
+) -> Result<Rendered, RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
     }
@@ -322,6 +363,7 @@ fn render_inner(
         taps: VectorTaps::new(taps, plans),
         at: 0,
         inputs,
+        data: data.map(|hop| DataSinks::new(engine, hop)),
     };
     let run = match run_offline(engine, frames, block, before, &mut file) {
         Ok(run) => run,
@@ -358,7 +400,8 @@ fn render_inner(
             samples,
         })
         .collect();
-    Ok((render, file.taps.tracks, sides))
+    let data = file.data.map(|d| d.tracks).unwrap_or_default();
+    Ok((render, file.taps.tracks, sides, data))
 }
 
 /// The render's output: the audio sink's inputs times its `gain`, frame by
@@ -380,11 +423,16 @@ struct File {
     /// ADR 0038 §9: the sources' recorded inputs (a replay's), bound by
     /// address at each swap.
     inputs: Vec<RunInput>,
+    /// ADR 0057 §2: the data sinks' DMX frames, when asked for.
+    data: Option<DataSinks>,
 }
 
 impl SinkOutput for File {
     fn bind(&mut self, engine: &Engine) -> bool {
         self.taps.bind(engine);
+        if let Some(data) = &mut self.data {
+            data.bind(engine);
+        }
         for input in &mut self.inputs {
             input.bind(engine);
         }
@@ -419,6 +467,9 @@ impl SinkOutput for File {
 
     fn block(&mut self, engine: &Engine, frames: usize) {
         self.taps.block(engine, self.at, frames);
+        if let Some(data) = &mut self.data {
+            data.block(engine, self.at, frames);
+        }
         self.at += frames as u64;
         for (sink, samples) in &mut self.others {
             let gain = sink.gain_index();

@@ -108,9 +108,14 @@ pub const DISCRETE: &str = "discrete";
 /// The most channels a discrete layout has (ADR 0038 §2).
 pub const MAX_DISCRETE: usize = 64;
 
+/// The kind of a DMX (Art-Net) device slot (ADR 0057 §2).
+pub const DMX: &str = "dmx";
+
 /// A device slot as written: its role and its sides' layouts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSlot {
+    /// Its kind: `audio`, or `dmx` (ADR 0057).
+    pub kind: String,
     /// Its role.
     pub role: String,
     /// Its play side's layout (`stereo`, or [`DISCRETE`]), if it plays.
@@ -155,12 +160,19 @@ pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
 /// The composite a discrete device slot `instance` plans as (ADR 0038 §3):
 /// its written ports exported onto `std.device_out<N>`'s `c1…cN`, with
 /// `gain`. Named `device:<instance>`, a name no file can give.
-pub(crate) fn discrete_composite(instance: &str, ports: &[String]) -> CompositeDef {
+pub(crate) fn discrete_composite(instance: &str, ports: &[String], kind: &str) -> CompositeDef {
+    // ADR 0057 §2: a data slot's sink takes no gain.
+    let data = kind == DMX;
+    let module = if data {
+        "std.data_out"
+    } else {
+        "std.device_out"
+    };
     CompositeDef {
         name: discrete_name(instance),
         instances: vec![InstanceDef {
             name: DISCRETE_SINK.to_owned(),
-            module: format!("std.device_out{}", ports.len()),
+            module: format!("{module}{}", ports.len()),
             ..InstanceDef::default()
         }],
         exports: Exports {
@@ -172,11 +184,15 @@ pub(crate) fn discrete_composite(instance: &str, ports: &[String]) -> CompositeD
                     to: vec![format!("{DISCRETE_SINK}.c{}", k + 1)],
                 })
                 .collect(),
-            parameters: vec![ParameterExport {
-                name: "gain".to_owned(),
-                to: vec![format!("{DISCRETE_SINK}.gain")],
-                ..ParameterExport::default()
-            }],
+            parameters: if data {
+                Vec::new()
+            } else {
+                vec![ParameterExport {
+                    name: "gain".to_owned(),
+                    to: vec![format!("{DISCRETE_SINK}.gain")],
+                    ..ParameterExport::default()
+                }]
+            },
             ..Exports::default()
         },
         ..CompositeDef::default()
@@ -288,6 +304,25 @@ pub fn play_sides(project: &Project, plan: &ExecutionPlan) -> Vec<PlaySide> {
                 address: i.address.clone(),
                 role,
                 width,
+                ports: slot.map(|d| d.ports.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// Every data sink of `plan` (ADR 0057 §2: a `dmx` slot's) with its slot's
+/// role and port names. In plan order.
+pub fn data_sides(project: &Project, plan: &ExecutionPlan) -> Vec<signal_output::DataSide> {
+    let devices = project.device_slots();
+    plan.instances
+        .iter()
+        .filter(|i| matches!(i.descriptor.sink, Some(SinkKind::Data)))
+        .map(|i| {
+            let slot = slot_of_sink(&i.address).and_then(|name| devices.get(name));
+            signal_output::DataSide {
+                address: i.address.clone(),
+                slot: slot_of_sink(&i.address).unwrap_or_default().to_owned(),
+                role: slot.map_or_else(String::new, |d| d.role.clone()),
                 ports: slot.map(|d| d.ports.clone()).unwrap_or_default(),
             }
         })

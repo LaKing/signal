@@ -20,6 +20,7 @@ use signal_engine::{
 use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Meter, to_device};
+use crate::data::LiveData;
 use crate::fade::Fade;
 use crate::inputs::RunInput;
 use crate::layouts::Mix;
@@ -93,6 +94,7 @@ pub fn realtime_routed(
         vectors,
         fade: Fade::default(),
         inputs: Vec::new(),
+        data: None,
     };
     let controller = Controller {
         controller,
@@ -156,9 +158,23 @@ pub struct Runner {
     /// The capture sides it feeds (ADR 0038 §7), from
     /// [`set_inputs`](Runner::set_inputs).
     inputs: Vec<RunInput>,
+    /// ADR 0057 §2: the data sinks sampled for the control thread, from
+    /// [`send_data`](Runner::send_data).
+    data: Option<LiveData>,
 }
 
 impl Runner {
+    /// ADR 0057 §2: hands the plan's data sinks (address order) to the
+    /// control thread every `hop` frames ([`data_hop`](crate::data_hop)):
+    /// the returned ring's end, which an
+    /// [`ArtNetSender`](crate::ArtNetSender) drains. Control thread, before
+    /// the run starts.
+    pub fn send_data(&mut self, hop: u64) -> crate::DataFrames {
+        let (data, rx) = LiveData::new(self.runner.engine(), hop);
+        self.data = Some(data);
+        rx
+    }
+
     /// The capture sides this run's sources read (ADR 0038 §7): each before
     /// every block, bound by address at each swap. Control thread, before
     /// the Runner goes to its driver; replaces any set before. A source no
@@ -214,6 +230,7 @@ impl Runner {
                 scopes: &mut self.scopes,
                 vectors: &mut self.vectors,
                 inputs: &mut self.inputs,
+                data: &mut self.data,
             };
             self.runner.process(frames, &mut device)
         };
@@ -403,6 +420,7 @@ struct Device<'a> {
     scopes: &'a mut Scopes,
     vectors: &'a mut Vectors,
     inputs: &'a mut [RunInput],
+    data: &'a mut Option<LiveData>,
 }
 
 impl SinkOutput for Device<'_> {
@@ -416,6 +434,9 @@ impl SinkOutput for Device<'_> {
         }
         self.scopes.bind(engine);
         self.vectors.bind(engine);
+        if let Some(data) = self.data.as_mut() {
+            data.bind(engine);
+        }
         for input in self.inputs.iter_mut() {
             input.bind(engine);
         }
@@ -433,6 +454,9 @@ impl SinkOutput for Device<'_> {
             .block(engine, self.first + self.at as u64, frames);
         self.vectors
             .block(engine, self.first + self.at as u64, frames);
+        if let Some(data) = self.data.as_mut() {
+            data.block(engine, self.first + self.at as u64, frames);
+        }
         for f in 0..frames {
             let start = self.at.saturating_mul(self.channels);
             let Some(row) = self.out.get_mut(start..start + self.channels) else {

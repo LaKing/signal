@@ -117,6 +117,24 @@ pub(crate) struct PlayArgs {
     /// output device (ADR 0052 §8). CoreAudio only.
     #[arg(long, value_name = "ROLE[@DEVICE]=CHANNELS", value_parser = parse_route)]
     pub(crate) capture: Vec<RouteArg>,
+    /// Sends the `dmx` slots of role ROLE as Art-Net (ADR 0057 §2), for
+    /// this run only: `--artnet lights=2.0.0.1/0` (port 6454 and universe 0
+    /// unless written). Repeatable; a `dmx` role without one is not sent.
+    #[arg(long, value_name = "ROLE=IP[:PORT][/UNIVERSE]", value_parser = parse_artnet_arg)]
+    pub(crate) artnet: Vec<(String, signal_output::ArtNetTarget)>,
+}
+
+/// `--artnet`'s value: `role=IP[:PORT][/UNIVERSE]`.
+pub(crate) fn parse_artnet_arg(
+    text: &str,
+) -> Result<(String, signal_output::ArtNetTarget), String> {
+    let (role, target) = text
+        .split_once('=')
+        .ok_or_else(|| format!("`{text}` is not ROLE=IP[:PORT][/UNIVERSE] (lights=2.0.0.1)"))?;
+    if !signal_project::device::valid_role(role) {
+        return Err(format!("`{role}` is not a role: [a-z][a-z0-9_]*"));
+    }
+    Ok((role.to_owned(), signal_output::parse_artnet(target)?))
 }
 
 /// One `--route`: a role, the device it plays on (`None`: the output
@@ -296,12 +314,17 @@ struct Control<'a> {
     /// The rate the run plays at (ADR 0036: the device's with CoreAudio).
     rate: u32,
     edits: Edits,
+    /// ADR 0057 §2: the data sinks' frames and their Art-Net sender.
+    artnet: Option<(signal_output::DataFrames, signal_output::ArtNetSender)>,
 }
 
 impl Control<'_> {
     /// Drains the runner's reports, and applies file changes every 100 ms.
     fn step(&mut self) {
         self.controller.poll(&mut Recording(&mut self.live));
+        if let Some((rx, sender)) = self.artnet.as_mut() {
+            sender.drain(rx);
+        }
         let Some((watcher, last)) = self.watch.as_mut() else {
             return;
         };
@@ -618,6 +641,37 @@ pub(crate) fn run(
     .map_err(|e| Failure::Internal(e.to_string()))?;
     // ADR 0038 §5: each side in its role's layout.
     runner.convert(mixes);
+    // ADR 0057 §2: the `dmx` slots, sent as Art-Net to their roles' nodes.
+    let mut data_sides = signal_project::device::data_sides(&project, &plan);
+    data_sides.sort_by(|a, b| a.address.cmp(&b.address));
+    let artnet = if data_sides.is_empty() {
+        None
+    } else {
+        let targets: Vec<_> = data_sides
+            .iter()
+            .map(|side| {
+                let target = args
+                    .artnet
+                    .iter()
+                    .find(|(role, _)| *role == side.role)
+                    .map(|(_, t)| *t);
+                match target {
+                    Some(t) => eprintln!(
+                        "signal: {} ({}): Art-Net to {} universe {}",
+                        side.role, side.address, t.address, t.universe
+                    ),
+                    None => eprintln!(
+                        "signal: {} ({}): not sent (nothing binds it: --artnet {}=IP)",
+                        side.role, side.address, side.role
+                    ),
+                }
+                target
+            })
+            .collect();
+        let sender = signal_output::ArtNetSender::new(targets)
+            .map_err(|e| Failure::Io(format!("Art-Net socket: {e}")))?;
+        Some((runner.send_data(signal_output::data_hop(rate)), sender))
+    };
     if let Some(error) = runner.waiter_error() {
         eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
     }
@@ -647,6 +701,7 @@ pub(crate) fn run(
         current: project,
         rate,
         edits: Edits::default(),
+        artnet,
     };
 
     let stop = Arc::new(AtomicBool::new(false));

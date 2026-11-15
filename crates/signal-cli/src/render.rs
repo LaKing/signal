@@ -11,7 +11,7 @@ use signal_core::Registry;
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance};
 use signal_eval::Metrics;
 use signal_output::inputs::{RecordedInput, RunInput};
-use signal_output::{Render, RenderError, render_fed};
+use signal_output::{Render, RenderError};
 pub(crate) use signal_project::located;
 use signal_project::provenance;
 use signal_project::{LoadError, Project};
@@ -188,8 +188,12 @@ pub(crate) fn render_project(
     let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let sides = (!others.is_empty()).then_some((&main, &others[..]));
-    let (mut rendered, side_renders) = render_fed(&mut engine, frames, sides, inputs)
-        .map_err(|e| render_failure(&project, dir, e))?;
+    // ADR 0057 §2: the data slots' DMX frames, at the rate a run sends them.
+    let data_sides = signal_project::device::data_sides(&project, plan);
+    let hop = (!data_sides.is_empty()).then(|| signal_output::data_hop(sample_rate));
+    let (mut rendered, side_renders, data_tracks) =
+        signal_output::render_fed_data(&mut engine, frames, sides, inputs, hop)
+            .map_err(|e| render_failure(&project, dir, e))?;
     (rendered.compute_devices, rendered.placement) = gpu.record();
     let gpu_warnings = gpu.warnings();
     let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
@@ -231,6 +235,22 @@ pub(crate) fn render_project(
         devices.insert(
             name.to_owned(),
             json!({"file": file, "channels": side.channels, "audio_fnv1a64": format!("{:016x}", side.audio_fnv1a64())}),
+        );
+    }
+
+    for track in &data_tracks {
+        let name = signal_project::device::slot_of_sink(&track.address)
+            .unwrap_or_else(|| track.address.as_str().trim_start_matches('/'));
+        let file = format!("devices/{name}.dmx");
+        let path = args.out.join(&file);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, track.text(hop.unwrap_or(1))));
+        written.map_err(|e| Failure::Io(format!("{}: {e}", path.display())))?;
+        devices.insert(
+            name.to_owned(),
+            json!({"file": file, "channels": track.width, "dmx_frames": track.frames.len()}),
         );
     }
 

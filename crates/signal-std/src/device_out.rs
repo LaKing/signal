@@ -55,7 +55,7 @@ pub(crate) fn sink_taps() -> impl Iterator<Item = (&'static str, &'static str)> 
 }
 
 /// The leaked names `c1 … c64` (inputs) or `c1_out … c64_out` (outputs).
-fn channel_names(out: bool) -> &'static [&'static str] {
+pub(crate) fn channel_names(out: bool) -> &'static [&'static str] {
     static IN: OnceLock<Vec<&'static str>> = OnceLock::new();
     static OUT: OnceLock<Vec<&'static str>> = OnceLock::new();
     let names = if out { &OUT } else { &IN };

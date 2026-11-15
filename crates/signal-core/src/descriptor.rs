@@ -342,6 +342,10 @@ impl Reproducibility {
 pub enum SinkKind {
     /// Writes audio to the driver's output.
     Audio,
+    /// Hands its inputs to an output adapter that is not audio (ADR 0057
+    /// §2): values a driver sends elsewhere. The engine attaches no meaning
+    /// to it.
+    Data,
 }
 
 /// The external origin of a source module's outputs (ADR 0038 §7, the

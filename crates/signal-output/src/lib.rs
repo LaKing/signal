@@ -51,6 +51,7 @@
 
 pub mod adapter;
 mod audio;
+pub mod data;
 mod driver;
 pub mod fade;
 pub mod inputs;
@@ -62,10 +63,14 @@ mod scope;
 mod vectors;
 
 pub use audio::{Conversion, Meter, RenderError, device_sample};
+pub use data::{
+    ArtNetSender, ArtNetTarget, DataFrame, DataFrames, DataSide, DataTrack, art_dmx, data_hop,
+    dmx_byte, parse_artnet,
+};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use render::{
     Render, SideRender, render, render_blocks, render_blocks_tapped, render_blocks_tapped_main,
-    render_fed, render_sides, render_with, set_speaker_mask,
+    render_fed, render_fed_data, render_sides, render_with, set_speaker_mask,
 };
 pub use routing::{
     CaptureSide, Captured, Heard, MAIN, Placement, PlaySide, Prefer, RoleBinding, RoutedCapture,
