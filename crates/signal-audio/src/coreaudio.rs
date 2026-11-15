@@ -186,6 +186,13 @@ pub fn output_rate(selector: &DeviceSelector) -> Result<(String, Option<u32>), A
 /// there is none.
 fn object_of(device: &Device) -> Result<u32, String> {
     let id = id_of(device).ok_or_else(|| "the device has no id".to_owned())?;
+    object_by_id(&id)
+}
+
+/// The CoreAudio object of the device whose cpal id is `id` (as
+/// [`object_of`]).
+fn object_by_id(id: &str) -> Result<u32, String> {
+    let id = id.to_owned();
     let host = cpal::default_host();
     for _ in 0..MATCH_ATTEMPTS {
         let before = rt_thread::device_ids()?;
@@ -678,6 +685,28 @@ struct Secondary {
     opened: u64,
 }
 
+/// ADR 0052 §9: why a device `name` routed on its own also plays through
+/// the clock device, if it does: `clock` and `own` are the two devices'
+/// objects with their active sub-devices (empty: no aggregate). An
+/// aggregate's own drift correction is left alone; the overlap is said.
+fn aggregate_overlap(name: &str, clock: (u32, &[u32]), own: (u32, &[u32])) -> Option<String> {
+    if clock.1.contains(&own.0) {
+        Some(format!(
+            "{name}: it is also inside the clock device, an aggregate; it plays there and here, through two clocks (reported, not refused)"
+        ))
+    } else if own.1.contains(&clock.0) {
+        Some(format!(
+            "{name}: it is an aggregate holding the clock device; the clock device plays there and here (reported, not refused)"
+        ))
+    } else if own.1.iter().any(|d| clock.1.contains(d)) {
+        Some(format!(
+            "{name}: it is an aggregate sharing a device with the clock device's aggregate (reported, not refused)"
+        ))
+    } else {
+        None
+    }
+}
+
 impl Secondary {
     fn new(spec: SecondarySpec) -> Secondary {
         Secondary {
@@ -826,14 +855,29 @@ impl Secondary {
         self.listed = None;
         self.period = period;
         self.opened += 1;
-        Ok((!missing.is_empty()).then(|| {
-            format!(
+        let mut notes: Vec<String> = Vec::new();
+        if !missing.is_empty() {
+            notes.push(format!(
                 "{name}: device channel{} {} do{} not exist (the device has {channels}); not heard there",
                 if missing.len() == 1 { "" } else { "s" },
                 missing.join(", "),
                 if missing.len() == 1 { "es" } else { "" }
-            )
-        }))
+            ));
+        }
+        // ADR 0052 §9: a device inside the aggregate in use (or an
+        // aggregate holding the clock device) is reported, not refused.
+        if let (Some(clock), Ok(own)) = (clock_id, object_of(&device))
+            && let Ok(clock) = object_by_id(clock)
+        {
+            let clock_subs = device_props::active_sub_devices(clock);
+            let own_subs = device_props::active_sub_devices(own);
+            notes.extend(aggregate_overlap(
+                &name,
+                (clock, &clock_subs),
+                (own, &own_subs),
+            ));
+        }
+        Ok((!notes.is_empty()).then(|| notes.join("; ")))
     }
 
     /// How long its stream should play on after the clock stopped: its
@@ -1812,5 +1856,24 @@ impl InputCapture {
 impl Drop for InputCapture {
     fn drop(&mut self) {
         let _ = self.stream.pause();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aggregate_overlap;
+
+    /// ADR 0052 §9: a device inside the aggregate in use, an aggregate
+    /// holding the clock device, or two aggregates sharing a device, are
+    /// said; unrelated devices are not.
+    #[test]
+    fn an_aggregate_overlap_is_reported() {
+        let inside = aggregate_overlap("SSL", (10, &[3, 4]), (3, &[]));
+        assert!(inside.is_some_and(|n| n.contains("inside the clock device")));
+        let holding = aggregate_overlap("Agg", (3, &[]), (10, &[3, 4]));
+        assert!(holding.is_some_and(|n| n.contains("holding the clock device")));
+        let sharing = aggregate_overlap("Agg2", (10, &[3, 4]), (11, &[4, 5]));
+        assert!(sharing.is_some_and(|n| n.contains("sharing a device")));
+        assert_eq!(aggregate_overlap("Speakers", (3, &[]), (5, &[])), None);
     }
 }

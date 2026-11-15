@@ -9,12 +9,15 @@
 //! reads on the device (`kAudioStreamPropertyPhysicalFormat`, for the
 //! measurements of ADR 0036) and its output latency and safety offset
 //! (`kAudioDevicePropertyLatency`, `kAudioDevicePropertySafetyOffset`, in
-//! the output scope: a secondary device's reported latency, ADR 0052 §3). It never sets a property: what Signal changes
+//! the output scope: a secondary device's reported latency, ADR 0052 §3)
+//! and an aggregate device's active sub-devices
+//! (`kAudioAggregateDevicePropertyActiveSubDeviceList`, ADR 0052 §9). It never sets a property: what Signal changes
 //! on a device, cpal changes while it builds a stream, and
 //! [`plan_join`](crate::join::plan_join) decides whether that may happen.
 //!
 //! Its calls, the only ones it makes outside safe Rust:
-//! `AudioObjectGetPropertyData` (`objc2-core-audio`) on a device object
+//! `AudioObjectGetPropertyData` and, for the sub-device list,
+//! `AudioObjectGetPropertyDataSize` (`objc2-core-audio`) on a device object
 //! found by [`device_ids`](crate::rt_thread::device_ids).
 //!
 //! The audit:
@@ -24,6 +27,10 @@
 //!   no qualifier (null, size 0), in the global scope or, for the
 //!   latencies, the output scope. The value is used only on status 0, and
 //!   only when CoreAudio says it wrote all of it.
+//! - **The sub-device list** is an array of `AudioObjectID`s: its size is
+//!   asked first, a `Vec` of that many ids is passed with exactly its size
+//!   in bytes, and it is cut to the ids CoreAudio says it wrote. A device
+//!   that is no aggregate answers with an error status: an empty list.
 //! - **The device object** may be gone by the time it is read (unplugged):
 //!   CoreAudio then answers with an error status (`kAudioHardwareBadObjectError`),
 //!   never undefined behaviour, and the read reports `None`.
@@ -36,7 +43,8 @@ use std::mem::size_of;
 use std::ptr::{NonNull, null};
 
 use objc2_core_audio::{
-    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress, kAudioAggregateDevicePropertyActiveSubDeviceList,
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceIsRunning,
     kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioDevicePropertyLatency,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
@@ -158,6 +166,50 @@ pub fn output_latency(object: AudioObjectID) -> Option<u32> {
     latency.checked_add(offset)
 }
 
+/// The devices an aggregate device `object` uses now (ADR 0052 §9); empty
+/// for a device that is no aggregate, or gone.
+pub fn active_sub_devices(object: AudioObjectID) -> Vec<AudioObjectID> {
+    let address = address(
+        kAudioAggregateDevicePropertyActiveSubDeviceList,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut size = 0u32;
+    // SAFETY: `address` and `size` are live locals for the call; no
+    // qualifier (null, size 0).
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            object,
+            NonNull::from(&address),
+            0,
+            null(),
+            NonNull::from(&mut size),
+        )
+    };
+    if status != 0 || size == 0 {
+        return Vec::new();
+    }
+    let mut ids: Vec<AudioObjectID> = vec![0; size as usize / size_of::<AudioObjectID>()];
+    let mut size = u32::try_from(ids.len() * size_of::<AudioObjectID>()).unwrap_or(0);
+    // SAFETY: `ids` holds exactly `size` bytes of `AudioObjectID`s, the type
+    // this property writes; CoreAudio writes at most `size` bytes and says
+    // how many in `size`; no qualifier.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&address),
+            0,
+            null(),
+            NonNull::from(&mut size),
+            NonNull::from(ids.as_mut_slice()).cast(),
+        )
+    };
+    if status != 0 {
+        return Vec::new();
+    }
+    ids.truncate(size as usize / size_of::<AudioObjectID>());
+    ids
+}
+
 /// `object`'s state as [`plan_join`](crate::join::plan_join) reads it.
 pub fn state(object: AudioObjectID) -> DeviceState {
     DeviceState {
@@ -165,5 +217,21 @@ pub fn state(object: AudioObjectID) -> DeviceState {
         running_here: running_here(object),
         buffer: buffer_frames(object),
         rate: nominal_rate(object),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// On the machine (`--ignored`): every listed device answers the
+    /// sub-device read, an aggregate with its members, any other with none.
+    #[test]
+    #[ignore = "reads the machine's CoreAudio devices"]
+    fn every_device_answers_the_sub_device_read() {
+        let ids = crate::rt_thread::device_ids().unwrap();
+        for id in ids {
+            let subs = super::active_sub_devices(id);
+            assert!(!subs.contains(&id), "{id} lists itself");
+            println!("device {id}: sub-devices {subs:?}");
+        }
     }
 }
