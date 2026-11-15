@@ -1156,13 +1156,15 @@ impl CoreAudioDriver {
         let mut records = Vec::new();
         let mut add =
             |capture: &mut Capture, side: &CaptureSideSpec, source: Box<dyn InputSource>| {
-                let (input, record) = RunInput::new(
+                let (mut input, record) = RunInput::new(
                     side.address.clone(),
                     side.width,
                     source,
                     clock.max_frames,
                     self.record_frames,
                 );
+                // A device may go and come back (ADR 0038 §10): its gaps fade.
+                input.fade_gaps();
                 capture.counts.push(input.counts());
                 inputs.push(input);
                 records.extend(record);

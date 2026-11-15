@@ -69,6 +69,11 @@ fn node_test_passes() {
         // TAP explicitly: newer Node versions default to the `spec` reporter,
         // which prints `ℹ fail 0` instead of `# fail 0`.
         .arg("--test-reporter=tap")
+        // A test whose promise never settles fails after a minute instead of
+        // holding the run for hours (2026-11-15: one did, unnoticed).
+        .arg("--test-timeout=60000")
+        // And a timer or a request left behind ends with the run.
+        .arg("--test-force-exit")
         .arg("ui/")
         .current_dir(root())
         .output()

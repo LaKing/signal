@@ -478,7 +478,12 @@ pub fn import_stack(dir: &Path, source: &Path) -> Result<Imported, String> {
                 let Some(e) = e.as_table_like_mut() else {
                     continue;
                 };
-                for (key, names) in [("module", &modules), ("pattern", &pattern_names)] {
+                // A nested slot's `load` names a composite as `module` does (the audit of 2026-11-15).
+                for (key, names) in [
+                    ("module", &modules),
+                    ("load", &modules),
+                    ("pattern", &pattern_names),
+                ] {
                     if let Some(item) = e.get_mut(key)
                         && let Some(new) = item.as_str().and_then(|v| names.get(v)).cloned()
                         && let Some(value) = item.as_value_mut()

@@ -478,13 +478,16 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
         }
     }
 
-    // The inside: the linked project's text as a composite.
+    // The inside: the linked project's text as a composite, its sinks as
+    // the taps they planned as while it was linked (the audit of
+    // 2026-11-15: left sinks, the host would have two main outputs).
     let mut document = source_project.clone();
     document.remove("schema_version");
     document.remove("project");
     retarget(&mut document);
+    let exports = tap_root(&mut document, &format!("`{slot}`'s project"))?;
     let inside_text = format!(
-        "schema_version = 1\n\n[composite]\nname = {}\ninside_of = {}\n\n{}",
+        "schema_version = 1\n\n[composite]\nname = {}\ninside_of = {}\n\n{}{exports}",
         Value::from(inside.as_str()),
         Value::from(slot),
         document.to_string().trim_start()
@@ -764,20 +767,6 @@ pub fn prepare_include(
     document.remove("schema_version");
     document.remove("project");
     retarget(&mut document);
-    let mut sinks: Vec<String> = Vec::new();
-    if let Some(instances) = document
-        .get_mut("instances")
-        .and_then(Item::as_table_like_mut)
-    {
-        for (instance, item) in instances.iter_mut() {
-            if let Some(module) = item.as_table_like_mut().and_then(|e| e.get_mut("module"))
-                && module.as_str() == Some("std.audio_out")
-            {
-                replace(module, "std.audio_tap");
-                sinks.push(instance.get().to_owned());
-            }
-        }
-    }
     if let Some(set) = entry.get("set").and_then(Value::as_inline_table) {
         for (target, value) in set.iter() {
             let Some((instance, parameter)) = target.split_once('.') else {
@@ -803,34 +792,7 @@ pub fn prepare_include(
             }
         }
     }
-    // A root without `[exports] outputs` exports its sink's channels (ADR
-    // 0035 §3): written out, from the tap.
-    let has_outputs = document
-        .get("exports")
-        .and_then(|e| e.get("outputs"))
-        .is_some();
-    let exports = if has_outputs || sinks.is_empty() {
-        String::new()
-    } else if let [sink] = sinks.as_slice() {
-        if document.get("exports").is_some() {
-            if let Some(table) = document
-                .get_mut("exports")
-                .and_then(Item::as_table_like_mut)
-            {
-                let mut outputs = toml_edit::InlineTable::new();
-                outputs.insert("l", Value::from(format!("{sink}.l_out")));
-                outputs.insert("r", Value::from(format!("{sink}.r_out")));
-                table.insert("outputs", Item::Value(Value::InlineTable(outputs)));
-            }
-            String::new()
-        } else {
-            format!("\n[exports]\noutputs = {{ l = \"{sink}.l_out\", r = \"{sink}.r_out\" }}\n")
-        }
-    } else {
-        return Err(invalid(format!(
-            "`{key}`'s project has several sinks: name its outputs in its [exports] first"
-        )));
-    };
+    let exports = tap_root(&mut document, &format!("`{key}`'s project"))?;
     let composite_text = format!(
         "schema_version = 1\n\n# Copied from the include `{key}` (`{path}`) by `signal vendor --include` (ADR 0035 §11).\n[composite]\nname = {}\nseed = {seed}\n\n{}{exports}",
         Value::from(top.as_str()),
@@ -1137,6 +1099,92 @@ impl<'d> Written<'d> {
     }
 }
 
+/// A project's root made a composite's text as the project planned inside
+/// another (ADR 0035 §3, ADR 0038 §7): every play side's sink (`module`,
+/// or a device slot's `play`) its tap, and without `[exports] outputs` the
+/// one sink's channels exported from the tap; what to append to the text
+/// for those exports (empty when they went into an `[exports]` table). A
+/// capture side is refused, as it is inside another project; so are
+/// several sinks and no outputs named. `what` names the project.
+fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorError> {
+    let invalid = |m: String| VendorError::InvalidName(m);
+    let mut sinks: Vec<(String, &'static [&'static str])> = Vec::new();
+    if let Some(instances) = document
+        .get_mut("instances")
+        .and_then(Item::as_table_like_mut)
+    {
+        for (instance, item) in instances.iter_mut() {
+            let name = instance.get().to_owned();
+            let Some(entry) = item.as_table_like_mut() else {
+                continue;
+            };
+            if let Some(module) = entry.get_mut("module") {
+                let Some(sink) = module.as_str().map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(tap) = crate::device::tap_of_sink(&sink) {
+                    replace(module, tap);
+                    let layout = crate::device::layout_of_sink(&sink).unwrap_or("stereo");
+                    sinks.push((name, crate::device::layout_channels(layout).unwrap_or(&[])));
+                }
+                continue;
+            }
+            let Some(device) = entry.get("device") else {
+                continue;
+            };
+            if device.get("capture").is_some() {
+                return Err(invalid(format!(
+                    "{what}: `{name}` captures from the machine, which a project inside another cannot yet (ADR 0038 §7)"
+                )));
+            }
+            let Some(play) = device.get("play").and_then(Item::as_str) else {
+                continue;
+            };
+            let sink = crate::device::planned_module(play)
+                .map_err(|e| invalid(format!("{what}: `{name}`: {e}")))?;
+            let tap = crate::device::tap_of_sink(sink).unwrap_or("std.audio_tap");
+            sinks.push((name, crate::device::layout_channels(play).unwrap_or(&[])));
+            entry.remove("device");
+            if let Some(table) = item.as_inline_table_mut() {
+                let mut rebuilt = toml_edit::InlineTable::new();
+                rebuilt.insert("module", Value::from(tap));
+                for (k, v) in table.iter() {
+                    rebuilt.insert(k, v.clone());
+                }
+                rebuilt.fmt();
+                *table = rebuilt;
+            } else if let Some(entry) = item.as_table_like_mut() {
+                entry.insert("module", toml_edit::value(tap));
+            }
+        }
+    }
+    let has_outputs = document
+        .get("exports")
+        .and_then(|e| e.get("outputs"))
+        .is_some();
+    if has_outputs || sinks.is_empty() {
+        return Ok(String::new());
+    }
+    let [(sink, channels)] = sinks.as_slice() else {
+        return Err(invalid(format!(
+            "{what} has several sinks: name its outputs in its [exports] first"
+        )));
+    };
+    let mut outputs = toml_edit::InlineTable::new();
+    for channel in *channels {
+        outputs.insert(*channel, Value::from(format!("{sink}.{channel}_out")));
+    }
+    if let Some(table) = document
+        .get_mut("exports")
+        .and_then(Item::as_table_like_mut)
+    {
+        table.insert("outputs", Item::Value(Value::InlineTable(outputs)));
+        return Ok(String::new());
+    }
+    outputs.fmt();
+    Ok(format!("\n[exports]\noutputs = {outputs}\n"))
+}
+
 fn parse(path: &str, text: &str) -> Result<DocumentMut, VendorError> {
     text.parse()
         .map_err(|e: toml_edit::TomlError| VendorError::Syntax {
@@ -1145,7 +1193,10 @@ fn parse(path: &str, text: &str) -> Result<DocumentMut, VendorError> {
         })
 }
 
-/// Rewrites every instance's `module` that `renamed` maps; whether any was.
+/// Rewrites every instance's `module`, and a slot's local `load`, that
+/// `renamed` maps; whether any was. A nested slot's `load` names a
+/// composite as `module` does: left alone, it would resolve the host's file
+/// of that name (the audit of 2026-11-15).
 fn rewrite(document: &mut DocumentMut, renamed: &BTreeMap<String, String>) -> bool {
     let Some(instances) = document
         .get_mut("instances")
@@ -1158,13 +1209,15 @@ fn rewrite(document: &mut DocumentMut, renamed: &BTreeMap<String, String>) -> bo
         let Some(entry) = entry.as_table_like_mut() else {
             continue;
         };
-        let Some(module) = entry.get_mut("module") else {
-            continue;
-        };
-        if let Some(new) = module.as_str().and_then(|m| renamed.get(m)) {
-            let new = new.clone();
-            replace(module, &new);
-            changed = true;
+        for key in ["module", "load"] {
+            let Some(item) = entry.get_mut(key) else {
+                continue;
+            };
+            if let Some(new) = item.as_str().and_then(|m| renamed.get(m)) {
+                let new = new.clone();
+                replace(item, &new);
+                changed = true;
+            }
         }
     }
     changed

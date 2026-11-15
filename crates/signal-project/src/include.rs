@@ -893,12 +893,8 @@ impl Project {
                     continue;
                 };
                 let descriptor = module_type.descriptor;
-                if descriptor.sink.is_none() {
-                    continue;
-                }
-                let Some(tap) = registry.sink_tap(descriptor.type_name) else {
-                    let location = self
-                        .spans
+                let location = || {
+                    self.spans
                         .composites
                         .get(&def.name)
                         .and_then(|spans| {
@@ -908,7 +904,28 @@ impl Project {
                                 offset: at,
                             })
                         })
-                        .unwrap_or(crate::locate::Location { file: 0, offset: 0 });
+                        .unwrap_or(crate::locate::Location { file: 0, offset: 0 })
+                };
+                // ADR 0038 §7: only the host's roles reach the machine. An
+                // included capture side is to become a pass-through the host
+                // wires; until that is built, it is refused rather than
+                // opening the machine's input (the audit of 2026-11-15).
+                if descriptor.source.is_some() {
+                    let message = format!(
+                        "{}: `{}` captures from the machine, so this project cannot play inside another yet; only the host captures (ADR 0038 §7)",
+                        instance.name, descriptor.type_name
+                    );
+                    let diagnostic = self.diagnostic(Severity::Error, location(), message);
+                    if !errors.contains(&diagnostic) {
+                        errors.push(diagnostic);
+                    }
+                    continue;
+                }
+                if descriptor.sink.is_none() {
+                    continue;
+                }
+                let Some(tap) = registry.sink_tap(descriptor.type_name) else {
+                    let location = location();
                     let message = format!(
                         "{}: `{}` is a sink with no tap, so this project cannot play inside another (ADR 0035 §3)",
                         instance.name, descriptor.type_name

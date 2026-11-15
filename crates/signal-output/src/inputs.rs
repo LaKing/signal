@@ -13,7 +13,12 @@
 //!   underrun zeros included (ADR 0038 §9). A full record ring is counted,
 //!   never waited for; the record then says it is incomplete.
 //! - Frames the source does not deliver read 0 and are counted
-//!   (`missing`).
+//!   (`missing`). A live device's input ([`RunInput::fade_gaps`], ADR 0038
+//!   §10's hot-plug) fades instead: its last frame to 0 over
+//!   [`GAP_FADE`] frames when the device stops delivering (unplugged, an
+//!   underrun), and back in over as many when it delivers again, so a
+//!   departing or returning input never clicks. The record holds the faded
+//!   words, as the engine read them.
 //!
 //! Every buffer is made on the control thread when the run is built;
 //! [`RunInput::fill`] allocates, frees, locks and blocks nowhere.
@@ -24,6 +29,54 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use rtrb::{Consumer, Producer, RingBuffer};
 use signal_core::InstanceAddress;
 use signal_engine::{Engine, InstanceId};
+
+/// The frames a live input fades over when it stops or starts delivering
+/// (ADR 0038 §10: "a departing input reads 0 from the next block with a
+/// 64-frame fade").
+pub const GAP_FADE: usize = 64;
+
+/// The raised-cosine gain at `step` of [`GAP_FADE`] (0 → 0, `GAP_FADE` → 1),
+/// as ADR 0036 §4's fades.
+fn fade_gain(step: usize) -> f32 {
+    let x = step.min(GAP_FADE) as f32 / GAP_FADE as f32;
+    0.5 - 0.5 * (std::f32::consts::PI * x).cos()
+}
+
+/// The gap fades over one piece of `got` delivered frames then the missing
+/// rest (interleaved, `width` channels): `held` the last frame read, `gap`
+/// the frames into the current gap, `rise` into the fade-in after one.
+/// Real-time safe.
+fn shape(
+    buffer: &mut [f32],
+    got: usize,
+    width: usize,
+    held: &mut [f32],
+    gap: &mut usize,
+    rise: &mut usize,
+) {
+    for (f, frame) in buffer.chunks_exact_mut(width).enumerate() {
+        if f < got {
+            // Back from a gap: rise from the gain the gap fell to (1 − g(t)
+            // is g(1 − t)), so a short gap is a short dip.
+            if *gap > 0 {
+                *rise = GAP_FADE - *gap;
+                *gap = 0;
+            }
+            if *rise < GAP_FADE {
+                let g = fade_gain(*rise);
+                frame.iter_mut().for_each(|x| *x *= g);
+                *rise += 1;
+            }
+            held.copy_from_slice(frame);
+        } else {
+            let g = 1.0 - fade_gain(*gap + 1);
+            for (x, h) in frame.iter_mut().zip(held.iter()) {
+                *x = h * g;
+            }
+            *gap = (*gap + 1).min(GAP_FADE);
+        }
+    }
+}
 
 /// Where a capture side's frames come from. Real time: [`read`](Self::read)
 /// runs on the audio thread and must allocate, lock and block nowhere.
@@ -78,6 +131,14 @@ pub struct RunInput {
     /// earlier in a replay).
     record_stopped: bool,
     counts: Arc<InputCounts>,
+    /// Gaps fade ([`fade_gaps`](RunInput::fade_gaps)).
+    fade: bool,
+    /// The last frame read (faded), per channel: what a gap fades from.
+    held: Vec<f32>,
+    /// Frames into the current gap (up to [`GAP_FADE`]; 0: delivering).
+    gap: usize,
+    /// Frames into the fade-in after a gap ([`GAP_FADE`]: none running).
+    rise: usize,
 }
 
 /// The control thread's side of a recorded [`RunInput`]: the words the
@@ -125,8 +186,20 @@ impl RunInput {
             record,
             record_stopped: false,
             counts,
+            fade: false,
+            held: vec![0.0; width],
+            gap: 0,
+            rise: GAP_FADE,
         };
         (input, reader)
+    }
+
+    /// Fades its gaps (ADR 0038 §10): a live device's input, which may go
+    /// away and come back. Its frames until the source fails to deliver are
+    /// as they came; a render's or a replay's input reads exact zeros past
+    /// its end instead. Control thread.
+    pub fn fade_gaps(&mut self) {
+        self.fade = true;
     }
 
     /// Its counters.
@@ -162,6 +235,16 @@ impl RunInput {
             let got = self.source.read(buffer, offset + at).min(n);
             if let Some(rest) = buffer.get_mut(got * width..) {
                 rest.fill(0.0);
+            }
+            if self.fade {
+                shape(
+                    buffer,
+                    got,
+                    width,
+                    &mut self.held,
+                    &mut self.gap,
+                    &mut self.rise,
+                );
             }
             self.counts
                 .missing

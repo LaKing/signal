@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, labels, resolve};
 use signal_engine::RtPolicy;
+use signal_output::Heard;
 
 use crate::app;
 use crate::keys::{self, Keys};
@@ -248,7 +249,53 @@ impl Host {
             "playing": self.run.is_some(),
             "run": self.run_json(),
             "rtPolicies": RtPolicy::ALL.iter().map(|p| p.name()).collect::<Vec<_>>(),
+            // ADR 0038 §5.8 (additive): how the open project plays here.
+            "routing": self.routing_json(),
         })
+    }
+
+    /// `setup.get`'s `routing` (ADR 0038 §5.8): how the open project's play
+    /// sides play on this machine's Setup (devices.local.toml over it) and
+    /// device list, as a run would route them: per side `{address, role,
+    /// playedAs, layout, heard, device, version, channels, conversion}`,
+    /// and the notices. Null when the project does not plan.
+    fn routing_json(&self) -> Value {
+        let dir = &self.opening.dir;
+        let Ok(project) = signal_project::Project::load(dir) else {
+            return Value::Null;
+        };
+        let Ok(planned) = project.plan(&self.registry) else {
+            return Value::Null;
+        };
+        let sides = signal_project::device::play_sides(&project, &planned.plan);
+        let (setup, mut notices) = crate::devices::effective_setup(&self.setup, &self.local_dir());
+        let routing = crate::player::plan_routing(&self.devices, &setup, &sides, &mut notices);
+        notices.extend(routing.notices.iter().cloned());
+        let sides: Vec<Value> = routing
+            .sides
+            .iter()
+            .map(|side| {
+                let (heard, device, version) = match &side.heard {
+                    Heard::Clock => ("clock", None, None),
+                    Heard::Unrouted => ("unrouted", None, None),
+                    Heard::Adapted(device) => ("adapted", Some(device.clone()), None),
+                    Heard::Missing(device) => ("missing", Some(device.clone()), None),
+                    Heard::Version(address) => ("version", None, Some(address.to_string())),
+                };
+                json!({
+                    "address": side.address.to_string(),
+                    "role": side.role,
+                    "playedAs": side.played_as,
+                    "layout": signal_project::device::layout_of_width(side.width),
+                    "heard": heard,
+                    "device": device,
+                    "version": version,
+                    "channels": side.channels,
+                    "conversion": side.conversion(),
+                })
+            })
+            .collect();
+        json!({"sides": sides, "notices": notices})
     }
 
     /// The pushed `setup` (`ui-protocol.md` "Setup"), to every client after

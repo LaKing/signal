@@ -125,3 +125,102 @@ fn an_unbound_input_records_zeros() {
     assert_eq!(recorded.len(), 256);
     assert!(recorded.iter().all(|&x| x == 0.0));
 }
+
+/// A live device's input that delivers `on` frames of 0.5, then nothing for
+/// `off` frames, then 0.5 again, over and over (an unplug and a replug).
+struct Flaky {
+    on: usize,
+    off: usize,
+    at: usize,
+}
+
+impl signal_output::inputs::InputSource for Flaky {
+    fn read(&mut self, out: &mut [f32], _offset: usize) -> usize {
+        let frames = out.len() / 2;
+        let mut got = 0;
+        // Delivers up to its gap; a read can only miss its last frames, and
+        // the time they stand for passes as well.
+        while got < frames && self.at % (self.on + self.off) < self.on {
+            if let Some(frame) = out.get_mut(got * 2..got * 2 + 2) {
+                frame.fill(0.5);
+            }
+            got += 1;
+            self.at += 1;
+        }
+        self.at += frames - got;
+        got
+    }
+}
+
+/// Plays `input` for `frames` frames in blocks of 64; the left channel.
+fn played(input: RunInput, frames: usize) -> Vec<f32> {
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let plan = plan(&registry);
+    let (mut runner, _controller) =
+        realtime(&plan, &registry, RealtimeConfig::new(48_000, 1)).unwrap();
+    runner.set_inputs(vec![input]);
+    let mut out = vec![0.0f32; 64 * 2];
+    let mut left = Vec::new();
+    while left.len() < frames {
+        let guard = Guard::start();
+        runner.process(&mut out, 2);
+        assert!(guard.counts().is_zero());
+        left.extend(out.as_chunks::<2>().0.iter().map(|f| f[0]));
+    }
+    left
+}
+
+/// ADR 0038 §10: a live input that stops delivering fades its last frame
+/// to 0 over 64 frames and fades back in over 64 when it delivers again;
+/// a short gap is a short dip; a render's input reads 0 at once.
+#[test]
+fn a_live_input_s_gaps_fade_out_and_back_in() {
+    use signal_output::inputs::GAP_FADE;
+    let flaky = |on, off| {
+        let (mut input, _) = RunInput::new(
+            "/mic".parse().unwrap(),
+            2,
+            Box::new(Flaky { on, off, at: 0 }),
+            64,
+            None,
+        );
+        input.fade_gaps();
+        input
+    };
+    let left = played(flaky(512, 512), 2_048);
+    assert!(left[..512].iter().all(|&x| x == 0.5));
+    let gap = &left[512..512 + GAP_FADE];
+    assert!(gap.windows(2).all(|w| w[1] <= w[0]), "{gap:?}");
+    assert!(gap[0] > 0.49 && gap[GAP_FADE - 1] == 0.0, "{gap:?}");
+    assert!(left[512 + GAP_FADE..1_024].iter().all(|&x| x == 0.0));
+    let rise = &left[1_024..1_024 + GAP_FADE];
+    assert!(rise.windows(2).all(|w| w[1] >= w[0]), "{rise:?}");
+    assert_eq!(rise[0], 0.0);
+    assert!(left[1_024 + GAP_FADE..1_536].iter().all(|&x| x == 0.5));
+    // No step larger than the raised cosine's steepest (π/2 · 0.5 / 64).
+    let steepest = std::f32::consts::FRAC_PI_2 * 0.5 / GAP_FADE as f32 + 1e-6;
+    assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() <= steepest));
+
+    // A gap of 4 frames (a read 4 short) dips by little and comes back as
+    // smoothly.
+    let left = played(flaky(508, 4), 1_024);
+    let low = left.iter().copied().fold(1.0f32, f32::min);
+    assert!(low > 0.49, "{low}");
+    assert!(left.windows(2).all(|w| (w[1] - w[0]).abs() <= steepest));
+
+    // Without `fade_gaps` (a render's fixture, a replay): 0 at once.
+    let (input, _) = RunInput::new(
+        "/mic".parse().unwrap(),
+        2,
+        Box::new(Flaky {
+            on: 512,
+            off: 512,
+            at: 0,
+        }),
+        64,
+        None,
+    );
+    let left = played(input, 1_024);
+    assert!(left[512..].iter().all(|&x| x == 0.0));
+}

@@ -125,6 +125,12 @@ export function mainBinding(setup, devices) {
  * (null when not heard on this machine), `channels` the device channel of
  * each endpoint port. A device the Setup binds but the inventory lacks is
  * a box of its own, `present: false`, "not present".
+ *
+ * `setup.routing` (the host's routing of the open project, ADR 0038 §5.8)
+ * says what the drawing cannot know alone: a role's version heard nowhere
+ * (another version plays; `note` says which) and a converted side
+ * (`conversion`, "5.1 → stereo (ITU, LFE off)", its `channels` the
+ * machine's, one per channel of the role's layout).
  */
 export function peripherals({ setup = null, devices = null, endpoints = [] } = {}) {
   const boxes = deviceBoxes(devices?.devices ?? []);
@@ -147,8 +153,12 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
   const used = new Map();
   const seen = new Set();
   const bound = new Map();
+  const routed = new Map((setup?.routing?.sides ?? []).map((r) => [r.address, r]));
   ordered.forEach((e, k) => {
     const unheard = (note) => bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: null, channels: [], heard: false, note });
+    const r = routed.get(`/${e.name}`);
+    // ADR 0038 §5.4: another version of its role plays.
+    if (r?.heard === 'version') return unheard(`not heard: ${r.version} (${routed.get(r.version)?.layout ?? '?'}) plays ${e.role} here`);
     if (seen.has(e.role) || !main) return unheard('not heard on this machine');
     seen.add(e.role);
     // A project without `main` plays its first role as main (unless that role is bound itself).
@@ -173,14 +183,20 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
     const limit = box?.present ? channelsOfBox(box) : Infinity;
     const wanted = as === 'main' ? boundChannels(entry?.channels ?? null, width, limit) : (entry?.channels ?? []).slice(0, width);
     const channels = [];
-    for (let i = 0; i < width; i++) {
+    const conversion = r?.conversion ?? null;
+    for (let i = 0; i < width && !conversion; i++) {
       const c = wanted[i];
       // Channels are taken per device (ADR 0052): channel 1 of two devices is two channels.
       const refused = !Number.isInteger(c) || c < 1 || c > limit || channels.includes(c) || (heard && used.has(`${key}\u0000${c}`));
       channels.push(refused ? null : c);
       if (!refused && heard) used.set(`${key}\u0000${c}`, e.role);
     }
-    bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: key, channels, heard, note });
+    if (conversion) {
+      // Converted (ADR 0038 §5): the machine's channels as the host routed them, not the side's; the side's ports beyond them carry no cable.
+      for (let i = 0; i < width; i++) channels.push(Number.isInteger(r.channels?.[i]) ? r.channels[i] : null);
+      for (const c of channels) if (Number.isInteger(c) && heard) used.set(`${key}\u0000${c}`, e.role);
+    }
+    bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: key, channels, heard, note, ...(conversion ? { conversion } : {}) });
   });
   const bindings = endpoints.map((e) => bound.get(e));
   return { boxes, bindings, main };
@@ -398,9 +414,9 @@ export function channelSummary(box) {
   return [out ? `${out} out` : null, into ? `${into} in` : null].filter(Boolean).join(' · ') || 'no channels';
 }
 
-/** The label of a role endpoint as drawn on its device's port ("main · stereo"). */
+/** The label of a role endpoint as drawn on its device's port ("main · stereo"; converted, "main · 5.1 → stereo (ITU, LFE off)", ADR 0038 §5.8). */
 export function endpointLabel(binding) {
-  return `${binding.role} · ${binding.layout}`;
+  return `${binding.role} · ${binding.conversion ?? binding.layout}`;
 }
 
 /** The port of `box` that carries device channel `channel` on its playback side, or null. */

@@ -179,6 +179,21 @@ pub struct RoutedSide {
     pub heard: Heard,
     /// Its conversion to the role's layout (ADR 0038 §5), if they differ.
     pub mix: Option<Mix>,
+    /// §5.8's line when it is the author's version of its role playing in
+    /// place of the largest ("5.1 → stereo (author's stereo version)").
+    pub author: Option<String>,
+}
+
+impl RoutedSide {
+    /// What the person is told about its conversion (ADR 0038 §5.8): its
+    /// mix's label, or the author's version's line; none when it plays as
+    /// it is.
+    pub fn conversion(&self) -> Option<&str> {
+        self.mix
+            .as_ref()
+            .map(|m| m.label.as_str())
+            .or(self.author.as_deref())
+    }
 }
 
 impl RoutedSide {
@@ -467,6 +482,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
             channels,
             heard,
             mix: converted,
+            author: version.and_then(|v| v.author.clone()),
         });
     }
     Routing {
@@ -677,6 +693,7 @@ fn unheard(side: &PlaySide, heard: Heard) -> RoutedSide {
         channels: vec![None; side.width],
         heard,
         mix: None,
+        author: None,
     }
 }
 

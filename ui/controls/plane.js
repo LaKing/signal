@@ -883,6 +883,12 @@ export class SignalPlane extends HTMLElement {
     const { stackOf, unstacked } = stackMembers(shown.plane, owner, instances);
     const pins = new Map(shown.plane.stacks.map((s) => [s.name, edgePins(s, owner, stackOf, connections)]));
     const endpoints = roleEndpoints(instances);
+    // The host's routing (ADR 0038 §5.8) is of the project as it was read: an edit of the outputs (a version, a layout) reads it again, once per change.
+    const outputs = endpoints.map((e) => `${e.name} ${e.role} ${e.layout}`).join('\n');
+    // Before both the Setup and the graph are in, there is nothing to compare: the first graph is not an edit.
+    const known = Boolean(this.setup && this.graph);
+    if (known && this.routedOutputs !== undefined && outputs !== this.routedOutputs) this.readSetup();
+    this.routedOutputs = known ? outputs : undefined;
     const { boxes: listed, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
     const cables = setupCables(pins, bindings);
     // A device's input wired straight to a device's output (ADR 0038 §7): no Stack pin between them.
@@ -1160,7 +1166,13 @@ export class SignalPlane extends HTMLElement {
         g.append(rect);
         if (b.present) this.hits.ports.push({ box: b.key, port: p, rect, x: r.x - 24, y: r.y + p.y, w: half + 30, h: p.h, jacks: p.pins.map((pin) => ({ channel: pin.channel, y: r.y + pin.y })) });
         g.append(svg('text', { class: 'port-name', x: r.x + 24, y: r.y + p.y + 44 }, p.name));
-        if (roles.length) g.append(svg('text', { class: 'port-role', x: r.x + 24, y: r.y + p.y + 84 }, fitText(roles.map(endpointLabel).join(', '), capChars(TEXT.role, half - 24))));
+        if (roles.length) {
+          const said = roles.map(endpointLabel).join(', ');
+          const text = svg('text', { class: 'port-role', x: r.x + 24, y: r.y + p.y + 84 }, fitText(said, capChars(TEXT.role, half - 24)));
+          // A conversion's whole line (ADR 0038 §5.8), however narrow the port.
+          text.append(svg('title', {}, said));
+          g.append(text);
+        }
         for (const pin of p.pins) {
           portAt.set(`${b.key} ${pin.channel}`, { x: r.x, y: r.y + pin.y });
           const on = roles.some((x) => x.channels.includes(pin.channel));

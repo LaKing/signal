@@ -466,3 +466,39 @@ test('clock badges: the clock device, an adapted output by its state, an adapted
   // The same name's output box does not take the input's state.
   assert.equal(clockBadge(micOut, { main, devices }), null);
 });
+
+test('ADR 0038 §5.4, §5.8: the host’s routing shows the conversion on the port and a role’s other version hollow', () => {
+  const ports = (name, names) => names.map((c) => `/${name}.${c}`);
+  const endpoints = [
+    { name: 'surround', role: 'main', layout: '5.1', ports: ports('surround', ['l', 'r', 'c', 'lfe', 'ls', 'rs']) },
+    { name: 'cue', role: 'cue', layout: 'stereo', ports: ports('cue', ['l', 'r']) },
+  ];
+  const devices = { devices: [ssl(0, 'output')], output: { found: 0 } };
+  const routing = {
+    sides: [
+      { address: '/cue', role: 'cue', layout: 'stereo', heard: 'clock', channels: [3, 4], conversion: null },
+      { address: '/surround', role: 'main', layout: '5.1', heard: 'clock', channels: [1, 2], conversion: '5.1 → stereo (ITU, LFE off)' },
+    ],
+    notices: [],
+  };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, play: { cue: { channels: [3, 4] } } }, routing };
+  const { bindings } = peripherals({ setup, devices, endpoints });
+  assert.deepEqual(bindings[0].channels, [1, 2, null, null, null, null]);
+  assert.equal(endpointLabel(bindings[0]), 'main · 5.1 → stereo (ITU, LFE off)');
+  assert.deepEqual(bindings[1].channels, [3, 4], 'the fold takes channels 1–2 only: cue keeps 3–4');
+
+  const versions = [
+    { name: 'fold', role: 'main', layout: 'stereo', ports: ports('fold', ['l', 'r']) },
+    { name: 'surround', role: 'main', layout: '5.1', ports: ports('surround', ['l', 'r', 'c', 'lfe', 'ls', 'rs']) },
+  ];
+  const chosen = {
+    sides: [
+      { address: '/fold', role: 'main', layout: 'stereo', heard: 'clock', channels: [1, 2], conversion: '5.1 → stereo (author’s stereo version)' },
+      { address: '/surround', role: 'main', layout: '5.1', heard: 'version', version: '/fold', channels: [null, null, null, null, null, null], conversion: null },
+    ],
+  };
+  const both = peripherals({ setup: { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } }, routing: chosen }, devices, endpoints: versions }).bindings;
+  assert.deepEqual(both[0].channels, [1, 2]);
+  assert.equal(both[1].heard, false);
+  assert.equal(both[1].note, 'not heard: /fold (stereo) plays main here');
+});

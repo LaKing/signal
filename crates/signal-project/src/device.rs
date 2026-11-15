@@ -60,6 +60,25 @@ pub const BUILT_LAYOUTS: [(&str, &str); 5] = [
     ("7.1", "std.audio_out_7_1"),
 ];
 
+/// Each play side's sink with its tap, the module it plans as inside
+/// another project (ADR 0035 §3, ADR 0038 §7): `signal-std` registers the
+/// same pairs (`Registry::sink_tap`), which a test checks.
+pub const SINK_TAPS: [(&str, &str); 5] = [
+    ("std.audio_out_mono", "std.audio_tap_mono"),
+    (STEREO_SINK, "std.audio_tap"),
+    ("std.audio_out_quad", "std.audio_tap_quad"),
+    ("std.audio_out_5_1", "std.audio_tap_5_1"),
+    ("std.audio_out_7_1", "std.audio_tap_7_1"),
+];
+
+/// The tap of play side sink `module`, if it is one.
+pub fn tap_of_sink(module: &str) -> Option<&'static str> {
+    SINK_TAPS
+        .iter()
+        .find(|(sink, _)| *sink == module)
+        .map(|(_, tap)| *tap)
+}
+
 /// Whether `module` is a play side's sink (`std.audio_out` or another
 /// layout's, ADR 0038 §2).
 pub fn is_play_sink(module: &str) -> bool {
