@@ -11,7 +11,7 @@
  * (`signal_std::category`). A category not named here comes after them, in
  * name order, and an entry without one under `other`, last.
  */
-export const GROUPS = Object.freeze(['project', 'library', 'core', 'generator', 'filter', 'envelope', 'delay', 'physical', 'event', 'visual', 'io']);
+export const GROUPS = Object.freeze(['project', 'library', 'core', 'generator', 'filter', 'envelope', 'delay', 'physical', 'event', 'visual', 'io', 'analysis']);
 
 /** The group of entries that name none. */
 export const OTHER = 'other';

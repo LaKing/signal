@@ -29,8 +29,10 @@ pub const EVENT: &str = "event";
 pub const VISUAL: &str = "visual";
 /// Outputs to the outside world.
 pub const IO: &str = "io";
+/// Analysis: spectra and measurements (ADR 0055).
+pub const ANALYSIS: &str = "analysis";
 
 /// Every category, in the order above.
-pub const ALL: [&str; 9] = [
-    CORE, GENERATOR, FILTER, ENVELOPE, DELAY, PHYSICAL, EVENT, VISUAL, IO,
+pub const ALL: [&str; 10] = [
+    CORE, GENERATOR, FILTER, ENVELOPE, DELAY, PHYSICAL, EVENT, VISUAL, IO, ANALYSIS,
 ];

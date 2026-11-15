@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- The tone analyser's panel (ADR 0055): what goes out (the tone's
+     frequency, the probe's period, level and threshold), what comes back
+     (the round trip in frames, whether the last click returned, the tone's
+     frequency and level as the spectrum reads them) and the loop itself on
+     a scope. The measurements are `<signal-scope mode="value">` readouts of
+     the analysis outputs. `signal ui check projects/tone-analyser` checks
+     its bindings. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tone analyser</title>
+<link rel="stylesheet" href="/ui/controls/theme.css">
+<style>
+  :root { color-scheme: dark; --signal-accent: #8bd17c; }
+  body { margin: 0; padding: 0.75rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  .signal-card > h1 { font-size: 18px; letter-spacing: .02em; text-transform: none; color: var(--signal-fg); }
+  .readings signal-scope { width: 14ch; }
+  .scope signal-scope { width: 100%; }
+</style>
+</head>
+<body>
+<signal-panel>
+  <div class="signal-cards">
+    <section class="signal-card">
+      <h1>tone analyser</h1>
+      <p>A 1 kHz tone and a click every second go out on <code>main</code> and come back on the capture role <code>loop</code>: patch the output into an input, or choose a loopback device, and bind <code>loop</code> to it in the Setup.</p>
+    </section>
+    <section class="signal-card">
+      <h2>out</h2>
+      <div class="row">
+        <signal-knob bind="/tone.freq" taper="log" min="50" max="10000" label="tone"></signal-knob>
+        <signal-knob bind="/probe.period" min="0.25" max="4" label="period"></signal-knob>
+        <signal-knob bind="/probe.threshold" taper="log" min="0.001" max="1" label="threshold"></signal-knob>
+        <div class="signal-group">
+          <signal-meter bind="/out.l" label="L"></signal-meter>
+          <signal-meter bind="/out.r" label="R"></signal-meter>
+        </div>
+      </div>
+    </section>
+    <section class="signal-card readings">
+      <h2>back</h2>
+      <div class="row">
+        <signal-scope mode="value" bind="/probe.frames" unit="frames" rate="7680" label="round trip"></signal-scope>
+        <signal-scope mode="value" bind="/probe.found" rate="7680" label="returned"></signal-scope>
+      </div>
+      <div class="row">
+        <signal-scope mode="value" bind="/spectrum.peak_hz" unit="Hz" rate="7680" label="tone"></signal-scope>
+        <signal-scope mode="value" bind="/spectrum.peak" rate="7680" label="level"></signal-scope>
+      </div>
+    </section>
+    <section class="signal-card wide scope">
+      <h2>loop</h2>
+      <signal-scope bind="/loop.m" rate="24000" label="what comes back"></signal-scope>
+    </section>
+  </div>
+</signal-panel>
+<script type="module">
+import '/ui/controls/index.js';
+</script>
+</body>
+</html>

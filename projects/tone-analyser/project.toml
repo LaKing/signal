@@ -1,0 +1,55 @@
+# Tone analyser (M4, ADR 0055): a test tone and a click go out, come back
+# through the machine's loop, and are measured.
+#
+# Signal flow:
+#
+#   tone (std.sine_osc, 1 kHz) ─────────► mix.a ─┐
+#   probe.click (std.latency_probe) ────► mix.b ─┴► out (main, stereo)
+#   loop (capture `loop`, mono) ─ m ─► spectrum.in (std.spectrum2048)
+#                                 └──► probe.in
+#   probe.frames, probe.found, spectrum.peak_hz, spectrum.peak ─► report
+#
+# Live, patch the device's output back into an input (a cable, or a
+# loopback device) and bind the role `loop` to it in the Setup
+# ([capture.loop]); the panel reads the round trip in frames and the tone's
+# frequency and level as they come back. Offline, `signal render
+# --input loop=<wav>` feeds the loop from a file (the tests make one: the
+# output delayed by 480 frames and halved) and `devices/report.wav` holds
+# the measurements frame by frame, on the discrete slot `report` (ADR 0038
+# §2), which no machine plays unless it binds the role. Never bind `report`
+# to a device: its values are measurements (a latency of 480, a frequency of
+# 1000), not audio, and the device would clip them to full-scale DC.
+#
+# Safe gain: the tone at 0.05 (−26 dBFS) and the clicks at 0.15, summed, at
+# most 0.2 on each channel. The probe's threshold (0.05) is above the tone's
+# level after a halving loop and below the click's, so the tone alone never
+# reads as a return; raise it for a louder loop.
+schema_version = 1
+
+[project]
+name = "tone-analyser"
+sample_rate = 48000
+seed = 1
+
+[instances]
+tone = { module = "std.sine_osc", freq = 1000 }
+probe = { module = "std.latency_probe", period = 1, level = 0.5, threshold = 0.05 }
+mix = { module = "std.mix", gain_a = 0.05, gain_b = 0.3 }
+out = { module = "std.audio_out" }
+loop = { device = { capture = "mono", role = "loop" } }
+spectrum = { module = "std.spectrum2048" }
+report = { device = { play = ["latency", "found", "peak_hz", "peak"], role = "report" } }
+
+[wiring]
+connections = [
+  { from = "tone.out", to = "mix.a" },
+  { from = "probe.click", to = "mix.b" },
+  { from = "mix.out", to = "out.l" },
+  { from = "mix.out", to = "out.r" },
+  { from = "loop.m", to = "spectrum.in" },
+  { from = "loop.m", to = "probe.in" },
+  { from = "probe.frames", to = "report.latency" },
+  { from = "probe.found", to = "report.found" },
+  { from = "spectrum.peak_hz", to = "report.peak_hz" },
+  { from = "spectrum.peak", to = "report.peak" },
+]

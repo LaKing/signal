@@ -23,13 +23,15 @@ const SHOWN = 256;
 
 export class SignalScope extends SignalElement {
   static role = 'group';
-  static observedAttributes = ['bind', 'skin', 'mode', 'rate', 'trigger-level', 'trigger-edge', 'label'];
+  static observedAttributes = ['bind', 'skin', 'mode', 'rate', 'trigger-level', 'trigger-edge', 'label', 'unit'];
   static resubscribe = ['mode', 'rate'];
   static css = `
 :host { display: block; }
 .control { display: flex; flex-direction: column; gap: 4px; padding: 4px; }
 canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-height, 160px); background: var(--signal-panel, #1f232b); border-radius: 4px; display: block; }
 :host([mode="xy"]) canvas { width: var(--signal-scope-height, 160px); }
+:host([mode="value"]) canvas { display: none; }
+:host([mode="value"]) .readout { color: var(--signal-fg, #d6dbe4); font-size: var(--signal-value-size, 18px); font-variant-numeric: tabular-nums; }
 .readout { text-align: left; color: var(--signal-muted, #8a93a3); width: 100%; }
 `;
 
@@ -47,6 +49,11 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
 
   get xy() {
     return (this.getAttribute('mode') ?? (this.ports.length > 1 ? 'xy' : 'time')) === 'xy';
+  }
+
+  /** `mode="value"` (ADR 0055): the output's newest point as a number, a measurement's readout. */
+  get valueMode() {
+    return this.getAttribute('mode') === 'value';
   }
 
   get level() {
@@ -257,7 +264,8 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     this.setAttribute('aria-description', what);
     this.setAttribute('aria-keyshortcuts', this.xy ? 'Space' : ariaShortcuts('oscilloscope'));
     const state = this.frozen ? ' · frozen' : '';
-    if (!this.entry?.isOpen) this.$('.readout').textContent = this.problemText ?? (this.xy ? `X–Y${state}` : `trigger ${this.edge === 'rising' ? '↑' : '↓'} ${formatValue(this.level)}${state}`);
+    if (this.valueMode) this.$('.readout').textContent = this.problemText ?? this.valueText();
+    else if (!this.entry?.isOpen) this.$('.readout').textContent = this.problemText ?? (this.xy ? `X–Y${state}` : `trigger ${this.edge === 'rising' ? '↑' : '↓'} ${formatValue(this.level)}${state}`);
     // A changed level or edge shows at once, frozen or not.
     this.schedule();
   }
@@ -266,7 +274,18 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     return getComputedStyle(this).getPropertyValue(name).trim() || fallback;
   }
 
+  /** The newest point, formatted with `unit` (`mode="value"`); `—` before one arrives. */
+  valueText() {
+    const last = this.blocks.at(-1)?.values;
+    return last?.length ? formatValue(last[last.length - 1], this.getAttribute('unit') || null) : '—';
+  }
+
   draw() {
+    if (this.valueMode) {
+      const readout = this.$('.readout');
+      if (readout && !this.problemText) readout.textContent = this.valueText();
+      return;
+    }
     const canvas = this.$('canvas');
     if (!canvas) return;
     // Its layout size, not its screen box: a zoomed plane's transform would resize the canvas every frame.

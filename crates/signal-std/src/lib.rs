@@ -27,6 +27,8 @@
 //! | `std.audio_in_mono` | [`AudioInMono`] | direct source, a device slot's mono capture side | `io` |
 //! | `std.audio_out_mono`, `std.audio_out_quad`, `std.audio_out_5_1`, `std.audio_out_7_1` | [`AudioOutMono`], [`AudioOutQuad`], [`AudioOut51`], [`AudioOut71`] | direct, the audio sinks of ADR 0038 §2's other layouts | `io` |
 //! | `std.audio_tap_mono`, `std.audio_tap_quad`, `std.audio_tap_5_1`, `std.audio_tap_7_1` | [`AudioTapMono`], [`AudioTapQuad`], [`AudioTap51`], [`AudioTap71`] | direct, their taps (ADR 0035 §3) | `io` |
+//! | `std.spectrum512`, `std.spectrum2048` | [`Spectrum`] | direct, a windowed magnitude spectrum as a vector of N/2 bins with its peak (ADR 0055) | `analysis` |
+//! | `std.latency_probe` | [`LatencyProbe`] | direct, a click out and its return found: a round trip in frames (ADR 0055) | `analysis` |
 //! | `std.device_out1` … `std.device_out64`, `std.device_out_tap1` … `std.device_out_tap64` | [`device_out::DeviceOut`], [`device_out::DeviceOutTap`] | direct, a discrete layout's sink (inputs `c1…cN`) and its tap (ADR 0038 §2) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
@@ -196,6 +198,7 @@ mod function;
 mod gain;
 mod ladder;
 mod lag;
+mod latency_probe;
 mod lfo;
 mod line;
 mod logic;
@@ -221,6 +224,7 @@ mod prefer;
 mod random;
 mod sample_hold;
 mod sine_osc;
+mod spectrum;
 mod state;
 mod step_seq;
 mod step_seq8;
@@ -266,6 +270,7 @@ pub use function::{Atan2, Cos, Exp, Log, Pow, Sin, SinCycles, Sqrt, Tan, Tanh};
 pub use gain::Gain;
 pub use ladder::Ladder;
 pub use lag::Lag;
+pub use latency_probe::LatencyProbe;
 pub use lfo::Lfo;
 pub use logic::{And, Compare, Not, Or, Select};
 pub use mass_spring::MassSpring;
@@ -287,6 +292,7 @@ pub use prefer::Prefer;
 pub use random::Random;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
+pub use spectrum::Spectrum;
 pub use state::{Counter, Integrator, Phasor};
 pub use step_seq::StepSeq;
 pub use step_seq8::StepSeq8;
@@ -528,6 +534,9 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Playhead>(),
         direct::<TanhShaperOs8>(),
         direct::<Prefer>(),
+        direct::<Spectrum<512>>(),
+        direct::<Spectrum<2048>>(),
+        direct::<LatencyProbe>(),
     ] {
         registry.register(module_type)?;
     }
@@ -984,6 +993,9 @@ mod tests {
     /// M3: the oversampled shaper, promoted from the lab.
     const SHAPER_OS8: [&str; 1] = ["std.tanh_shaper_os8"];
 
+    /// M4 (ADR 0055): the analysis types.
+    const ANALYSIS: [&str; 3] = ["std.spectrum512", "std.spectrum2048", "std.latency_probe"];
+
     /// M2.10 (the owner's list): the native DSP primitives, with their
     /// categories.
     const DSP: [(&str, &str); 6] = [
@@ -1073,6 +1085,7 @@ mod tests {
                 + POLY.len()
                 + PREFER.len()
                 + SHAPER_OS8.len()
+                + ANALYSIS.len()
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()
@@ -1089,6 +1102,7 @@ mod tests {
             .chain(POLY)
             .chain(PREFER)
             .chain(SHAPER_OS8)
+            .chain(ANALYSIS)
             .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
         {
@@ -1119,6 +1133,7 @@ mod tests {
                 + POLY.len()
                 + PREFER.len()
                 + SHAPER_OS8.len()
+                + ANALYSIS.len()
                 + DSP.len()
                 + vector::types().len()
                 + device_out::types().len()

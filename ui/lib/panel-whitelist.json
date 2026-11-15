@@ -18,7 +18,7 @@
     "signal-value": ["bind", "skin", "label", "class", "digits", "taper", "floor", "min", "max", "default", "unit"],
     "signal-button": ["bind", "skin", "label", "class"],
     "signal-meter": ["bind", "skin", "label", "class", "source", "channel", "floor"],
-    "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge"],
+    "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge", "unit"],
     "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"],
     "signal-piano-roll": ["pattern", "label", "class", "wheel", "snap", "beats-per-bar", "position", "position-bind", "audition"],
     "signal-step-grid": ["pattern", "label", "class", "wheel", "step", "step-bind"],

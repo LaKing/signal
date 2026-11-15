@@ -38,7 +38,7 @@ test('a type’s group: project for a composite, library for lib.*, else its cat
 });
 
 test('the groups’ fixed order: project, library, the std categories; an unknown one after them, other last', () => {
-  assert.deepEqual(GROUPS, ['project', 'library', 'core', 'generator', 'filter', 'envelope', 'delay', 'physical', 'event', 'visual', 'io']);
+  assert.deepEqual(GROUPS, ['project', 'library', 'core', 'generator', 'filter', 'envelope', 'delay', 'physical', 'event', 'visual', 'io', 'analysis']);
   assert.deepEqual(['io', OTHER, 'zeta', 'core', 'spectral', 'project', 'library'].sort(groupOrder), ['project', 'library', 'core', 'io', 'spectral', 'zeta', OTHER]);
   assert.deepEqual(words('  Core  A '), ['core', 'a']);
   assert.deepEqual(words(null), []);
