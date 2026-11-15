@@ -1,0 +1,106 @@
+# Light show (M6, ADR 0057 §5): blue on bass. Drums and a bass into
+# `main`; their envelopes drive a DMX fixture on the slot `lights` (role
+# `lights`), and an OSC surface (role `surface`) dims and tints it live.
+#
+#   transport (120 bpm) ─► drums (kick, snare, hats), bass_seq ─► bass
+#   bass ─ |x| ─ lag (5 ms up, 150 ms down) ─ ×1.6 ─ clamp ─ × bright ─► lights.blue
+#   kick ─ |x| ─ lag (2 ms up, 90 ms down) ─ ×1.2 ─ clamp ─ × bright ─► lights.dimmer
+#   two slow LFOs ─ 0..1 ─ × tint ─► lights.red, lights.green
+#   surface.dim, surface.tint (OSC: /surface/dim, /surface/tint):
+#     bright = 1 − dim, tint as sent (0 before the first message: full
+#     brightness, no tint)
+#
+# Live: `signal play projects/light-show --artnet lights=<node IP> --osc
+# surface=0.0.0.0:9000`; offline, `signal render` writes the DMX frames to
+# devices/lights.dmx (a frame every 1091 frames at 48 kHz).
+#
+# Safe gain: the drums and bass at most 0.25 on `main`.
+schema_version = 1
+
+[project]
+name = "light-show"
+sample_rate = 48000
+seed = 4
+
+[instances]
+transport = { module = "std.transport", bpm = 120, ppq = 96 }
+drums = { module = "std.step_seq8", pattern = "drums", ppq = 96 }
+bass_seq = { module = "std.note_seq", pattern = "bass", ppq = 96 }
+kick = { module = "kick909" }
+snare = { module = "snare909" }
+hats = { module = "hat909" }
+bass = { module = "moog_voice", cutoff = 260, env_amount = 1500, a_release = 90, volume = -3 }
+drum_mix = { module = "std.mix" }
+mix = { module = "std.mix", gain_a = 0.5, gain_b = 0.5 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+# The light, from the sound.
+bass_abs = { module = "std.abs" }
+bass_env = { module = "std.lag", rise_ms = 5, fall_ms = 150 }
+bass_gain = { module = "std.scale", mul = 1.6 }
+bass_clip = { module = "std.clamp", lo = 0, hi = 1 }
+blue = { module = "std.mul" }
+kick_abs = { module = "std.abs" }
+kick_env = { module = "std.lag", rise_ms = 2, fall_ms = 90 }
+kick_gain = { module = "std.scale", mul = 1.2 }
+kick_clip = { module = "std.clamp", lo = 0, hi = 1 }
+dimmer = { module = "std.mul" }
+slow_red = { module = "std.lfo", freq_hz = 0.05 }
+slow_green = { module = "std.lfo", freq_hz = 0.07 }
+red_range = { module = "std.scale", mul = 0.5, add = 0.5 }
+green_range = { module = "std.scale", mul = 0.5, add = 0.5 }
+red = { module = "std.mul" }
+green = { module = "std.mul" }
+bright = { module = "std.scale", mul = -1, add = 1 }
+
+surface = { device = { kind = "osc", capture = ["dim", "tint"], role = "surface" } }
+lights = { device = { kind = "dmx", play = ["red", "green", "blue", "dimmer"], role = "lights" } }
+
+[wiring]
+connections = [
+  { from = "transport.tick", to = "drums.tick" },
+  { from = "transport.tick", to = "bass_seq.tick" },
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "hats.closed" },
+  { from = "drums.t3", to = "hats.closed_velocity" },
+  { from = "bass_seq.hz", to = "bass.hz" },
+  { from = "bass_seq.gate", to = "bass.gate" },
+  { from = "bass_seq.velocity", to = "bass.velocity" },
+  { from = "kick.out", to = "drum_mix.a" },
+  { from = "snare.out", to = "drum_mix.b" },
+  { from = "hats.out", to = "drum_mix.c" },
+  { from = "drum_mix.out", to = "mix.a" },
+  { from = "bass.out", to = "mix.b" },
+  { from = "mix.out", to = "out.l" },
+  { from = "mix.out", to = "out.r" },
+  # Blue on bass.
+  { from = "bass.out", to = "bass_abs.in" },
+  { from = "bass_abs.out", to = "bass_env.in" },
+  { from = "bass_env.out", to = "bass_gain.in" },
+  { from = "bass_gain.out", to = "bass_clip.in" },
+  { from = "bass_clip.out", to = "blue.a" },
+  { from = "bright.out", to = "blue.b" },
+  { from = "blue.out", to = "lights.blue" },
+  # The dimmer on the kick.
+  { from = "kick.out", to = "kick_abs.in" },
+  { from = "kick_abs.out", to = "kick_env.in" },
+  { from = "kick_env.out", to = "kick_gain.in" },
+  { from = "kick_gain.out", to = "kick_clip.in" },
+  { from = "kick_clip.out", to = "dimmer.a" },
+  { from = "bright.out", to = "dimmer.b" },
+  { from = "dimmer.out", to = "lights.dimmer" },
+  # Red and green drift, tinted live.
+  { from = "slow_red.out", to = "red_range.in" },
+  { from = "slow_green.out", to = "green_range.in" },
+  { from = "red_range.out", to = "red.a" },
+  { from = "green_range.out", to = "green.a" },
+  { from = "surface.tint", to = "red.b" },
+  { from = "surface.tint", to = "green.b" },
+  { from = "red.out", to = "lights.red" },
+  { from = "green.out", to = "lights.green" },
+  # The surface's dim.
+  { from = "surface.dim", to = "bright.in" },
+]

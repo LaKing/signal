@@ -197,6 +197,10 @@ fn merged_entry(over: &LocalPlay, base: Option<&PlayEntry>) -> PlayEntry {
             .prefer
             .clone()
             .or_else(|| base.and_then(|b| b.prefer.clone())),
+        // ADR 0057: external bindings are the Setup's (machine-wide).
+        artnet: base.and_then(|b| b.artnet.clone()),
+        osc: base.and_then(|b| b.osc.clone()),
+        midi: base.and_then(|b| b.midi.clone()),
     }
 }
 

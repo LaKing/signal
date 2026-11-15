@@ -393,3 +393,41 @@ fn play_tables_bind_roles_to_device_channels() {
         ]
     );
 }
+
+/// ADR 0057: a role may be bound outside audio: `artnet` on a `dmx` role,
+/// `osc` and `midi` on control roles, without `channels`; each checked as
+/// it is read, and written back.
+#[test]
+fn external_roles_bind_without_channels() {
+    let (setup, problems) = Setup::parse(
+        "[play.lights]\nartnet = \"2.0.0.1/3\"\n\
+         [capture.surface]\nosc = \"0.0.0.0:9000\"\n\
+         [capture.keys]\nmidi = \"Arturia\"\n",
+        Path::new("setup.toml"),
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(setup.play["lights"].artnet.as_deref(), Some("2.0.0.1/3"));
+    assert_eq!(
+        setup.capture["surface"].osc.as_deref(),
+        Some("0.0.0.0:9000")
+    );
+    assert_eq!(setup.capture["keys"].midi.as_deref(), Some("Arturia"));
+    let (again, problems) = Setup::parse(&setup.to_toml(), Path::new("setup.toml"));
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(again.play, setup.play);
+    assert_eq!(again.capture, setup.capture);
+    for (text, said) in [
+        ("[play.lights]\nartnet = \"lamp\"\n", "artnet"),
+        ("[capture.surface]\nosc = \"9000\"\n", "osc is"),
+        (
+            "[play.cue]\ndevice = { name = \"X\" }\n",
+            "channels is missing",
+        ),
+    ] {
+        let (_, problems) = Setup::parse(text, Path::new("setup.toml"));
+        assert!(
+            problems.iter().any(|p| p.contains(said)),
+            "{text}: {problems:?}"
+        );
+    }
+}

@@ -36,6 +36,7 @@ pub mod bindings;
 pub mod devices;
 pub mod document;
 mod entities;
+pub mod external;
 pub mod frames;
 mod host;
 mod http;

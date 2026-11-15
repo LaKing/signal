@@ -300,6 +300,7 @@ impl Host {
         };
         let device = device_name(&started.output);
         let run = Run {
+            external: started.external,
             output: started.output,
             input,
             controller: started.controller,

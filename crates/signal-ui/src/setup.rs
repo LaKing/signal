@@ -75,8 +75,19 @@ impl DeviceEntry {
 /// short form stays `output_channels`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayEntry {
-    /// Its device channels, from 1.
+    /// Its device channels, from 1 (none for a role bound below instead).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<u16>,
+    /// ADR 0057 §2: a `dmx` role's Art-Net node, `IP[:PORT][/UNIVERSE]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artnet: Option<String>,
+    /// ADR 0057 §1: an `osc` role's listening address, `IP:PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osc: Option<String>,
+    /// ADR 0057 §3: a `midi` role's sources, by a part of their names
+    /// (`*`: every source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi: Option<String>,
     /// Its device; the clock device without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceEntry>,
@@ -109,6 +120,9 @@ impl PlayEntry {
             layout,
             adapter: old.and_then(|o| o.adapter.clone()),
             prefer: old.and_then(|o| o.prefer.clone()),
+            artnet: old.and_then(|o| o.artnet.clone()),
+            osc: old.and_then(|o| o.osc.clone()),
+            midi: old.and_then(|o| o.midi.clone()),
         }
     }
 
@@ -223,7 +237,9 @@ pub fn adapter_of(value: &toml::Value) -> Result<signal_output::layouts::Adapter
 }
 
 /// The keys of a `[play.<role>]` table this version reads.
-const PLAY_KEYS: [&str; 5] = ["channels", "device", "layout", "adapter", "prefer"];
+const PLAY_KEYS: [&str; 8] = [
+    "channels", "device", "layout", "adapter", "prefer", "artnet", "osc", "midi",
+];
 
 /// A `[play.<role>]` table, or why it does not read.
 fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
@@ -264,6 +280,23 @@ fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
                 Some(prefer @ ("author" | "adapter")) => entry.prefer = Some(prefer.to_owned()),
                 _ => return Err("prefer is \"author\" or \"adapter\"".to_owned()),
             },
+            // ADR 0057: a dmx role's Art-Net node, an osc role's address, a
+            // midi role's sources.
+            "artnet" => match value.as_str() {
+                Some(text) => match signal_output::parse_artnet(text) {
+                    Ok(_) => entry.artnet = Some(text.to_owned()),
+                    Err(why) => return Err(format!("artnet: {why}")),
+                },
+                None => return Err("artnet is \"IP[:PORT][/UNIVERSE]\"".to_owned()),
+            },
+            "osc" => match value.as_str().map(str::parse::<std::net::SocketAddr>) {
+                Some(Ok(_)) => entry.osc = value.as_str().map(str::to_owned),
+                _ => return Err("osc is \"IP:PORT\"".to_owned()),
+            },
+            "midi" => match value.as_str() {
+                Some(name) if !name.is_empty() => entry.midi = Some(name.to_owned()),
+                _ => return Err("midi is a source's name, or \"*\"".to_owned()),
+            },
             other => {
                 return Err(format!(
                     "unknown key '{other}' (this version reads {})",
@@ -272,7 +305,8 @@ fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
             }
         }
     }
-    if entry.channels.is_empty() {
+    let external = entry.artnet.is_some() || entry.osc.is_some() || entry.midi.is_some();
+    if entry.channels.is_empty() && !external {
         return Err("channels is missing".to_owned());
     }
     Ok(entry)

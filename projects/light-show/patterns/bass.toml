@@ -1,0 +1,12 @@
+# Two bars of bass with rests, so the blue breathes.
+schema_version = 1
+kind = "notes"
+length = 8
+notes = [
+  { key = 33, start = 0, length = 0.75, velocity = 1 },
+  { key = 33, start = 1, length = 0.5, velocity = 0.8 },
+  { key = 45, start = 1.5, length = 0.4, velocity = 0.7 },
+  { key = 40, start = 3, length = 0.9, velocity = 0.9 },
+  { key = 36, start = 4, length = 1.5, velocity = 1 },
+  { key = 43, start = 6.5, length = 0.4, velocity = 0.7 },
+]

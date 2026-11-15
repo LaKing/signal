@@ -151,6 +151,8 @@ fn sized(config: RealtimeConfig, rate: u32, seed: u64, buffer: u32) -> RealtimeC
 
 /// A run started by [`start`].
 pub struct Started {
+    /// ADR 0057: its external I/O (Art-Net, OSC, MIDI), for the run.
+    pub external: crate::external::External,
     /// The output, playing.
     pub output: Output,
     /// The run's Controller.
@@ -231,14 +233,26 @@ pub fn start(
     let recorder = SessionRecorder::new(project, registry, rate, seed, Provenance::default())
         .map_err(|error| error.to_string())?;
     let workers = runner.workers();
+    // ADR 0057: the project's dmx, osc and midi slots, bound by the Setup.
+    let mut external = crate::external::External::open(
+        project,
+        &plan,
+        setup,
+        &mut runner,
+        rate,
+        crate::player::input_record_frames(rate, record_inputs),
+        notes,
+    );
     output.start(runner).map_err(|error| error.to_string())?;
-    let inputs = crate::player::input_records(output.take_input_records(), &specs);
+    let mut inputs = crate::player::input_records(output.take_input_records(), &specs);
+    inputs.extend(external.take_records().into_iter().map(|r| (r, None)));
     let scheduling = output
         .scheduling()
         .cloned()
         .unwrap_or_else(|| Scheduling::ordinary(workers.threads(), workers.count(), "null driver"));
     let input = open_input(backend, devices, setup, rate, notes);
     Ok(Started {
+        external,
         output,
         controller,
         recorder,

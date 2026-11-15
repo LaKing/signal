@@ -221,6 +221,8 @@ pub(super) struct DeviceWait {
 
 /// One run: from a start (the first, or `setup.apply`) to its stop.
 pub(super) struct Run {
+    /// ADR 0057: its external I/O (Art-Net, OSC, MIDI), kept for the run.
+    pub(super) external: crate::external::External,
     pub(super) output: Output,
     pub(super) input: Option<Input>,
     pub(super) controller: Controller,
@@ -618,12 +620,21 @@ impl Host {
             live
         };
         let device = device_name(&output);
+        // ADR 0057: the project's dmx, osc and midi slots, bound by the Setup.
+        let mut external = crate::external::External::open(
+            &project,
+            &plan,
+            &setup,
+            &mut runner,
+            rate,
+            crate::player::input_record_frames(rate, self.recording),
+            &mut notes,
+        );
         output.start(runner).map_err(|e| e.to_string())?;
         // ADR 0038 §9: a recording run records what its sources read.
-        let live = live.with_inputs(crate::player::input_records(
-            output.take_input_records(),
-            &specs,
-        ));
+        let mut records = crate::player::input_records(output.take_input_records(), &specs);
+        records.extend(external.take_records().into_iter().map(|r| (r, None)));
+        let live = live.with_inputs(records);
         let input = if first {
             None
         } else {
@@ -666,6 +677,7 @@ impl Host {
             log_lost: false,
             fault: None,
             scheduling: None,
+            external,
         };
         Ok((run, notes))
     }
@@ -704,6 +716,7 @@ impl Host {
         let Some(run) = self.run.as_mut() else {
             return;
         };
+        run.external.poll();
         let mut observed = Observed {
             values: &mut self.live.values,
             reports: &mut self.reports,
