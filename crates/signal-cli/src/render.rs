@@ -119,6 +119,11 @@ pub(crate) fn render_project(
         .map(|s| s.address.clone())
         .collect();
     others.sort();
+    let discrete_sides: Vec<_> = sides
+        .iter()
+        .filter(|s| !s.ports.is_empty())
+        .map(|s| s.address.clone())
+        .collect();
 
     let sample_rate = args.sample_rate.unwrap_or(project.sample_rate);
     let seed = args.seed.unwrap_or(project.seed);
@@ -202,11 +207,23 @@ pub(crate) fn render_project(
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
     // ADR 0038 §9: the other play sides, each in its own WAV.
     let mut devices = serde_json::Map::new();
+    // A discrete side's file has no speaker positions (mask 0); a discrete
+    // slot's sink (`/drums/play`) is written under its slot's name.
+    let discrete = |address: &signal_core::InstanceAddress| discrete_sides.contains(address);
+    if discrete(&main) {
+        signal_output::set_speaker_mask(&args.out.join("audio.wav"), 0)
+            .map_err(|e| render_failure(&project, dir, e))?;
+    }
     for side in &side_renders {
-        let name = side.address.as_str().trim_start_matches('/');
+        let name = signal_project::device::slot_of_sink(&side.address)
+            .unwrap_or_else(|| side.address.as_str().trim_start_matches('/'));
         let file = format!("devices/{name}.wav");
         side.write(&args.out.join(&file), rendered.sample_rate)
             .map_err(|e| render_failure(&project, dir, e))?;
+        if discrete(&side.address) {
+            signal_output::set_speaker_mask(&args.out.join(&file), 0)
+                .map_err(|e| render_failure(&project, dir, e))?;
+        }
         devices.insert(
             name.to_owned(),
             json!({"file": file, "channels": side.channels, "audio_fnv1a64": format!("{:016x}", side.audio_fnv1a64())}),

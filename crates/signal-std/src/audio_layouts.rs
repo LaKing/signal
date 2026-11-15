@@ -20,7 +20,7 @@ use signal_core::{
 use crate::{at, parameter, signal_port};
 
 /// `gain`, as `std.audio_out`'s.
-const GAIN: signal_core::ParameterDescriptor = parameter(
+pub(crate) const GAIN: signal_core::ParameterDescriptor = parameter(
     "gain",
     PortKind::Gain,
     None,

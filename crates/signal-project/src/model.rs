@@ -1030,17 +1030,29 @@ impl JsonSchema for InstanceEntry {
     }
 }
 
+/// ADR 0038 §2: a play side's layout, by name, or discrete: its ports'
+/// names, in channel order (an array: TOML tables keep no order here).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum PlaySpec {
+    /// `mono`, `stereo`, `quad`, `5.1` or `7.1`.
+    Layout(String),
+    /// A discrete layout's ports, every one audio, in channel order.
+    Discrete(Vec<String>),
+}
+
 /// ADR 0038 §3: a device slot, `device = { play = "stereo", role = "cue" }`:
 /// the layout of what the project plays to the machine, and the role it
 /// plays as. The project names no device and no channel.
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeviceSpec {
-    /// The play side's layout: `mono`, `stereo`, `quad`, `5.1` or `7.1`
-    /// (this version plans `stereo`).
+    /// The play side's layout: `mono`, `stereo`, `quad`, `5.1` or `7.1`,
+    /// or a discrete layout, its ports' names in channel order (`["kick",
+    /// "snare"]`, ADR 0038 §2).
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
-    pub(crate) play: Option<Spanned<String>>,
+    #[schemars(with = "Option<PlaySpec>")]
+    pub(crate) play: Option<Spanned<PlaySpec>>,
     /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7).
     #[serde(default)]
     #[schemars(with = "Option<String>")]

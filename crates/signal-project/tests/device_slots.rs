@@ -312,3 +312,105 @@ fn every_layout_plays_as_its_own_sink() {
     );
     let _ = &mut registry;
 }
+
+/// ADR 0038 §2, §3: a discrete layout names its ports in channel order; it
+/// plans as a composite of them on `std.device_out<N>` (`c1…cN`), the slot's
+/// sink one level down, its role and port names handed beside the plan.
+#[test]
+fn a_discrete_layout_plays_its_named_ports_in_order() {
+    let text = format!(
+        "{HEAD}[instances]\nosc = {{ module = \"std.sine_osc\", freq = 220.0 }}\n\
+         out = {{ module = \"std.audio_out\" }}\n\
+         stems = {{ device = {{ play = [\"kick\", \"snare\", \"pad_l\", \"pad_r\"], role = \"stems\" }}, gain = 0.5 }}\n\
+         [wiring]\nconnections = [ {{ from = \"osc.out\", to = \"stems.snare\" }}, {{ from = \"osc.out\", to = \"out.l\" }} ]\n"
+    );
+    let project = load(&text).unwrap();
+    let slot = &project.device_slots()["stems"];
+    assert_eq!(slot.play.as_deref(), Some("discrete"));
+    assert_eq!(slot.ports, ["kick", "snare", "pad_l", "pad_r"]);
+    let plan = project.plan(&registry()).unwrap().plan;
+    let sink = plan
+        .instances
+        .iter()
+        .find(|i| i.address.as_str() == "/stems/play")
+        .unwrap();
+    assert_eq!(sink.descriptor.type_name, "std.device_out4");
+    assert_eq!(sink.parameters["gain"], 0.5);
+    let sides = play_sides(&project, &plan);
+    let stems = sides.iter().find(|s| s.role == "stems").unwrap();
+    assert_eq!(stems.address.as_str(), "/stems/play");
+    assert_eq!(
+        (stems.width, &stems.ports[..]),
+        (
+            4,
+            &["kick", "snare", "pad_l", "pad_r"].map(String::from)[..]
+        )
+    );
+    assert_eq!(main_side(&sides).unwrap().address.as_str(), "/out");
+    assert_eq!(
+        signal_project::device::slot_of_sink(&stems.address),
+        Some("stems")
+    );
+
+    // Two discrete channels are not stereo: a stereo `main` and a discrete
+    // `main` of two are versions of one role, not a repeated layout.
+    let two = format!(
+        "{HEAD}[instances]\nout = {{ module = \"std.audio_out\" }}\npair = {{ device = {{ play = [\"a\", \"b\"] }} }}\n"
+    );
+    assert_eq!(problems(&two), "");
+
+    for (ports, reason) in [
+        ("[]", "1 to 64 ports"),
+        ("[\"kick\", \"kick\"]", "listed twice"),
+        ("[\"gain\"]", "the slot's parameter"),
+        ("[\"Kick\"]", "invalid port name"),
+    ] {
+        let text = format!("{HEAD}[instances]\nstems = {{ device = {{ play = {ports} }} }}\n");
+        let found = problems(&text);
+        assert!(found.contains(reason), "{ports}: {found}");
+    }
+    let many: Vec<String> = (1..=65).map(|k| format!("\"s{k}\"")).collect();
+    let text = format!(
+        "{HEAD}[instances]\nstems = {{ device = {{ play = [{}] }} }}\n",
+        many.join(", ")
+    );
+    assert!(problems(&text).contains("1 to 64 ports"));
+}
+
+/// ADR 0038 §7: inside another project a discrete slot is its tap, its
+/// ports exported by name (`kick`, from `<slot>.kick_out`) when the project
+/// names no outputs; only the host's roles reach the machine.
+#[test]
+fn an_included_discrete_slot_is_a_tap_of_its_ports() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("discrete-include");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("child")).unwrap();
+    std::fs::write(
+        dir.join("child/project.toml"),
+        format!(
+            "{HEAD}[instances]\nosc = {{ module = \"std.sine_osc\" }}\n\
+             stems = {{ device = {{ play = [\"kick\", \"snare\"], role = \"stems\" }} }}\n\
+             [wiring]\nconnections = [ {{ from = \"osc.out\", to = \"stems.kick\" }} ]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("project.toml"),
+        format!(
+            "{HEAD}[instances]\nx = {{ project = \"./child\" }}\nout = {{ module = \"std.audio_out\" }}\n\
+             [wiring]\nconnections = [ {{ from = \"x.kick\", to = \"out.l\" }}, {{ from = \"x.snare\", to = \"out.r\" }} ]\n"
+        ),
+    )
+    .unwrap();
+    let project = Project::load(&dir).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let tap = plan
+        .instances
+        .iter()
+        .find(|i| i.address.as_str() == "/x/stems/play")
+        .unwrap();
+    assert_eq!(tap.descriptor.type_name, "std.device_out_tap2");
+    let sides = play_sides(&project, &plan);
+    assert_eq!(sides.len(), 1, "only the host's sink: {sides:?}");
+    assert_eq!(sides[0].address.as_str(), "/out");
+}

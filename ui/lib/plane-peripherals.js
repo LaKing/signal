@@ -154,6 +154,8 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
   const seen = new Set();
   const bound = new Map();
   const routed = new Map((setup?.routing?.sides ?? []).map((r) => [r.address, r]));
+  // A discrete slot's sink is one level down (`/stems/play`): found by its slot too.
+  for (const r of setup?.routing?.sides ?? []) if (r.slot && !routed.has(`/${r.slot}`)) routed.set(`/${r.slot}`, r);
   ordered.forEach((e, k) => {
     const unheard = (note) => bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: null, channels: [], heard: false, note });
     const r = routed.get(`/${e.name}`);

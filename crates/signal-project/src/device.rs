@@ -33,7 +33,9 @@
 use std::collections::BTreeMap;
 
 use signal_core::{Direction, InstanceAddress, PortShape, SinkKind, SourceKind};
-use signal_graph::ExecutionPlan;
+use signal_graph::{
+    CompositeDef, ExecutionPlan, Exports, InputExport, InstanceDef, ParameterExport,
+};
 use signal_output::{CaptureSide, MAIN, PlaySide};
 
 use crate::Project;
@@ -99,13 +101,22 @@ pub const STEREO_SOURCE: &str = "std.audio_in";
 /// The module a planned mono capture side is.
 pub const MONO_SOURCE: &str = "std.audio_in_mono";
 
+/// A discrete play side's layout name (ADR 0038 §2): its ports are named
+/// in [`DeviceSlot::ports`].
+pub const DISCRETE: &str = "discrete";
+
+/// The most channels a discrete layout has (ADR 0038 §2).
+pub const MAX_DISCRETE: usize = 64;
+
 /// A device slot as written: its role and its sides' layouts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSlot {
     /// Its role.
     pub role: String,
-    /// Its play side's layout (`stereo`), if it plays.
+    /// Its play side's layout (`stereo`, or [`DISCRETE`]), if it plays.
     pub play: Option<String>,
+    /// A discrete play side's ports, in channel order; empty otherwise.
+    pub ports: Vec<String>,
     /// Its capture side's layout (`mono`, `stereo`), if it captures.
     pub capture: Option<String>,
     /// ADR 0038 §3, §9: its capture side's WAV file, relative to the
@@ -139,6 +150,81 @@ pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
         .find(|(layout, _)| *layout == play)
         .map(|(_, module)| *module)
         .ok_or_else(|| format!("`{play}` is not a layout (mono, stereo, quad, 5.1, 7.1)"))
+}
+
+/// The composite a discrete device slot `instance` plans as (ADR 0038 §3):
+/// its written ports exported onto `std.device_out<N>`'s `c1…cN`, with
+/// `gain`. Named `device:<instance>`, a name no file can give.
+pub(crate) fn discrete_composite(instance: &str, ports: &[String]) -> CompositeDef {
+    CompositeDef {
+        name: discrete_name(instance),
+        instances: vec![InstanceDef {
+            name: DISCRETE_SINK.to_owned(),
+            module: format!("std.device_out{}", ports.len()),
+            ..InstanceDef::default()
+        }],
+        exports: Exports {
+            inputs: ports
+                .iter()
+                .enumerate()
+                .map(|(k, port)| InputExport {
+                    name: port.clone(),
+                    to: vec![format!("{DISCRETE_SINK}.c{}", k + 1)],
+                })
+                .collect(),
+            parameters: vec![ParameterExport {
+                name: "gain".to_owned(),
+                to: vec![format!("{DISCRETE_SINK}.gain")],
+                ..ParameterExport::default()
+            }],
+            ..Exports::default()
+        },
+        ..CompositeDef::default()
+    }
+}
+
+/// The name of discrete device slot `instance`'s composite.
+pub fn discrete_name(instance: &str) -> String {
+    format!("device:{instance}")
+}
+
+/// The instance inside a discrete slot's composite that is its sink: the
+/// slot `/drums` plays at `/drums/play`.
+pub const DISCRETE_SINK: &str = "play";
+
+/// Whether `module` names a discrete device slot's composite (also
+/// qualified, inside another project: `<id>/device:<instance>`).
+pub fn is_discrete_composite(module: &str) -> bool {
+    module
+        .rsplit('/')
+        .next()
+        .is_some_and(|m| m.starts_with("device:"))
+}
+
+/// Why discrete ports `ports` are not a layout, if they are not: 1 to 64
+/// names, each `[a-z][a-z0-9_]*`, distinct, none `gain`.
+pub(crate) fn discrete_problem(ports: &[String]) -> Option<String> {
+    if ports.is_empty() || ports.len() > MAX_DISCRETE {
+        return Some(format!(
+            "a discrete layout has 1 to {MAX_DISCRETE} ports, not {}",
+            ports.len()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for port in ports {
+        if !crate::valid_name(port) {
+            return Some(format!(
+                "invalid port name `{port}`; a port is [a-z][a-z0-9_]*"
+            ));
+        }
+        if port == "gain" {
+            return Some("`gain` is the slot's parameter, not a port name".to_owned());
+        }
+        if !seen.insert(port.as_str()) {
+            return Some(format!("port `{port}` is listed twice"));
+        }
+    }
+    None
 }
 
 /// The module a device slot's `capture` side plans as, or why it does not.
@@ -190,9 +276,8 @@ pub fn play_sides(project: &Project, plan: &ExecutionPlan) -> Vec<PlaySide> {
         .iter()
         .filter(|i| matches!(i.descriptor.sink, Some(SinkKind::Audio)))
         .map(|i| {
-            let role = top_level_name(&i.address)
-                .and_then(|name| devices.get(name))
-                .map_or_else(|| MAIN.to_owned(), |d| d.role.clone());
+            let slot = slot_of_sink(&i.address).and_then(|name| devices.get(name));
+            let role = slot.map_or_else(|| MAIN.to_owned(), |d| d.role.clone());
             let width = i
                 .descriptor
                 .ports
@@ -203,6 +288,7 @@ pub fn play_sides(project: &Project, plan: &ExecutionPlan) -> Vec<PlaySide> {
                 address: i.address.clone(),
                 role,
                 width,
+                ports: slot.map(|d| d.ports.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -225,6 +311,15 @@ pub fn main_side(sides: &[PlaySide]) -> Option<&PlaySide> {
     })
 }
 
+/// The device slot a sink at `address` plays for: a top-level instance
+/// (`/cue` → `cue`), or a discrete slot's sink (`/drums/play` → `drums`).
+pub fn slot_of_sink(address: &InstanceAddress) -> Option<&str> {
+    top_level_name(address).or_else(|| {
+        let (slot, sink) = address.as_str().strip_prefix('/')?.split_once('/')?;
+        (sink == DISCRETE_SINK).then_some(slot)
+    })
+}
+
 /// The name of a top-level instance address (`/cue` → `cue`), none for a
 /// deeper one.
 fn top_level_name(address: &InstanceAddress) -> Option<&str> {
@@ -232,24 +327,32 @@ fn top_level_name(address: &InstanceAddress) -> Option<&str> {
     (!name.contains('/')).then_some(name)
 }
 
+/// A play side's layout as shown: its width's, or `discrete` (ADR 0038 §2).
+pub fn side_layout(side: &PlaySide) -> String {
+    if side.ports.is_empty() {
+        layout_of_width(side.width)
+    } else {
+        DISCRETE.to_owned()
+    }
+}
+
 /// The versions of a role that repeat a layout: each later sink, by
 /// address, with the role and the layout (ADR 0038 §5.4: a role may have
 /// several versions, one per layout; two of one layout are an error).
 pub(crate) fn repeated_layouts(sides: &[PlaySide]) -> Vec<(InstanceAddress, String, String)> {
-    let mut first: BTreeMap<(&str, usize), &InstanceAddress> = BTreeMap::new();
+    let mut first: BTreeMap<(&str, usize, bool), &InstanceAddress> = BTreeMap::new();
     let mut ordered: Vec<&PlaySide> = sides.iter().collect();
     ordered.sort_by(|a, b| (&a.role, &a.address).cmp(&(&b.role, &b.address)));
     let mut repeated = Vec::new();
     for side in ordered {
         if first
-            .insert((side.role.as_str(), side.width), &side.address)
+            .insert(
+                (side.role.as_str(), side.width, !side.ports.is_empty()),
+                &side.address,
+            )
             .is_some()
         {
-            repeated.push((
-                side.address.clone(),
-                side.role.clone(),
-                layout_of_width(side.width),
-            ));
+            repeated.push((side.address.clone(), side.role.clone(), side_layout(side)));
         }
     }
     repeated

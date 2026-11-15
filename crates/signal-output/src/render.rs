@@ -146,10 +146,17 @@ pub fn channel_mask(channels: u16) -> Option<u32> {
 /// header, the sample data untouched. A plain header, or a width no layout
 /// has, is left as it is.
 fn set_channel_mask(path: &Path, channels: u16) -> Result<(), RenderError> {
+    match channel_mask(channels) {
+        Some(mask) => set_speaker_mask(path, mask),
+        None => Ok(()),
+    }
+}
+
+/// Sets the speaker mask of the extensible WAV file at `path` to `mask`
+/// (`0` for a discrete layout's file, ADR 0038 §2: no speaker positions);
+/// a plain header is left as it is.
+pub fn set_speaker_mask(path: &Path, mask: u32) -> Result<(), RenderError> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let Some(mask) = channel_mask(channels) else {
-        return Ok(());
-    };
     let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
     let mut head = [0u8; 44];
     if file.read_exact(&mut head).is_err() {

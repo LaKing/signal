@@ -1137,8 +1137,15 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
                     "{what}: `{name}` captures from the machine, which a project inside another cannot yet (ADR 0038 §7)"
                 )));
             }
-            let Some(play) = device.get("play").and_then(Item::as_str) else {
+            let Some(play) = device.get("play") else {
                 continue;
+            };
+            // ADR 0038 §2: a discrete slot's ports are names only its
+            // generated composite knows; not copied yet.
+            let Some(play) = play.as_str() else {
+                return Err(invalid(format!(
+                    "{what}: `{name}` is a discrete device slot, which cannot be copied into another project yet; give it a named layout or include the project"
+                )));
             };
             let sink = crate::device::planned_module(play)
                 .map_err(|e| invalid(format!("{what}: `{name}`: {e}")))?;

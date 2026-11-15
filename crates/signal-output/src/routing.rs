@@ -56,6 +56,10 @@ pub struct PlaySide {
     pub role: String,
     /// Its signal inputs (its channels, in port order).
     pub width: usize,
+    /// A discrete side's port names, in channel order (ADR 0038 §2): never
+    /// mixed, channel *k* on the role's channel *k*. Empty for a named
+    /// layout, which is its width's.
+    pub ports: Vec<String>,
 }
 
 /// Where a role's device is, as the machine found it.
@@ -406,7 +410,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
         };
         // ADR 0038 §5: the side's layout on the role's.
         let mut converted = None;
-        match (layout_by_width(side.width), binding.layout()) {
+        match (side_layout(side), binding.layout()) {
             (Some(from), Some(to)) if from != to => match mix(from, to, &binding.adapter) {
                 Some(Ok(m)) => converted = Some(m),
                 Some(Err((why, fallback))) => {
@@ -433,6 +437,24 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
                 plural(binding.channels.len()),
                 binding.layout().unwrap_or("?"),
             ));
+        } else if !side.ports.is_empty() && binding.channels.len() < side.width {
+            // ADR 0038 §5.5: discrete channels are never mixed; those beyond
+            // the role's are not heard, by name.
+            notices.push(format!(
+                "{who}: {} channels, this machine gives {}: {} not heard",
+                side.width,
+                binding.channels.len(),
+                side.ports
+                    .get(binding.channels.len()..)
+                    .unwrap_or_default()
+                    .join(", ")
+            ));
+        } else if !side.ports.is_empty() {
+            if let Some(named) = binding.layout() {
+                notices.push(format!(
+                    "{who}: discrete on `{named}`: played by position, never mixed"
+                ));
+            }
         } else if converted.is_none() && binding.channels.len() != side.width {
             notices.push(format!(
                 "{who}: {} channel{} on {} device channel{}; played by position",
@@ -636,7 +658,7 @@ fn chosen_versions<'a>(
         roles.entry(side.role.as_str()).or_default().push(side);
     }
     let layout = |side: &PlaySide| {
-        layout_by_width(side.width).map_or_else(|| format!("{} ch", side.width), str::to_owned)
+        side_layout(side).map_or_else(|| format!("{} ch", side.width), str::to_owned)
     };
     let mut chosen = BTreeMap::new();
     for (role, versions) in roles {
@@ -660,7 +682,7 @@ fn chosen_versions<'a>(
                 versions
                     .iter()
                     .copied()
-                    .find(|v| layout_by_width(v.width) == Some(to))
+                    .find(|v| side_layout(v) == Some(to))
             });
         let version = match own {
             Some(own) if own.address != largest.address => Version {
@@ -682,6 +704,16 @@ fn chosen_versions<'a>(
         chosen.insert(role, version);
     }
     chosen
+}
+
+/// A side's named layout: its width's, none for a discrete side (ADR 0038
+/// §2: two discrete channels are not stereo).
+fn side_layout(side: &PlaySide) -> Option<&'static str> {
+    if side.ports.is_empty() {
+        layout_by_width(side.width)
+    } else {
+        None
+    }
 }
 
 fn unheard(side: &PlaySide, heard: Heard) -> RoutedSide {
@@ -710,6 +742,7 @@ mod tests {
             address: address.parse().unwrap(),
             role: role.to_owned(),
             width,
+            ports: Vec::new(),
         }
     }
 

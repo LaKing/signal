@@ -584,6 +584,29 @@ impl Project {
             builder.check_owners(spans, &def.name, &owners);
         }
 
+        // ADR 0038 §3: each discrete device slot's composite, one of the
+        // project's own (so an include qualifies it as its own).
+        for (instance, slot) in &root_spans.devices {
+            if slot.ports.is_empty() {
+                continue;
+            }
+            let def = device::discrete_composite(instance, &slot.ports);
+            let spans = locate::DefSpans {
+                file: root_spans.file,
+                devices: BTreeMap::new(),
+                name: root_spans.name.clone(),
+                instances_table: None,
+                instances: BTreeMap::new(),
+                connections: Vec::new(),
+                exports: Vec::new(),
+                category: None,
+                description: None,
+                inside_of: None,
+                contents: BTreeMap::new(),
+            };
+            composites.push((def, spans));
+        }
+
         // ADR 0035, 0037: the projects the files include or load, each
         // read and checked in its own folder.
         let mut content = include::Content::default();
@@ -1716,7 +1739,7 @@ fn device_slot(
     render: Option<&Spanned<String>>,
     root: bool,
     problems: &mut Vec<slot::Problem>,
-) -> Option<(device::DeviceSlot, &'static str)> {
+) -> Option<(device::DeviceSlot, String)> {
     let at = device.span().start;
     let spec = device.get_ref();
     let mut fine = true;
@@ -1765,17 +1788,32 @@ fn device_slot(
         Some(role) => role.get_ref().clone(),
         None => signal_output::MAIN.to_owned(),
     };
+    let mut ports = Vec::new();
     let module = match (&spec.play, &spec.capture) {
-        (Some(play), _) => match device::planned_module(play.get_ref()) {
-            Ok(module) => Some(module),
-            Err(reason) => {
-                problems.push((play.span().start, format!("{instance}: {reason}")));
-                None
-            }
+        (Some(play), _) => match play.get_ref() {
+            model::PlaySpec::Layout(layout) => match device::planned_module(layout) {
+                Ok(module) => Some(module.to_owned()),
+                Err(reason) => {
+                    problems.push((play.span().start, format!("{instance}: {reason}")));
+                    None
+                }
+            },
+            // ADR 0038 §2, §3: a discrete layout plans as a composite of
+            // its ports on `std.device_out<N>`.
+            model::PlaySpec::Discrete(names) => match device::discrete_problem(names) {
+                Some(reason) => {
+                    problems.push((play.span().start, format!("{instance}: {reason}")));
+                    None
+                }
+                None => {
+                    ports = names.clone();
+                    Some(device::discrete_name(instance))
+                }
+            },
         },
         // ADR 0038 §7: a capture side plans as a source.
         (None, Some(capture)) => match device::planned_source(capture.get_ref()) {
-            Ok(module) => Some(module),
+            Ok(module) => Some(module.to_owned()),
             Err(reason) => {
                 problems.push((capture.span().start, format!("{instance}: {reason}")));
                 None
@@ -1817,7 +1855,11 @@ fn device_slot(
     let module = module.filter(|_| fine)?;
     let slot = device::DeviceSlot {
         role,
-        play: spec.play.as_ref().map(|p| p.get_ref().clone()),
+        play: spec.play.as_ref().map(|p| match p.get_ref() {
+            model::PlaySpec::Layout(layout) => layout.clone(),
+            model::PlaySpec::Discrete(_) => device::DISCRETE.to_owned(),
+        }),
+        ports,
         capture: spec.capture.as_ref().map(|c| c.get_ref().clone()),
         render: render.map(|r| r.get_ref().clone()),
     };
@@ -1980,7 +2022,7 @@ fn definition(
                 ) {
                     Some((slot, module)) => {
                         spans.devices.insert(instance.clone(), slot);
-                        (module.to_owned(), device.span(), true)
+                        (module, device.span(), true)
                     }
                     None => (String::new(), device.span(), false),
                 },

@@ -226,6 +226,8 @@ impl Project {
         let mut composites: Vec<Value> = self
             .composites
             .iter()
+            // A discrete device slot's composite is the slot's, never added.
+            .filter(|def| !crate::device::is_discrete_composite(&def.name))
             .map(|def| {
                 let (ports, parameters) = walk.interface(def, &|_| String::new());
                 let mut entry = json!({
@@ -575,7 +577,7 @@ impl Walk<'_> {
                 // layout; `std.audio_out` is `main`, stereo.
                 if def.name.is_empty() {
                     let device = match self.project.device_slots().get(name) {
-                        Some(slot) => Some(json!({"role": slot.role, "play": slot.play, "capture": slot.capture, "written": true})),
+                        Some(slot) => Some(json!({"role": slot.role, "play": slot.play, "ports": slot.ports, "capture": slot.capture, "written": true})),
                         None if instance.module == crate::device::STEREO_SINK => Some(
                             json!({"role": signal_output::MAIN, "play": "stereo", "written": false}),
                         ),

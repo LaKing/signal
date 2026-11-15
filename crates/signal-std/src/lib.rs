@@ -27,6 +27,7 @@
 //! | `std.audio_in_mono` | [`AudioInMono`] | direct source, a device slot's mono capture side | `io` |
 //! | `std.audio_out_mono`, `std.audio_out_quad`, `std.audio_out_5_1`, `std.audio_out_7_1` | [`AudioOutMono`], [`AudioOutQuad`], [`AudioOut51`], [`AudioOut71`] | direct, the audio sinks of ADR 0038 §2's other layouts | `io` |
 //! | `std.audio_tap_mono`, `std.audio_tap_quad`, `std.audio_tap_5_1`, `std.audio_tap_7_1` | [`AudioTapMono`], [`AudioTapQuad`], [`AudioTap51`], [`AudioTap71`] | direct, their taps (ADR 0035 §3) | `io` |
+//! | `std.device_out1` … `std.device_out64`, `std.device_out_tap1` … `std.device_out_tap64` | [`device_out::DeviceOut`], [`device_out::DeviceOutTap`] | direct, a discrete layout's sink (inputs `c1…cN`) and its tap (ADR 0038 §2) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
 //! | `std.onepole` | [`OnePole`] | direct | `filter` |
@@ -183,6 +184,7 @@ mod constant;
 mod count;
 mod dc_block;
 mod delay;
+pub mod device_out;
 mod edge;
 mod events;
 mod exciter;
@@ -545,6 +547,13 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     }
     for module_type in vector::types() {
         registry.register(*module_type)?;
+    }
+    // ADR 0038 §2: the discrete layouts' sinks, each width's, and theirs.
+    for module_type in device_out::types() {
+        registry.register(*module_type)?;
+    }
+    for (sink, tap) in device_out::sink_taps() {
+        registry.set_sink_tap(sink, tap);
     }
     for (name, ns) in COST_NS {
         registry.set_cost(name, ns);
@@ -1066,8 +1075,12 @@ mod tests {
                 + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()
+                + device_out::types().len()
         );
-        let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
+        let vectors = vector::types()
+            .iter()
+            .chain(device_out::types())
+            .map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
             .chain(SEQUENCERS)
@@ -1108,6 +1121,7 @@ mod tests {
                 + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()
+                + device_out::types().len()
         );
 
         // A type registered first under a std name blocks that name.

@@ -885,10 +885,40 @@ impl Project {
         errors: &mut Vec<Diagnostic>,
     ) -> Vec<CompositeDef> {
         let mut defs = self.content.defs.clone();
+        // ADR 0038 §7: a discrete device slot's composite exports what its
+        // tap gives, `<port>_out`, as a sink's tap does.
+        let mut discrete: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for def in &mut defs {
+            if !crate::device::is_discrete_composite(&def.name) {
+                continue;
+            }
+            let ports: Vec<String> = def.exports.inputs.iter().map(|e| e.name.clone()).collect();
+            def.exports.outputs = def
+                .exports
+                .inputs
+                .iter()
+                .filter_map(|e| {
+                    Some(OutputExport {
+                        name: format!("{}_out", e.name),
+                        from: format!("{}_out", e.to.first()?),
+                    })
+                })
+                .collect();
+            discrete.insert(def.name.clone(), ports);
+        }
         for def in &mut defs {
             let root = is_root(&def.name);
             let mut defaults = Vec::new();
             for instance in &mut def.instances {
+                if root && let Some(ports) = discrete.get(&instance.module) {
+                    for port in ports {
+                        defaults.push(OutputExport {
+                            name: port.clone(),
+                            from: format!("{}.{port}_out", instance.name),
+                        });
+                    }
+                    continue;
+                }
                 let Some(module_type) = registry.get(&instance.module) else {
                     continue;
                 };

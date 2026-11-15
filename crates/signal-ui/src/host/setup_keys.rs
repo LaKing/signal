@@ -267,9 +267,9 @@ impl Host {
         let Ok(planned) = project.plan(&self.registry) else {
             return Value::Null;
         };
-        let sides = signal_project::device::play_sides(&project, &planned.plan);
+        let play = signal_project::device::play_sides(&project, &planned.plan);
         let (setup, mut notices) = crate::devices::effective_setup(&self.setup, &self.local_dir());
-        let routing = crate::player::plan_routing(&self.devices, &setup, &sides, &mut notices);
+        let routing = crate::player::plan_routing(&self.devices, &setup, &play, &mut notices);
         notices.extend(routing.notices.iter().cloned());
         let sides: Vec<Value> = routing
             .sides
@@ -282,11 +282,17 @@ impl Host {
                     Heard::Missing(device) => ("missing", Some(device.clone()), None),
                     Heard::Version(address) => ("version", None, Some(address.to_string())),
                 };
+                let layout = play.iter().find(|p| p.address == side.address).map_or_else(
+                    || signal_project::device::layout_of_width(side.width),
+                    signal_project::device::side_layout,
+                );
                 json!({
                     "address": side.address.to_string(),
+                    // The device slot it plays for (a discrete slot's sink is one level down).
+                    "slot": signal_project::device::slot_of_sink(&side.address),
                     "role": side.role,
                     "playedAs": side.played_as,
-                    "layout": signal_project::device::layout_of_width(side.width),
+                    "layout": layout,
                     "heard": heard,
                     "device": device,
                     "version": version,

@@ -88,11 +88,13 @@ fn two_sinks_play_concatenated_in_the_routings_order() {
             address: address("/out"),
             role: MAIN.to_owned(),
             width: 2,
+            ports: Vec::new(),
         },
         PlaySide {
             address: address("/cue"),
             role: "cue".to_owned(),
             width: 2,
+            ports: Vec::new(),
         },
     ];
     let system = SoundSystem {
@@ -209,6 +211,7 @@ fn a_surround_main_is_folded_to_stereo() {
             address: address("/room"),
             role: MAIN.to_owned(),
             width: 6,
+            ports: Vec::new(),
         }];
         let routing = route(&sides, &system, Some(2));
         let (mut runner, _controller) = realtime_routed(
@@ -229,4 +232,30 @@ fn a_surround_main_is_folded_to_stereo() {
             assert_eq!(frame[1], signal_output::device_sample(r), "R at {n}");
         }
     }
+}
+
+/// ADR 0038 §5.5: a discrete side is never mixed: channel k on the role's
+/// channel k; those beyond the role's are not heard, named.
+#[test]
+fn a_discrete_side_plays_channel_for_channel_and_names_what_is_not_heard() {
+    let stems = PlaySide {
+        address: "/stems/play".parse().unwrap(),
+        role: "main".to_owned(),
+        width: 4,
+        ports: ["kick", "snare", "pad_l", "pad_r"]
+            .map(String::from)
+            .to_vec(),
+    };
+    let routing = route(&[stems], &SoundSystem::default(), Some(2));
+    let side = &routing.sides[0];
+    assert_eq!(side.mix, None, "never mixed");
+    assert_eq!(side.channels, [Some(1), Some(2), None, None]);
+    assert!(
+        routing
+            .notices
+            .iter()
+            .any(|n| n.contains("4 channels, this machine gives 2: pad_l, pad_r not heard")),
+        "{:?}",
+        routing.notices
+    );
 }

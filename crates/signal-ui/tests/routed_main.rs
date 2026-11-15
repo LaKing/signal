@@ -30,6 +30,7 @@ fn side(address: &str, width: usize) -> PlaySide {
         address: address.parse().unwrap(),
         role: "main".to_owned(),
         width,
+        ports: Vec::new(),
     }
 }
 
