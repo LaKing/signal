@@ -556,6 +556,7 @@ pub fn realtime_with(
         held: VecDeque::with_capacity(2 * limit),
         last_event: Frame::ZERO,
         last_edit: Frame::ZERO,
+        last_suspend: None,
         last_swap: None,
         counts: RunnerStatus::default(),
         rt: config.rt,
@@ -619,6 +620,9 @@ pub struct Runner {
     held: VecDeque<Back>,
     last_event: Frame,
     last_edit: Frame,
+    /// The last suspend's effective frame: a swap commits no sooner than its
+    /// fade's end ([`Engine::removal_swap_frame`]).
+    last_suspend: Option<Frame>,
     last_swap: Option<Frame>,
     counts: RunnerStatus,
     rt: RtOptions,
@@ -763,17 +767,26 @@ impl Runner {
             }
             Command::Suspend(address) => {
                 let pushed = self.engine.push_suspend(address, requested);
-                self.edit_taken(id, requested, next, pushed);
+                if let Some(frame) = self.edit_taken(id, requested, next, pushed) {
+                    self.last_suspend = Some(frame);
+                }
             }
             Command::Resume(address) => {
                 let pushed = self.engine.push_resume(address, requested);
                 self.edit_taken(id, requested, next, pushed);
             }
             Command::Swap(swap) => {
-                let frame = match self.last_swap {
+                let mut frame = match self.last_swap {
                     Some(last) => requested.max(next).max(Frame(last.0.saturating_add(1))),
                     None => requested.max(next),
                 };
+                // A removal's swap is stamped at its suspend's fade end; when
+                // both arrive late (a control-thread stall), they would take
+                // the same frame and the removal would not fade. No swap
+                // commits before the last suspend's fade has ended.
+                if let Some(suspend) = self.last_suspend {
+                    frame = frame.max(self.engine.removal_swap_frame(suspend));
+                }
                 if self.pending.len() < self.pending.capacity() {
                     self.last_swap = Some(frame);
                     self.pending.push_back(PendingSwap {
@@ -791,23 +804,26 @@ impl Runner {
     }
 
     /// A suspend or resume handed to the engine: its effective frame is the
-    /// latest of its stamp, the next frame and the last edit's.
+    /// latest of its stamp, the next frame and the last edit's. Returns that
+    /// frame, or `None` when the engine's queue refused it.
     fn edit_taken(
         &mut self,
         id: CommandId,
         requested: Frame,
         next: Frame,
         pushed: Result<(), EditFull>,
-    ) {
+    ) -> Option<Frame> {
         match pushed {
             Ok(()) => {
                 let frame = requested.max(next).max(self.last_edit);
                 self.last_edit = frame;
                 self.report(id, requested, frame, Outcome::Scheduled);
+                Some(frame)
             }
             Err(EditFull(address)) => {
                 self.report(id, requested, next, Outcome::Refused);
                 self.send_back(Back::Address(address));
+                None
             }
         }
     }

@@ -324,6 +324,46 @@ fn a_late_command_applies_on_the_next_frame_and_is_reported() {
     assert!(seen.lines.contains(&line), "{line}");
 }
 
+/// A removal's suspend and swap that both arrive late (a control-thread
+/// stall) do not take the same frame: the swap commits at the suspend's fade
+/// end, so the removed instance still fades out (the review of ADR 0037
+/// phase 2, 2026-10-28).
+#[test]
+fn a_late_removal_still_fades_before_its_swap() {
+    let mut added = false;
+    let mut removal = None;
+    let (_, seen, _, _) = run(config(), 2, 7, 4_000, |controller, seen| {
+        poll(controller, seen);
+        let now = controller.status().next_frame;
+        if !added && now >= Frame(100) {
+            controller.swap(&v1(), Stamp::At(now)).unwrap();
+            added = true;
+        }
+        if removal.is_none() && now >= Frame(1_000) {
+            let suspend = controller
+                .send_suspend(addr("/osc2"), Stamp::At(Frame(500)))
+                .unwrap();
+            let swap = controller.swap(&removed(), Stamp::At(Frame(505))).unwrap();
+            removal = Some((suspend, swap));
+        }
+    });
+    let (suspend, swap) = removal.unwrap();
+    let frame_of = |id| {
+        seen.reports
+            .iter()
+            .find(|(r, _)| r.id == id)
+            .map(|(r, _)| r.frame)
+            .unwrap()
+    };
+    let (suspended, swapped) = (frame_of(suspend), frame_of(swap));
+    assert!(suspended >= Frame(1_000), "late: {suspended:?}");
+    assert_eq!(
+        swapped,
+        Frame(suspended.0 + 5),
+        "the swap waits for the fade (F = 5)"
+    );
+}
+
 /// AC6: the default stamp is the reported frame plus two buffers.
 #[test]
 fn the_default_stamp_is_the_current_frame_plus_the_latency() {

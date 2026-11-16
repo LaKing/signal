@@ -131,7 +131,7 @@ A driver records the frame the engine applies a command at, not the frame it ask
 
 - an external event applies at `max(stamp, n, the last event's frame)`;
 - a suspend or resume applies at `max(stamp, n, the last suspend or resume's frame)`;
-- a swap committed directly with `Engine::commit_swap` (the offline driver, `signal replay`) applies at *n*, the next frame; a swap sent through the real-time `Controller` applies at `max(stamp, n, the last swap's frame + 1)`, and is reported at the frame it committed.
+- a swap committed directly with `Engine::commit_swap` (the offline driver, `signal replay`) applies at *n*, the next frame; a swap sent through the real-time `Controller` applies at `max(stamp, n, the last swap's frame + 1, the last suspend's frame + F)` (*F* the fade length: a removal whose suspend and swap both arrive late still fades), and is reported at the frame it committed.
 
 `SessionRecorder::event` and `SessionRecorder::edit` compute these, reserve a `seq`, and check the command against the version running now; the driver pushes what they return and records it with `applied_event`/`applied_edit` only once the engine has accepted it. Both `applied_event` and `applied_edit` check the command again against the version running at its effective frame, and refuse one the engine would discard. `applied_swap` records a swap (`applied_swap_as` with a `seq` the caller chose); record it before input meant for the instances it adds. `SessionRecorder::write` validates the whole session as `signal replay` would and writes nothing if it is invalid.
 
