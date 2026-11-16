@@ -334,10 +334,10 @@ impl Drop for MidiInput {
     }
 }
 
-/// A `midi` slot fed from CoreMIDI (ADR 0057 §1, §3): a thread reads the
-/// input's bytes into a [`MidiState`](signal_output::midi::MidiState) and
-/// hands each value that changed to the slot's
-/// [`MidiSource`](signal_output::midi::MidiSource). Stops when dropped.
+/// A `midi` slot fed from CoreMIDI (ADR 0057 §1, §3): a thread hands the
+/// input's bytes to a [`MidiWriter`](signal_output::midi::MidiWriter),
+/// which feeds the slot's [`MidiSource`](signal_output::midi::MidiSource).
+/// Stops when dropped.
 pub struct MidiFeed {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<MidiInput>>,
@@ -354,9 +354,7 @@ impl MidiFeed {
     ) -> Result<(MidiFeed, signal_output::midi::MidiSource), String> {
         let mut input = MidiInput::open(filter)?;
         let mut bytes = input.take_bytes().ok_or("no ring")?;
-        let (mut tx, rx) = RingBuffer::new(4096);
-        let source = signal_output::midi::MidiSource::new(rx, names.len());
-        let mut state = signal_output::midi::MidiState::new(names);
+        let (mut writer, source) = signal_output::midi::midi_channel(names);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sources = input.sources.clone();
         let thread = {
@@ -364,24 +362,9 @@ impl MidiFeed {
             std::thread::Builder::new()
                 .name("signal-midi".to_owned())
                 .spawn(move || {
-                    let mut last = state.values.clone();
                     while !stop.load(Ordering::Relaxed) {
                         let now = std::time::Instant::now();
-                        let mut any = false;
-                        while let Ok(byte) = bytes.pop() {
-                            state.byte(byte, now);
-                            any = true;
-                        }
-                        if any {
-                            for (i, (value, before)) in
-                                state.values.iter().zip(last.iter_mut()).enumerate()
-                            {
-                                if value.to_bits() != before.to_bits() {
-                                    *before = *value;
-                                    let _ = tx.push((i as u16, *value));
-                                }
-                            }
-                        }
+                        writer.bytes(std::iter::from_fn(|| bytes.pop().ok()), now);
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     input

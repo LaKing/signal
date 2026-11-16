@@ -1,0 +1,47 @@
+# Clock follow (M6, ADR 0057 §3): drums that follow an external MIDI clock.
+# The slot `clock` (role `clock`) reads a MIDI clock's position in beats
+# (24 ticks a quarter note, from its Start); the step sequencer follows it
+# (ADR 0033 §3), so the drums play at the clock's tempo, stop with it, and
+# start from the downbeat on its next Start. Before the first Start the
+# position stays 0 and nothing plays.
+#
+#   clock.clock_position ─► drums.follow ─► kick, snare, hats ─► out
+#
+# Live: `signal play projects/clock-follow --midi clock=<MIDI source name>`
+# (a DAW, a drum machine or a MIDI interface sending clock), or in
+# Signal.app with the Setup's `[capture.clock] midi = "<name>"`. The
+# position moves once a tick and is read at the start of each block, so a
+# step lands within a block of its tick.
+#
+# Safe gain: the drums at most 0.25 on `main`.
+schema_version = 1
+
+[project]
+name = "clock-follow"
+sample_rate = 48000
+seed = 5
+
+[instances]
+clock = { device = { kind = "midi", capture = ["clock_position"], role = "clock" } }
+drums = { module = "std.step_seq8", pattern = "drums" }
+kick = { module = "kick909" }
+snare = { module = "snare909" }
+hats = { module = "hat909" }
+drum_mix = { module = "std.mix" }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "clock.clock_position", to = "drums.follow" },
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "hats.closed" },
+  { from = "drums.t3", to = "hats.closed_velocity" },
+  { from = "kick.out", to = "drum_mix.a" },
+  { from = "snare.out", to = "drum_mix.b" },
+  { from = "hats.out", to = "drum_mix.c" },
+  { from = "drum_mix.out", to = "out.l" },
+  { from = "drum_mix.out", to = "out.r" },
+]

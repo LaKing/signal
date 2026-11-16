@@ -12,10 +12,17 @@
 //! `bend` (−1–1), and from a MIDI clock (24 ticks a quarter note)
 //! `clock_position` (beats since its start), `clock_running` (0/1) and
 //! `clock_tempo` (bpm, from the ticks of the last beat).
+//!
+//! A clock's Start is a block boundary: [`MidiWriter`] hands the values as
+//! they stand after it, then a barrier, so the source's next read applies
+//! the restarted position alone and the read after it the first tick. A
+//! Start and its first tick read in one block would look like a jump back
+//! to that tick, a seek to a follower (ADR 0033 §3), and the downbeat would
+//! not play.
 
 use std::time::Instant;
 
-use rtrb::Consumer;
+use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::inputs::InputSource;
 
@@ -219,26 +226,67 @@ impl MidiState {
     }
 }
 
+/// In a source's ring, the end of what one read applies.
+const BARRIER: u16 = u16::MAX;
+
+/// A `midi` slot's control-thread end and its audio-thread end, for a slot
+/// capturing `names`.
+pub fn midi_channel(names: &[String]) -> (MidiWriter, MidiSource) {
+    let (tx, rx) = RingBuffer::new(4096);
+    let state = MidiState::new(names);
+    let source = MidiSource {
+        rx,
+        values: vec![0.0; names.len()],
+    };
+    let last = state.values.clone();
+    (MidiWriter { state, last, tx }, source)
+}
+
+/// The control thread's end of a `midi` slot: reads the bytes into a
+/// [`MidiState`] and hands each value that changed to the [`MidiSource`].
+pub struct MidiWriter {
+    state: MidiState,
+    last: Vec<f32>,
+    tx: Producer<(u16, f32)>,
+}
+
+impl MidiWriter {
+    /// Reads `bytes`, received at `now`, and hands what changed; a Start
+    /// hands what changed up to it, then a barrier.
+    pub fn bytes(&mut self, bytes: impl IntoIterator<Item = u8>, now: Instant) {
+        for byte in bytes {
+            self.state.byte(byte, now);
+            if byte == 0xFA {
+                self.flush();
+                let _ = self.tx.push((BARRIER, 0.0));
+            }
+        }
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        for (i, (value, before)) in self.state.values.iter().zip(&mut self.last).enumerate() {
+            if value.to_bits() != before.to_bits() {
+                *before = *value;
+                let _ = self.tx.push((i as u16, *value));
+            }
+        }
+    }
+}
+
 /// The audio thread's end of a `midi` slot: the values the control thread
-/// computed, applied at the start of each read and held.
+/// computed, applied at the start of each read (up to a barrier) and held.
 pub struct MidiSource {
     rx: Consumer<(u16, f32)>,
     values: Vec<f32>,
 }
 
-impl MidiSource {
-    /// A source of `width` values fed by `rx` (index, value).
-    pub fn new(rx: Consumer<(u16, f32)>, width: usize) -> MidiSource {
-        MidiSource {
-            rx,
-            values: vec![0.0; width],
-        }
-    }
-}
-
 impl InputSource for MidiSource {
     fn read(&mut self, out: &mut [f32], _offset: usize) -> usize {
         while let Ok((index, value)) = self.rx.pop() {
+            if index == BARRIER {
+                break;
+            }
             if let Some(slot) = self.values.get_mut(usize::from(index)) {
                 *slot = value;
             }
@@ -318,5 +366,25 @@ mod tests {
             (s.values[0] - 49.0 / 24.0).abs() < 1e-6,
             "stopped: no ticks counted"
         );
+    }
+
+    #[test]
+    fn a_start_and_its_first_tick_are_read_in_two_blocks() {
+        let (mut writer, mut source) = midi_channel(&names(&["clock_position"]));
+        let now = Instant::now();
+        let mut out = [9.0f32; 4];
+        writer.bytes([0xFA, 0xF8, 0xF8, 0xFC], now);
+        source.read(&mut out, 0);
+        assert_eq!(out, [0.0; 4], "the first tick waits for the next block");
+        source.read(&mut out, 0);
+        assert_eq!(out, [2.0 / 24.0; 4]);
+        // A restart from a later place: 2/24, then 0, then the first tick.
+        writer.bytes([0xFA, 0xF8], now);
+        source.read(&mut out, 0);
+        assert_eq!(out, [0.0; 4], "the restart is read alone");
+        source.read(&mut out, 0);
+        assert_eq!(out, [1.0 / 24.0; 4]);
+        source.read(&mut out, 0);
+        assert_eq!(out, [1.0 / 24.0; 4], "held");
     }
 }
