@@ -307,3 +307,49 @@ fn own_copy_refuses_a_dmx_slot() {
         .to_string();
     assert!(error.contains("dmx"), "{error}");
 }
+
+/// ADR 0035 §3: a sink inside the copied project's own composite is a tap,
+/// as the include planned it; left a sink, the host would have two main
+/// outputs. An identical composite the host already has is reused only if
+/// its text is the tapped one.
+#[test]
+fn own_copy_taps_sinks_inside_its_composites() {
+    let base = fixture("own-composite-sink");
+    let host = base.join("host");
+    let src = base.join("src");
+    write(
+        &host,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"host\"\n[instances]\ns = { slot = { outputs = { tone = {} } }, load = \"../src\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"s.tone\", to = \"out.l\" }]\n",
+    );
+    write(
+        &src,
+        "composites/voice.toml",
+        "schema_version = 1\n[composite]\nname = \"voice\"\n[instances]\nosc = { module = \"std.sine_osc\" }\nmon = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"osc.out\", to = \"mon.l\" }]\n[exports]\noutputs = { out = \"osc.out\" }\n",
+    );
+    write(
+        &src,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"src\"\n[instances]\nv = { module = \"voice\" }\n[exports]\noutputs = { tone = \"v.out\" }\n",
+    );
+    let shape = |dir: &Path| {
+        let plan = Project::load(dir).unwrap().plan(&reg()).unwrap().plan;
+        let mut types: Vec<(String, &str)> = plan
+            .instances
+            .iter()
+            .map(|i| (i.address.to_string(), i.type_name))
+            .collect();
+        types.sort();
+        types
+    };
+    let before = shape(&host);
+    assert!(
+        before.contains(&("/s/v/mon".to_owned(), "std.audio_tap")),
+        "{before:?}"
+    );
+    let p = signal_project::vendor::prepare_slot(&host, "s", Library::builtin()).unwrap();
+    signal_project::vendor::write(&host, p, Library::builtin()).unwrap();
+    assert_eq!(shape(&host), before, "the copy plans as the include did");
+    let copied = fs::read_to_string(host.join("composites/voice.toml")).unwrap();
+    assert!(copied.contains("std.audio_tap"), "{copied}");
+}

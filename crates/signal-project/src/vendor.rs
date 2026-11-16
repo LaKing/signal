@@ -361,7 +361,7 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
         .ok_or_else(|| invalid(format!("`{slot}` links no project (`load = \"<path>\"`)")))?
         .to_owned();
     let source_dir = dir.join(&load);
-    let source = project_sources(&source_dir)?;
+    let source = tap_composites(project_sources(&source_dir)?)?;
     let text = |path: &str| {
         source
             .iter()
@@ -647,7 +647,7 @@ pub fn prepare_include(
         .to_owned();
     let source_dir = crate::include_folder(dir, &path)
         .ok_or_else(|| invalid(format!("`{key}`: `{path}` does not unpack")))?;
-    let source = project_sources(&source_dir)?;
+    let source = tap_composites(project_sources(&source_dir)?)?;
     let text = |path: &str| {
         source
             .iter()
@@ -1143,6 +1143,13 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
                     let layout = crate::device::layout_of_sink(&sink).unwrap_or("stereo");
                     let channels = crate::device::layout_channels(layout).unwrap_or(&[]);
                     sinks.push((name, channel_exports(channels)));
+                } else if let Some(pass) = crate::device::pass_of_source(&sink) {
+                    // ADR 0038 §7: a source written as a module, its pass.
+                    replace(module, &pass);
+                    for port in source_outputs(&sink) {
+                        capture_inputs
+                            .push((format!("{name}_{port}"), format!("{name}.{port}_in")));
+                    }
                 }
                 continue;
             }
@@ -1375,6 +1382,85 @@ fn retarget_ports(document: &mut DocumentMut, ports: &BTreeMap<String, String>) 
             }
         }
     }
+}
+
+/// What a module of a copied project plans as inside another (ADR 0035 §3,
+/// ADR 0038 §7): a sink's tap or a source's pass-through; `None` for any
+/// other module.
+fn planned_inside(module: &str) -> Option<String> {
+    if let Some(tap) = crate::device::tap_of_sink(module) {
+        return Some(tap.to_owned());
+    }
+    if let Some(width) = module
+        .strip_prefix("std.device_out")
+        .and_then(|w| w.parse::<usize>().ok())
+    {
+        return Some(format!("std.device_out_tap{width}"));
+    }
+    crate::device::pass_of_source(module)
+}
+
+/// The signal outputs of capture source `module`, in order.
+fn source_outputs(module: &str) -> Vec<String> {
+    match module {
+        crate::device::STEREO_SOURCE => vec!["l".to_owned(), "r".to_owned()],
+        crate::device::MONO_SOURCE => vec!["m".to_owned()],
+        other => {
+            let width = other
+                .strip_prefix("std.device_in")
+                .or_else(|| other.strip_prefix("std.control_in"))
+                .and_then(|w| w.parse::<usize>().ok())
+                .unwrap_or(0);
+            (1..=width).map(|k| format!("c{k}")).collect()
+        }
+    }
+}
+
+/// A copied project's own composites as an include plans them (ADR 0035
+/// §3, ADR 0038 §7): each sink its tap, each capture source its
+/// pass-through, before their texts are compared with the host's (an
+/// identical file is reused). A text with neither is kept byte for byte; a
+/// data sink (`std.data_out<N>`, no tap) is refused.
+fn tap_composites(files: Vec<SourceFile>) -> Result<Vec<SourceFile>, VendorError> {
+    files
+        .into_iter()
+        .map(|mut file| {
+            if !file.path.starts_with(&format!("{COMPOSITES}/")) {
+                return Ok(file);
+            }
+            let mut document = parse(&file.path, &file.text)?;
+            let mut changed = false;
+            if let Some(instances) = document
+                .get_mut("instances")
+                .and_then(Item::as_table_like_mut)
+            {
+                for (name, entry) in instances.iter_mut() {
+                    let Some(module) = entry.as_table_like_mut().and_then(|e| e.get_mut("module"))
+                    else {
+                        continue;
+                    };
+                    let Some(old) = module.as_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    if old.starts_with("std.data_out") {
+                        return Err(VendorError::InvalidName(format!(
+                            "{}: `{}` sends data to the machine (`{old}`), which a project inside another cannot (ADR 0057 §1)",
+                            file.path,
+                            name.get()
+                        )));
+                    }
+                    if let Some(new) = planned_inside(&old) {
+                        replace(module, &new);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                file.text = document.to_string();
+            }
+            Ok(file)
+        })
+        .collect()
 }
 
 fn parse(path: &str, text: &str) -> Result<DocumentMut, VendorError> {
