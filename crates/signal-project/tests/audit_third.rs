@@ -37,17 +37,86 @@ fn included_capture_never_opens_machine_input() {
     );
     let project = Project::load(&base).unwrap();
     // ADR 0038 §7: only the host's roles reach the machine. The included
-    // capture is refused (its pass-through is not built), never routed to
-    // the default microphone as `main`.
-    let refused = project
-        .plan(&reg())
-        .err()
-        .expect("an included capture is refused");
+    // capture is a pass-through the host wires (`x.mic_m`) or leaves at 0,
+    // never routed to the default microphone as `main`.
+    let plan = project.plan(&reg()).unwrap().plan;
     assert!(
-        refused
+        plan.instances.iter().all(|i| i.descriptor.source.is_none()),
+        "no source in the plan"
+    );
+    let mic = plan
+        .instances
+        .iter()
+        .find(|i| i.address.as_str() == "/x/mic")
+        .unwrap();
+    assert_eq!(mic.type_name, "std.audio_in_mono_pass");
+    assert!(signal_project::device::capture_sides(&project, &plan).is_empty());
+}
+
+/// ADR 0038 §7: the host feeds an included project's capture sides through
+/// the inputs they export, `<slot>_<port>`; Make own copy writes the same
+/// pass-throughs and exports, so the plan's wiring is unchanged.
+#[test]
+fn included_captures_are_inputs_the_host_wires_and_copies_keep_them() {
+    let base = fixture("included-capture-wired");
+    let host = base.join("host");
+    let src = base.join("src");
+    write(
+        &src,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"src\"\n[instances]\nmic = { device = { capture = \"mono\", role = \"vocal\" }, render = \"take.wav\" }\nband = { device = { capture = [\"vox\", \"gtr\"], role = \"band\" } }\nmix = { module = \"std.mix\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"mic.m\", to = \"mix.a\" }, { from = \"band.gtr\", to = \"mix.b\" }, { from = \"mix.out\", to = \"out.l\" }]\n",
+    );
+    write(
+        &host,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"host\"\n[instances]\nosc = { module = \"std.sine_osc\" }\ns = { slot = { inputs = { mic_m = {}, band_gtr = {} }, outputs = { l = {} } }, load = \"../src\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"osc.out\", to = \"s.mic_m\" }, { from = \"osc.out\", to = \"s.band_gtr\" }, { from = \"s.l\", to = \"out.l\" }]\n",
+    );
+    let wiring = |dir: &Path| {
+        let project = Project::load(dir).unwrap();
+        let plan = project.plan(&reg()).unwrap().plan;
+        assert!(plan.instances.iter().all(|i| i.descriptor.source.is_none()));
+        let mut types: Vec<(String, &str)> = plan
+            .instances
             .iter()
-            .any(|d| d.message.contains("captures from the machine")),
-        "{refused:?}"
+            .filter(|i| i.type_name.contains("_pass"))
+            .map(|i| (i.address.to_string(), i.type_name))
+            .collect();
+        types.sort();
+        let mut sources: Vec<(String, String)> = plan
+            .sources
+            .iter()
+            .filter(|(to, s)| to.to_string().starts_with("/s/") && !s.is_empty())
+            .map(|(to, s)| (to.to_string(), s[0].from.to_string()))
+            .collect();
+        sources.sort();
+        (types, sources)
+    };
+    let before = wiring(&host);
+    let p = signal_project::vendor::prepare_slot(&host, "s", Library::builtin()).unwrap();
+    signal_project::vendor::write(&host, p, Library::builtin()).unwrap();
+    let after = wiring(&host);
+    eprintln!("{before:#?}\n{after:#?}");
+    assert!(
+        before
+            .1
+            .contains(&("/s/mic.m_in".to_owned(), "/osc.out".to_owned())),
+        "the host feeds the mic: {before:?}"
+    );
+    assert_eq!(after.0.len(), 2, "{after:?}");
+    assert!(
+        after
+            .1
+            .contains(&("/s/mic.m_in".to_owned(), "/osc.out".to_owned()))
+    );
+    assert!(
+        after
+            .1
+            .contains(&("/s/band.c2_in".to_owned(), "/osc.out".to_owned()))
+    );
+    assert!(
+        after
+            .1
+            .contains(&("/s/mix.b".to_owned(), "/s/band.c2".to_owned()))
     );
 }
 

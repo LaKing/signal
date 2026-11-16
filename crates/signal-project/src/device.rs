@@ -81,6 +81,24 @@ pub fn tap_of_sink(module: &str) -> Option<&'static str> {
         .map(|(_, tap)| *tap)
 }
 
+/// The pass-through capture side source `module` plans as inside another
+/// project (ADR 0038 §7), if it is one: its outputs keep the source's
+/// names, its inputs are those names with `_in`, which the host wires.
+pub fn pass_of_source(module: &str) -> Option<String> {
+    match module {
+        STEREO_SOURCE => Some("std.audio_in_pass".to_owned()),
+        MONO_SOURCE => Some("std.audio_in_mono_pass".to_owned()),
+        other => {
+            let width = other
+                .strip_prefix("std.device_in")
+                .or_else(|| other.strip_prefix("std.control_in"))?;
+            let n: usize = width.parse().ok()?;
+            ((1..=MAX_DISCRETE).contains(&n) && width == n.to_string())
+                .then(|| format!("std.device_in_pass{n}"))
+        }
+    }
+}
+
 /// Whether `module` is a play side's sink (`std.audio_out` or another
 /// layout's, ADR 0038 §2).
 pub fn is_play_sink(module: &str) -> bool {

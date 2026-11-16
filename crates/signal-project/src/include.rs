@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use signal_core::{Direction, PortShape, Registry, fnv1a64};
-use signal_graph::{CompositeDef, OutputExport, ScopeDef};
+use signal_graph::{CompositeDef, InputExport, OutputExport, ScopeDef};
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::library::{Library, is_library_file};
@@ -888,10 +888,25 @@ impl Project {
         // ADR 0038 §7: a discrete device slot's composite exports what its
         // tap gives, `<port>_out`, as a sink's tap does.
         let mut discrete: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // ADR 0038 §7: a discrete capture side's composite takes what its
+        // pass-through passes, an input `<port>_in` for each output.
+        let mut captures: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for def in &mut defs {
-            // A capture side's composite exports outputs already (and its
-            // source is refused below).
-            if !crate::device::is_discrete_composite(&def.name) || def.exports.inputs.is_empty() {
+            if !crate::device::is_discrete_composite(&def.name) {
+                continue;
+            }
+            if def.exports.inputs.is_empty() {
+                def.exports.inputs = def
+                    .exports
+                    .outputs
+                    .iter()
+                    .map(|e| InputExport {
+                        name: format!("{}_in", e.name),
+                        to: vec![format!("{}_in", e.from)],
+                    })
+                    .collect();
+                let ports = def.exports.outputs.iter().map(|e| e.name.clone()).collect();
+                captures.insert(def.name.clone(), ports);
                 continue;
             }
             let ports: Vec<String> = def.exports.inputs.iter().map(|e| e.name.clone()).collect();
@@ -911,7 +926,22 @@ impl Project {
         for def in &mut defs {
             let root = is_root(&def.name);
             let mut defaults = Vec::new();
+            // ADR 0038 §7: the root's capture sides as inputs the host wires,
+            // `<slot>_<port>`.
+            let mut capture_inputs: Vec<(InputExport, crate::locate::Location)> = Vec::new();
             for instance in &mut def.instances {
+                let location = self
+                    .spans
+                    .composites
+                    .get(&def.name)
+                    .and_then(|spans| {
+                        let at = spans.instances.get(&instance.name)?.module_span.start;
+                        Some(crate::locate::Location {
+                            file: spans.file,
+                            offset: at,
+                        })
+                    })
+                    .unwrap_or(crate::locate::Location { file: 0, offset: 0 });
                 if root && let Some(ports) = discrete.get(&instance.module) {
                     for port in ports {
                         defaults.push(OutputExport {
@@ -921,30 +951,49 @@ impl Project {
                     }
                     continue;
                 }
+                if root && let Some(ports) = captures.get(&instance.module) {
+                    for port in ports {
+                        let export = InputExport {
+                            name: format!("{}_{port}", instance.name),
+                            to: vec![format!("{}.{port}_in", instance.name)],
+                        };
+                        capture_inputs.push((export, location));
+                    }
+                    continue;
+                }
                 let Some(module_type) = registry.get(&instance.module) else {
                     continue;
                 };
                 let descriptor = module_type.descriptor;
-                let location = || {
-                    self.spans
-                        .composites
-                        .get(&def.name)
-                        .and_then(|spans| {
-                            let at = spans.instances.get(&instance.name)?.module_span.start;
-                            Some(crate::locate::Location {
-                                file: spans.file,
-                                offset: at,
-                            })
-                        })
-                        .unwrap_or(crate::locate::Location { file: 0, offset: 0 })
-                };
+                let at = location;
+                let location = || at;
                 // ADR 0038 §7: only the host's roles reach the machine. An
-                // included capture side is to become a pass-through the host
-                // wires; until that is built, it is refused rather than
-                // opening the machine's input (the audit of 2026-11-15).
+                // included capture side is its pass-through, its outputs
+                // the inputs the host wires or leaves at 0; a source with
+                // none is refused rather than opening the machine's input
+                // (the audit of 2026-11-15).
+                if let Some(pass) = descriptor
+                    .source
+                    .and_then(|_| crate::device::pass_of_source(descriptor.type_name))
+                {
+                    if root {
+                        let outputs = descriptor.ports.iter().filter(|p| {
+                            p.direction == Direction::Out && p.shape == PortShape::Signal
+                        });
+                        for port in outputs {
+                            let export = InputExport {
+                                name: format!("{}_{}", instance.name, port.name),
+                                to: vec![format!("{}.{}_in", instance.name, port.name)],
+                            };
+                            capture_inputs.push((export, at));
+                        }
+                    }
+                    instance.module = pass;
+                    continue;
+                }
                 if descriptor.source.is_some() {
                     let message = format!(
-                        "{}: `{}` captures from the machine, so this project cannot play inside another yet; only the host captures (ADR 0038 §7)",
+                        "{}: `{}` captures from the machine and has no pass-through, so this project cannot play inside another; only the host captures (ADR 0038 §7)",
                         instance.name, descriptor.type_name
                     );
                     let diagnostic = self.diagnostic(Severity::Error, location(), message);
@@ -985,6 +1034,23 @@ impl Project {
             // ADR 0035 §2: no `[exports] outputs`: the sinks' channels.
             if root && def.exports.outputs.is_empty() {
                 def.exports.outputs = defaults;
+            }
+            for (export, location) in capture_inputs {
+                let taken = def.exports.inputs.iter().any(|e| e.name == export.name)
+                    || def.exports.outputs.iter().any(|e| e.name == export.name)
+                    || def.exports.parameters.iter().any(|e| e.name == export.name);
+                if taken {
+                    let message = format!(
+                        "`{}` is exported already, and the capture side it names becomes that input inside another project (ADR 0038 §7); rename the export",
+                        export.name
+                    );
+                    let diagnostic = self.diagnostic(Severity::Error, location, message);
+                    if !errors.contains(&diagnostic) {
+                        errors.push(diagnostic);
+                    }
+                    continue;
+                }
+                def.exports.inputs.push(export);
             }
         }
         defs

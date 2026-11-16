@@ -25,6 +25,7 @@
 //! | `std.audio_tap` | [`AudioTap`] | direct, the tap of `std.audio_out` (ADR 0035 §3) | `io` |
 //! | `std.audio_in` | [`AudioIn`] | direct source, a device slot's stereo capture side (ADR 0038 §7) | `io` |
 //! | `std.audio_in_mono` | [`AudioInMono`] | direct source, a device slot's mono capture side | `io` |
+//! | `std.audio_in_pass`, `std.audio_in_mono_pass`, `std.device_in_pass1` … `std.device_in_pass64` | [`AudioInPass`], [`AudioInMonoPass`], `source_pass::DeviceInPass` | direct, a capture side inside another project: its outputs are its inputs `<out>_in`, which the host wires (ADR 0038 §7) | `io` |
 //! | `std.audio_out_mono`, `std.audio_out_quad`, `std.audio_out_5_1`, `std.audio_out_7_1` | [`AudioOutMono`], [`AudioOutQuad`], [`AudioOut51`], [`AudioOut71`] | direct, the audio sinks of ADR 0038 §2's other layouts | `io` |
 //! | `std.audio_tap_mono`, `std.audio_tap_quad`, `std.audio_tap_5_1`, `std.audio_tap_7_1` | [`AudioTapMono`], [`AudioTapQuad`], [`AudioTap51`], [`AudioTap71`] | direct, their taps (ADR 0035 §3) | `io` |
 //! | `std.spectrum512`, `std.spectrum2048` | [`Spectrum`] | direct, a windowed magnitude spectrum as a vector of N/2 bins with its peak (ADR 0055) | `analysis` |
@@ -236,6 +237,7 @@ mod random;
 mod sample_hold;
 mod sampler;
 mod sine_osc;
+mod source_pass;
 mod spectrum;
 mod state;
 mod step_seq;
@@ -307,6 +309,7 @@ pub use random::Random;
 pub use sample_hold::SampleHold;
 pub use sampler::Sampler;
 pub use sine_osc::SineOsc;
+pub use source_pass::{AudioInMonoPass, AudioInPass};
 pub use spectrum::Spectrum;
 pub use state::{Counter, Integrator, Phasor};
 pub use step_seq::StepSeq;
@@ -464,6 +467,8 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<AudioTap>(),
         direct::<AudioIn>(),
         direct::<AudioInMono>(),
+        direct::<AudioInPass>(),
+        direct::<AudioInMonoPass>(),
         direct::<AudioOutMono>(),
         direct::<AudioOutQuad>(),
         direct::<AudioOut51>(),
@@ -599,6 +604,10 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     }
     // ADR 0038 §2, §7: the discrete capture sides' sources, each width's.
     for module_type in device_in::types() {
+        registry.register(*module_type)?;
+    }
+    // ADR 0038 §7: a capture side inside another project, each width's.
+    for module_type in source_pass::types() {
         registry.register(*module_type)?;
     }
     for (name, ns) in COST_NS {
@@ -922,7 +931,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 86] = [
+    const NAMES: [&str; 88] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -937,6 +946,8 @@ mod tests {
         "std.audio_tap",
         "std.audio_in",
         "std.audio_in_mono",
+        "std.audio_in_pass",
+        "std.audio_in_mono_pass",
         "std.audio_out_mono",
         "std.audio_out_quad",
         "std.audio_out_5_1",
@@ -1133,6 +1144,7 @@ mod tests {
                 + data_out::types().len()
                 + control_in::types().len()
                 + device_in::types().len()
+                + source_pass::types().len()
         );
         let vectors = vector::types()
             .iter()
@@ -1140,6 +1152,7 @@ mod tests {
             .chain(data_out::types())
             .chain(control_in::types())
             .chain(device_in::types())
+            .chain(source_pass::types())
             .map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
@@ -1189,6 +1202,7 @@ mod tests {
                 + data_out::types().len()
                 + control_in::types().len()
                 + device_in::types().len()
+                + source_pass::types().len()
         );
 
         // A type registered first under a std name blocks that name.
@@ -1216,7 +1230,7 @@ mod tests {
         }
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
         // The M2.10-2 types (`std.merge`, ADR 0054, sits among the event types before them).
-        for name in NAMES[51..].iter().copied().chain(vectors) {
+        for name in NAMES[53..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");

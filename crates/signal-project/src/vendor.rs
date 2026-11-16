@@ -1106,15 +1106,19 @@ impl<'d> Written<'d> {
 /// for those exports (empty when they went into an `[exports]` table). A
 /// discrete slot becomes `std.device_out_tap<N>`, its ports' wires moved to
 /// `c1 … cN` and its ports exported by name, as an include plans it. A
-/// capture side is refused, as it is inside another project; so are a
-/// `dmx` slot (a data sink has no tap), several sinks and no outputs named.
-/// `what` names the project.
+/// capture side becomes its pass-through (`std.audio_in_pass`,
+/// `std.audio_in_mono_pass`, `std.device_in_pass<N>`), each channel an
+/// exported input `<slot>_<port>`, as an include plans it. Refused: a `dmx`
+/// slot (a data sink has no tap), several sinks and no outputs named, a
+/// capture input whose name is exported already. `what` names the project.
 fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorError> {
     let invalid = |m: String| VendorError::InvalidName(m);
     // Each sink's exports: the exported name and the tap's output.
     let mut sinks: Vec<(String, Vec<(String, String)>)> = Vec::new();
     // A discrete slot's ports, `<slot>.<port>`, as the tap's `<slot>.c<k>`.
     let mut ports: BTreeMap<String, String> = BTreeMap::new();
+    // The capture sides' inputs: the exported name and the pass's input.
+    let mut capture_inputs: Vec<(String, String)> = Vec::new();
     let channel_exports = |channels: &[&str]| {
         channels
             .iter()
@@ -1145,15 +1149,51 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
             let Some(device) = entry.get("device") else {
                 continue;
             };
-            if device.get("capture").is_some() {
-                return Err(invalid(format!(
-                    "{what}: `{name}` captures from the machine, which a project inside another cannot yet (ADR 0038 §7)"
-                )));
-            }
-            let Some(play) = device.get("play") else {
-                continue;
+            let names_of = |item: &Item| -> Vec<String> {
+                item.as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default()
             };
-            let tap = if let Some(layout) = play.as_str() {
+            let tap = if let Some(capture) = device.get("capture") {
+                // ADR 0038 §7: its pass-through, its channels inputs.
+                let (pass, channels) = if let Some(layout) = capture.as_str() {
+                    let source = crate::device::planned_source(layout)
+                        .map_err(|e| invalid(format!("{what}: `{name}`: {e}")))?;
+                    let channels: Vec<(String, String)> = crate::device::layout_channels(layout)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|c| ((*c).to_owned(), (*c).to_owned()))
+                        .collect();
+                    (crate::device::pass_of_source(source), channels)
+                } else {
+                    let names = names_of(capture);
+                    if let Some(problem) = crate::device::discrete_problem(&names) {
+                        return Err(invalid(format!("{what}: `{name}`: {problem}")));
+                    }
+                    let mut channels = Vec::new();
+                    for (k, port) in names.iter().enumerate() {
+                        ports.insert(format!("{name}.{port}"), format!("{name}.c{}", k + 1));
+                        channels.push((port.clone(), format!("c{}", k + 1)));
+                    }
+                    let pass = format!("std.device_in{}", names.len());
+                    (crate::device::pass_of_source(&pass), channels)
+                };
+                let pass = pass.ok_or_else(|| {
+                    invalid(format!(
+                        "{what}: `{name}` captures what no pass-through takes"
+                    ))
+                })?;
+                for (port, input) in channels {
+                    capture_inputs.push((format!("{name}_{port}"), format!("{name}.{input}_in")));
+                }
+                pass
+            } else if let Some(play) = device.get("play")
+                && let Some(layout) = play.as_str()
+            {
                 let sink = crate::device::planned_module(layout)
                     .map_err(|e| invalid(format!("{what}: `{name}`: {e}")))?;
                 let channels = crate::device::layout_channels(layout).unwrap_or(&[]);
@@ -1161,21 +1201,14 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
                 crate::device::tap_of_sink(sink)
                     .unwrap_or("std.audio_tap")
                     .to_owned()
-            } else {
+            } else if let Some(play) = device.get("play") {
                 // ADR 0038 §2, §7: a discrete slot, its ports by name.
                 if device.get("kind").and_then(Item::as_str) == Some(crate::device::DMX) {
                     return Err(invalid(format!(
                         "{what}: `{name}` sends data to the machine (a `dmx` slot), which a project inside another cannot (ADR 0057 §1)"
                     )));
                 }
-                let names: Vec<String> = play
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let names = names_of(play);
                 if let Some(problem) = crate::device::discrete_problem(&names) {
                     return Err(invalid(format!("{what}: `{name}`: {problem}")));
                 }
@@ -1187,9 +1220,13 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
                 let width = names.len();
                 sinks.push((name, exports));
                 format!("std.device_out_tap{width}")
+            } else {
+                continue;
             };
             let tap = tap.as_str();
             entry.remove("device");
+            // A capture slot's offline `render` file feeds a source only.
+            entry.remove("render");
             if let Some(table) = item.as_inline_table_mut() {
                 let mut rebuilt = toml_edit::InlineTable::new();
                 rebuilt.insert("module", Value::from(tap));
@@ -1204,35 +1241,90 @@ fn tap_root(document: &mut DocumentMut, what: &str) -> Result<String, VendorErro
         }
     }
     retarget_ports(document, &ports);
+    let exported = |key: &str, name: &str| {
+        document
+            .get("exports")
+            .and_then(|e| e.get(key))
+            .and_then(Item::as_table_like)
+            .is_some_and(|t| t.contains_key(name))
+    };
+    if let Some((name, _)) = capture_inputs.iter().find(|(n, _)| {
+        ["inputs", "outputs", "parameters"]
+            .iter()
+            .any(|k| exported(k, n))
+    }) {
+        return Err(invalid(format!(
+            "{what}: `{name}` is exported already, and a capture side becomes that input inside another project (ADR 0038 §7); rename the export"
+        )));
+    }
     let has_outputs = document
         .get("exports")
         .and_then(|e| e.get("outputs"))
         .is_some();
-    if has_outputs || sinks.is_empty() {
-        return Ok(String::new());
-    }
-    let [(sink, channels)] = sinks.as_slice() else {
-        return Err(invalid(format!(
-            "{what} has several sinks: name its outputs in its [exports] first"
-        )));
+    let outputs = if has_outputs || sinks.is_empty() {
+        None
+    } else {
+        let [(sink, channels)] = sinks.as_slice() else {
+            return Err(invalid(format!(
+                "{what} has several sinks: name its outputs in its [exports] first"
+            )));
+        };
+        let mut outputs = toml_edit::InlineTable::new();
+        for (export, port) in channels {
+            outputs.insert(export, Value::from(format!("{sink}.{port}")));
+        }
+        Some(outputs)
     };
-    let mut outputs = toml_edit::InlineTable::new();
-    for (export, port) in channels {
-        outputs.insert(export, Value::from(format!("{sink}.{port}")));
-    }
+    let mut appended = String::new();
     if let Some(table) = document
         .get_mut("exports")
         .and_then(Item::as_table_like_mut)
     {
-        table.insert("outputs", Item::Value(Value::InlineTable(outputs)));
-        return Ok(String::new());
+        if let Some(outputs) = outputs {
+            table.insert("outputs", Item::Value(Value::InlineTable(outputs)));
+        }
+        if !capture_inputs.is_empty() {
+            if table.get("inputs").is_none() {
+                table.insert(
+                    "inputs",
+                    Item::Value(Value::InlineTable(toml_edit::InlineTable::new())),
+                );
+            }
+            if let Some(inputs) = table.get_mut("inputs").and_then(Item::as_table_like_mut) {
+                for (name, to) in &capture_inputs {
+                    inputs.insert(name, toml_edit::value(to.as_str()));
+                }
+            }
+            if let Some(inputs) = table
+                .get_mut("inputs")
+                .and_then(Item::as_value_mut)
+                .and_then(Value::as_inline_table_mut)
+            {
+                inputs.fmt();
+            }
+        }
+        return Ok(appended);
     }
-    outputs.fmt();
-    Ok(format!("\n[exports]\noutputs = {outputs}\n"))
+    if outputs.is_some() || !capture_inputs.is_empty() {
+        appended.push_str("\n[exports]\n");
+    }
+    if !capture_inputs.is_empty() {
+        let mut inputs = toml_edit::InlineTable::new();
+        for (name, to) in &capture_inputs {
+            inputs.insert(name, Value::from(to.as_str()));
+        }
+        inputs.fmt();
+        appended.push_str(&format!("inputs = {inputs}\n"));
+    }
+    if let Some(mut outputs) = outputs {
+        outputs.fmt();
+        appended.push_str(&format!("outputs = {outputs}\n"));
+    }
+    Ok(appended)
 }
 
-/// Moves every wire end and exported input that `ports` maps (`<slot>.<port>`
-/// of a discrete slot) to the tap's port.
+/// Moves every wire end, exported output and exported input that `ports`
+/// maps (`<slot>.<port>` of a discrete slot) to the tap's or pass's port.
 fn retarget_ports(document: &mut DocumentMut, ports: &BTreeMap<String, String>) {
     if ports.is_empty() {
         return;
@@ -1256,6 +1348,17 @@ fn retarget_ports(document: &mut DocumentMut, ports: &BTreeMap<String, String>) 
                         move_end(end);
                     }
                 }
+            }
+        }
+    }
+    if let Some(outputs) = document
+        .get_mut("exports")
+        .and_then(|e| e.get_mut("outputs"))
+        .and_then(Item::as_table_like_mut)
+    {
+        for (_, item) in outputs.iter_mut() {
+            if let Some(value) = item.as_value_mut() {
+                move_end(value);
             }
         }
     }

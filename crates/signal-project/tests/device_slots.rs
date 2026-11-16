@@ -275,7 +275,7 @@ fn a_capture_slot_is_a_source_of_its_role() {
 /// ADR 0038 §2, §7: a discrete capture side, `capture = ["vox", "gtr"]`,
 /// plans as `std.device_in2` at `<slot>/capture`, its channels exported by
 /// name; it is a capture side of the slot's role, two wide; inside another
-/// project it is refused as every capture side is.
+/// project it is a pass-through whose inputs the host wires (`x.mics_gtr`).
 #[test]
 fn a_discrete_capture_side_exports_its_channels_by_name() {
     let text = format!(
@@ -323,17 +323,31 @@ connections = [\n  {{ from = \"mics.vox\", to = \"out.l\" }},\n  {{ from = \"mic
     std::fs::write(dir.join("child/project.toml"), &text).unwrap();
     std::fs::write(
         dir.join("project.toml"),
-        format!("{HEAD}[instances]\nx = {{ project = \"./child\" }}\n"),
+        format!(
+            "{HEAD}[instances]\nx = {{ project = \"./child\" }}\nosc = {{ module = \"std.sine_osc\" }}\n\
+             [wiring]\nconnections = [ {{ from = \"osc.out\", to = \"x.mics_gtr\" }} ]\n"
+        ),
     )
     .unwrap();
-    let found = match Project::load(&dir) {
-        Err(e) => e.to_string(),
-        Ok(project) => match project.plan(&registry()) {
-            Ok(_) => String::new(),
-            Err(d) => d.iter().map(ToString::to_string).collect(),
-        },
+    let project = Project::load(&dir).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let pass = plan
+        .instances
+        .iter()
+        .find(|i| i.address.as_str() == "/x/mics/capture")
+        .unwrap();
+    assert_eq!(pass.type_name, "std.device_in_pass2");
+    let from = |to: &str| {
+        plan.sources
+            .iter()
+            .find(|(port, _)| port.to_string() == to)
+            .map(|(_, s)| s[0].from.to_string())
     };
-    assert!(found.contains("captures from the machine"), "{found}");
+    assert_eq!(from("/x/mics/capture.c2_in").as_deref(), Some("/osc.out"));
+    assert!(
+        capture_sides(&project, &plan).is_empty(),
+        "only the host captures"
+    );
 }
 
 /// ADR 0038 §2: every layout plays, as its own sink with the layout's

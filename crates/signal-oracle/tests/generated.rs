@@ -467,11 +467,12 @@ fn draw() -> impl Strategy<Value = Draw> {
 /// (`std.div` to `std.not`), so a seed drawn before then draws a different
 /// graph (`docs/testing-and-evaluation.md`).
 /// Whether the generator draws `d`: a family registered once per width
-/// (`std.control_in<N>`, `std.device_in<N>`: one code for every width) by
+/// (`std.control_in<N>`, `std.device_in<N>`, `std.device_in_pass<N>`: one
+/// code for every width) by
 /// widths 1, 2, 3 and 64 only, so 64 copies of one source do not crowd the
 /// other types out of the cases.
 fn drawn(d: &signal_core::ModuleDescriptor) -> bool {
-    ["std.control_in", "std.device_in"]
+    ["std.control_in", "std.device_in_pass", "std.device_in"]
         .iter()
         .find_map(|family| d.type_name.strip_prefix(family))
         .and_then(|width| width.parse::<u32>().ok())
