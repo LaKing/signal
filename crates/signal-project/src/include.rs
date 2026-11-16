@@ -889,7 +889,9 @@ impl Project {
         // tap gives, `<port>_out`, as a sink's tap does.
         let mut discrete: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for def in &mut defs {
-            if !crate::device::is_discrete_composite(&def.name) {
+            // A capture side's composite exports outputs already (and its
+            // source is refused below).
+            if !crate::device::is_discrete_composite(&def.name) || def.exports.inputs.is_empty() {
                 continue;
             }
             let ports: Vec<String> = def.exports.inputs.iter().map(|e| e.name.clone()).collect();

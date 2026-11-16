@@ -130,9 +130,11 @@ pub struct DeviceSlot {
     pub role: String,
     /// Its play side's layout (`stereo`, or [`DISCRETE`]), if it plays.
     pub play: Option<String>,
-    /// A discrete play side's ports, in channel order; empty otherwise.
+    /// A discrete side's ports (play or capture), in channel order; empty
+    /// otherwise.
     pub ports: Vec<String>,
-    /// Its capture side's layout (`mono`, `stereo`), if it captures.
+    /// Its capture side's layout (`mono`, `stereo`, or [`DISCRETE`]), if it
+    /// captures.
     pub capture: Option<String>,
     /// ADR 0038 §3, §9: its capture side's WAV file, relative to the
     /// project folder, feeding it in offline renders.
@@ -169,15 +171,27 @@ pub(crate) fn planned_module(play: &str) -> Result<&'static str, String> {
 
 /// The composite a discrete device slot `instance` plans as (ADR 0038 §3):
 /// its written ports exported onto `std.device_out<N>`'s `c1…cN`, with
-/// `gain`. Named `device:<instance>`, a name no file can give.
-pub(crate) fn discrete_composite(instance: &str, ports: &[String], kind: &str) -> CompositeDef {
-    // ADR 0057 §1: a control slot is a source, its values exported out.
-    if kind == OSC || kind == MIDI {
+/// `gain`; a capture side's (`capture` true) exported out of
+/// `std.device_in<N>`'s. Named `device:<instance>`, a name no file can give.
+pub(crate) fn discrete_composite(
+    instance: &str,
+    ports: &[String],
+    kind: &str,
+    capture: bool,
+) -> CompositeDef {
+    // ADR 0057 §1: a control slot is a source, its values exported out;
+    // ADR 0038 §7: so is a discrete audio capture side.
+    if kind == OSC || kind == MIDI || capture {
+        let source = if capture && kind != OSC && kind != MIDI {
+            "std.device_in"
+        } else {
+            "std.control_in"
+        };
         return CompositeDef {
             name: discrete_name(instance),
             instances: vec![InstanceDef {
                 name: DISCRETE_SOURCE.to_owned(),
-                module: format!("std.control_in{}", ports.len()),
+                module: format!("{source}{}", ports.len()),
                 ..InstanceDef::default()
             }],
             exports: Exports {
@@ -298,7 +312,7 @@ pub fn capture_sides(project: &Project, plan: &ExecutionPlan) -> Vec<CaptureSide
         .iter()
         .filter(|i| matches!(i.descriptor.source, Some(SourceKind::Audio)))
         .map(|i| {
-            let role = top_level_name(&i.address)
+            let role = slot_of_sink(&i.address)
                 .and_then(|name| devices.get(name))
                 .map_or_else(|| MAIN.to_owned(), |d| d.role.clone());
             let width = i

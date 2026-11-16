@@ -151,18 +151,16 @@ pub(crate) fn render_project(
         let Some(file) = &slot.render else {
             continue;
         };
-        if input_hashes.contains_key(name) {
-            continue;
-        }
-        let address: signal_core::InstanceAddress = format!("/{name}")
-            .parse()
-            .map_err(|_| Failure::Internal(format!("`{name}` is no instance address")))?;
-        let Some((_, width)) = signal_project::session::plan_sources(plan)
+        // The slot's source: itself, or a discrete slot's `<slot>/capture`.
+        let Some((address, width)) = signal_project::session::plan_sources(plan)
             .into_iter()
-            .find(|(a, _)| *a == address)
+            .find(|(a, _)| signal_project::device::slot_of_sink(a) == Some(name.as_str()))
         else {
             continue;
         };
+        if input_hashes.contains_key(&signal_project::session::slot_name(&address)) {
+            continue;
+        }
         let invalid = |message: String| {
             Failure::Invalid(located(dir, vec![project.instances_error(message)]))
         };
@@ -329,7 +327,9 @@ fn render_inputs(
             .filter(|(slot, file)| !slot.is_empty() && !file.is_empty())
             .ok_or_else(|| Failure::Usage(format!("--input {spec}: give SLOT=WAV")))?;
         let found = sources.iter().find(|(address, _)| {
-            signal_project::session::slot_name(address) == slot || address.to_string() == slot
+            signal_project::session::slot_name(address) == slot
+                || address.to_string() == slot
+                || signal_project::device::slot_of_sink(address) == Some(slot)
         });
         let Some((address, width)) = found else {
             let names: Vec<String> = sources

@@ -466,6 +466,18 @@ fn draw() -> impl Strategy<Value = Draw> {
 /// tests cover them. From M2.10-1 the pool includes the core types
 /// (`std.div` to `std.not`), so a seed drawn before then draws a different
 /// graph (`docs/testing-and-evaluation.md`).
+/// Whether the generator draws `d`: a family registered once per width
+/// (`std.control_in<N>`, `std.device_in<N>`: one code for every width) by
+/// widths 1, 2, 3 and 64 only, so 64 copies of one source do not crowd the
+/// other types out of the cases.
+fn drawn(d: &signal_core::ModuleDescriptor) -> bool {
+    ["std.control_in", "std.device_in"]
+        .iter()
+        .find_map(|family| d.type_name.strip_prefix(family))
+        .and_then(|width| width.parse::<u32>().ok())
+        .is_none_or(|width| matches!(width, 1..=3 | 64))
+}
+
 fn scalar(d: &signal_core::ModuleDescriptor) -> bool {
     d.rate() == Some(signal_core::RateDivisor::ONE)
         && d.ports
@@ -479,6 +491,7 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
         .map(|t| t.descriptor)
         .filter(|d| d.sink.is_none() && d.latency.is_none() && d.type_name.starts_with("std."))
         .filter(scalar)
+        .filter(drawn)
         .map(|d| d.type_name)
         .collect();
     let mut g = Generator {
@@ -842,6 +855,7 @@ fn the_generator_covers_its_dimensions() {
         .map(|t| t.descriptor)
         .filter(|d| d.sink.is_none() && d.type_name.starts_with("std."))
         .filter(scalar)
+        .filter(drawn)
         .map(|d| d.type_name)
         .collect();
     let missing: Vec<_> = all.difference(&types).collect();

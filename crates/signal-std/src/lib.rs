@@ -34,6 +34,7 @@
 //! | `std.sampler` | [`Sampler`] | direct, plays a sample pattern (a WAV) on a trigger at a rate, looping or not (ADR 0056) | `generator` |
 //! | `std.data_out1` … `std.data_out64` | `data_out::DataOut` | direct, a data slot's sink (`SinkKind::Data`, inputs `c1…cN`; ADR 0057) | `io` |
 //! | `std.control_in1` … `std.control_in64` | `control_in::ControlIn` | direct source, a control slot's values (`SourceKind::Data`, outputs `c1…cN`; ADR 0057) | `io` |
+//! | `std.device_in1` … `std.device_in64` | `device_in::DeviceIn` | direct source, a discrete capture side (`SourceKind::Audio`, outputs `c1…cN`; ADR 0038 §2) | `io` |
 //! | `std.device_out1` … `std.device_out64`, `std.device_out_tap1` … `std.device_out_tap64` | [`device_out::DeviceOut`], [`device_out::DeviceOutTap`] | direct, a discrete layout's sink (inputs `c1…cN`) and its tap (ADR 0038 §2) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
@@ -193,6 +194,7 @@ mod count;
 mod data_out;
 mod dc_block;
 mod delay;
+mod device_in;
 pub mod device_out;
 mod edge;
 mod events;
@@ -593,6 +595,10 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     }
     // ADR 0057 §1: the control slots' sources, each width's.
     for module_type in control_in::types() {
+        registry.register(*module_type)?;
+    }
+    // ADR 0038 §2, §7: the discrete capture sides' sources, each width's.
+    for module_type in device_in::types() {
         registry.register(*module_type)?;
     }
     for (name, ns) in COST_NS {
@@ -1126,12 +1132,14 @@ mod tests {
                 + device_out::types().len()
                 + data_out::types().len()
                 + control_in::types().len()
+                + device_in::types().len()
         );
         let vectors = vector::types()
             .iter()
             .chain(device_out::types())
             .chain(data_out::types())
             .chain(control_in::types())
+            .chain(device_in::types())
             .map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
@@ -1180,6 +1188,7 @@ mod tests {
                 + device_out::types().len()
                 + data_out::types().len()
                 + control_in::types().len()
+                + device_in::types().len()
         );
 
         // A type registered first under a std name blocks that name.

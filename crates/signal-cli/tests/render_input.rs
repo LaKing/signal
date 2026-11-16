@@ -352,3 +352,65 @@ fn a_render_file_through_a_link_is_refused() {
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(stderr.contains("through a link"), "{stderr}");
 }
+
+/// ADR 0038 §2, §7: a discrete capture side reads its channels in order,
+/// from its own `render` file and from `--input` by the slot's name; the
+/// render is the file, swapped onto `main` by the wiring, bit for bit.
+#[test]
+fn a_discrete_capture_side_reads_its_channels_in_order() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("render-input/discrete");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("fixtures")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        format!(
+            "schema_version = 1\n[project]\nname = \"discrete\"\nsample_rate = {RATE}\nseed = 1\n\
+             [instances]\n\
+             band = {{ device = {{ capture = [\"vox\", \"gtr\"], role = \"band\" }}, render = \"fixtures/band.wav\" }}\n\
+             out = {{ module = \"std.audio_out\", gain = 1 }}\n\
+             [wiring]\nconnections = [\n\
+               {{ from = \"band.gtr\", to = \"out.l\" }},\n\
+               {{ from = \"band.vox\", to = \"out.r\" }},\n]\n"
+        ),
+    )
+    .unwrap();
+    // vox rises from 0.01, gtr falls from -0.01, interleaved.
+    let take: Vec<f32> = (0..480)
+        .flat_map(|n| {
+            [
+                0.01 * (n + 1) as f32 / 480.0,
+                -0.01 * (n + 1) as f32 / 480.0,
+            ]
+        })
+        .collect();
+    wav(&dir.join("fixtures/band.wav"), RATE, 2, &take);
+    let swapped: Vec<f32> = take.chunks(2).flat_map(|f| [f[1], f[0]]).collect();
+    for extra in [None, Some("band")] {
+        let out = dir.join(format!("out-{}", extra.unwrap_or("file")));
+        let mut args = vec![
+            "render".to_owned(),
+            dir.to_str().unwrap().to_owned(),
+            "--frames".to_owned(),
+            "480".to_owned(),
+            "--out".to_owned(),
+            out.to_str().unwrap().to_owned(),
+        ];
+        if let Some(slot) = extra {
+            let other = dir.join("other.wav");
+            wav(&other, RATE, 2, &take);
+            args.extend(["--input".to_owned(), format!("{slot}={}", other.display())]);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = signal(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            samples(&out.join("audio.wav")),
+            swapped,
+            "{extra:?}: gtr on the left, vox on the right"
+        );
+    }
+}

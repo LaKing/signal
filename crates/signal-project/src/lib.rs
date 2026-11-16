@@ -602,7 +602,12 @@ impl Project {
             if slot.ports.is_empty() {
                 continue;
             }
-            let def = device::discrete_composite(instance, &slot.ports, &slot.kind);
+            let def = device::discrete_composite(
+                instance,
+                &slot.ports,
+                &slot.kind,
+                slot.capture.is_some(),
+            );
             let spans = locate::DefSpans {
                 file: root_spans.file,
                 devices: BTreeMap::new(),
@@ -1916,15 +1921,17 @@ fn device_slot(
                     }
                 }
             }
-            model::PlaySpec::Discrete(_) => {
-                problems.push((
-                    capture.span().start,
-                    format!(
-                        "{instance}: a discrete capture layout is not built yet; this version captures `mono` and `stereo` audio, and `osc` values by name"
-                    ),
-                ));
-                None
-            }
+            // ADR 0038 §2, §7: a discrete capture side, its channels by name.
+            model::PlaySpec::Discrete(names) => match device::discrete_problem(names) {
+                Some(reason) => {
+                    problems.push((capture.span().start, format!("{instance}: {reason}")));
+                    None
+                }
+                None => {
+                    ports = names.clone();
+                    Some(device::discrete_name(instance))
+                }
+            },
         },
         (None, None) => {
             problems.push((

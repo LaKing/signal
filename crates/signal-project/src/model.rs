@@ -1037,7 +1037,8 @@ impl JsonSchema for InstanceEntry {
 pub(crate) enum PlaySpec {
     /// `mono`, `stereo`, `quad`, `5.1` or `7.1`.
     Layout(String),
-    /// A discrete layout's ports, every one audio, in channel order.
+    /// A discrete layout's ports (or a control slot's values), in channel
+    /// order.
     Discrete(Vec<String>),
 }
 
@@ -1053,8 +1054,10 @@ pub(crate) struct DeviceSpec {
     #[serde(default)]
     #[schemars(with = "Option<PlaySpec>")]
     pub(crate) play: Option<Spanned<PlaySpec>>,
-    /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7); a
-    /// control slot's values, by name (`kind = "osc"`, ADR 0057 §1).
+    /// The capture side's layout: `mono` or `stereo` (ADR 0038 §7), or a
+    /// discrete layout, its channels' names in order (`["vox", "gtr"]`,
+    /// ADR 0038 §2); a control slot's values, by name (`kind = "osc"` or
+    /// `"midi"`, ADR 0057 §1).
     #[serde(default)]
     #[schemars(with = "Option<PlaySpec>")]
     pub(crate) capture: Option<Spanned<PlaySpec>>,
