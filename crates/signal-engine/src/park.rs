@@ -414,19 +414,36 @@ mod tests {
     /// AC-repro: the wake of every parked worker before the open (loom's P2)
     /// at each point of the worker's next park, thousands of times, with
     /// `park`'s token and with a counting semaphore: the worker always joins.
+    /// How often a position is forced depends on the scheduler: alone it is
+    /// about 2 200 of 3 000 for the semaphore before its park, under the
+    /// full suite's load it once fell to 1 690. So rounds of 3 000 callbacks
+    /// run until every position is forced 2 000 times, at most four.
     #[test]
     fn the_wake_before_the_open_is_never_lost_on_real_threads() {
         const CALLBACKS: u64 = 3_000;
-        for (name, blocker) in [
-            ("park", Blocker::Park(OnceLock::new())),
-            ("semaphore", Blocker::Count(Mutex::new(0), Condvar::new())),
-        ] {
+        const ROUNDS: u64 = 4;
+        type Make = fn() -> Blocker;
+        let blockers: [(&str, Make); 2] = [
+            ("park", || Blocker::Park(OnceLock::new())),
+            ("semaphore", || {
+                Blocker::Count(Mutex::new(0), Condvar::new())
+            }),
+        ];
+        for (name, blocker) in blockers {
             let start = Instant::now();
-            let forced = force(blocker, CALLBACKS);
+            let mut forced = [0u64; 4];
+            let mut rounds = 0;
+            while rounds < ROUNDS && forced.iter().any(|&n| n < 2_000) {
+                let round = force(blocker(), CALLBACKS);
+                for (total, n) in forced.iter_mut().zip(round) {
+                    *total += n;
+                }
+                rounds += 1;
+            }
             println!(
                 "reproducer {name}: {} callbacks, forced per position (before flag, before \
                  re-read, before park, in park) {forced:?}, no lost wake, {:.2?}",
-                CALLBACKS * 4,
+                CALLBACKS * 4 * rounds,
                 start.elapsed()
             );
             for (at, &n) in forced.iter().enumerate() {
