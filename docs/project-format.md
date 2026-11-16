@@ -450,7 +450,7 @@ file = "samples/texture.wav"
 |---|---|---|
 | `file` | string, required | A relative path ending in `.wav`, no `..`: the WAV, mono or stereo, 16/24/32-bit integer or 32-bit float, at the project's `sample_rate` (it is not resampled), at most 2²⁰ values (`MAX_TABLE_VALUES`). |
 
-The WAV is read when the project is read from its folder (a project read without one, `Project::from_sources`, has no frames: planning an instance of it is refused with the reason); it is a **project file**: `signal pack` packs it, a render hashes it into `project_file_hashes` under its path, and a session copies it, byte for byte, into every version's copy (`session-format.md` §3), so a replay needs nothing outside the session. An edit of the pattern file is a swap, as any pattern's; an edit of the WAV alone is read with the next reload of the project (it is not watched on its own). Its source: header `[channels, rate]`, one row per frame.
+The WAV is read when the project is read from its folder (a project read without one, `Project::from_sources`, has no frames: planning an instance of it is refused with the reason); it is a **project file**: `signal pack` packs it, a render hashes it into `project_file_hashes` under its path, and a session copies it, byte for byte, into every version's copy (`session-format.md` §3), so a replay needs nothing outside the session. An edit of the pattern file is a swap, as any pattern's; an edit of the WAV alone is one too: the watch sees every file of the folder, and the sample's table differs, so the sampler gets it by a swap. Its source: header `[channels, rate]`, one row per frame.
 
 ### The source the library compiles
 

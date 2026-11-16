@@ -183,3 +183,89 @@ fn a_sample_of_another_rate_is_refused() {
         "{stderr}"
     );
 }
+
+/// ADR 0056 §1: the WAV alone edited while `play --watch` runs is a change
+/// the watch reads: the sample's table differs, so the sampler gets it by a
+/// swap, and the beats after it play the new take (here the old one
+/// negated), recorded in the session and replayed exactly.
+#[test]
+fn an_edited_wav_alone_reaches_the_running_sampler() {
+    use std::io::{BufRead, Write};
+    let dir = project("watched", 48_000);
+    let (session, audio) = (dir.join("s"), dir.join("a.wav"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .arg("play")
+        .arg(&dir)
+        .args(["--driver", "null", "--watch", "--seconds", "600"])
+        .arg("--record-session")
+        .arg(&session)
+        .arg("--record-audio")
+        .arg(&audio)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let mut wait_for = |needle: &str| loop {
+        match lines.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => {
+                seen.push(line.clone());
+                if line.contains(needle) {
+                    break;
+                }
+            }
+            Err(_) => panic!("no `{needle}`; stderr:\n{}", seen.join("\n")),
+        }
+    };
+    wait_for("playing");
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let negated: Vec<f32> = take().iter().map(|s| -s).collect();
+    let next = dir.join("samples/hit.next.wav");
+    wav(&next, 48_000, &negated);
+    fs::rename(&next, dir.join("samples/hit.wav")).unwrap();
+    wait_for("watch: applied a swap");
+    // Two beats more on the new take.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let played = left(&audio);
+    let beats: Vec<&[f32]> = played
+        .chunks(24_000)
+        .filter_map(|beat| beat.get(..SAMPLE))
+        .collect();
+    assert_eq!(beats[0], &take()[..], "the first beat plays the old take");
+    let last = beats.iter().rev().find(|b| b.len() == SAMPLE).unwrap();
+    assert_eq!(
+        *last,
+        &negated[..],
+        "the beats after the edit play the new one"
+    );
+
+    let replayed = dir.join("replayed");
+    ok(signal(&[
+        "replay",
+        session.to_str().unwrap(),
+        "--frames",
+        &played.len().to_string(),
+        "--out",
+        replayed.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        left(&replayed.join("audio.wav")),
+        played,
+        "replayed exactly"
+    );
+}
