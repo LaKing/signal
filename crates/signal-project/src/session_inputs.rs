@@ -224,9 +224,15 @@ impl InputToml {
     }
 }
 
-/// The bytes of `inputs/<slot>.f32`: the words, f32 little-endian.
-pub(crate) fn input_bytes(words: &[f32]) -> Vec<u8> {
-    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+/// Writes `inputs/<slot>.f32` at `path`: the words, f32 little-endian,
+/// streamed through a buffer (no second copy of a long recording).
+pub(crate) fn write_input(path: &std::path::Path, words: &[f32]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    for word in words {
+        out.write_all(&word.to_le_bytes())?;
+    }
+    out.into_inner().map_err(|e| e.into_error())?.sync_all()
 }
 
 /// `[[inputs]]` checked, each with its file read by `read` (relative to the

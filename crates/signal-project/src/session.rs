@@ -29,7 +29,7 @@ use signal_output::{
     Conversion, Render, RenderError, VectorTap, VectorTrack, render_blocks_tapped_main,
 };
 
-use crate::session_inputs::{InputToml, input_bytes, load_inputs, replay_input};
+use crate::session_inputs::{InputToml, load_inputs, replay_input, write_input};
 use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
 
 pub use crate::session_inputs::{
@@ -1367,7 +1367,7 @@ impl SessionRecorder {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(io(parent))?;
                 }
-                fs::write(&path, input_bytes(words)).map_err(io(&path))?;
+                write_input(&path, words).map_err(io(&path))?;
             }
         }
         Ok(())
