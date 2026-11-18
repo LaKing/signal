@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use signal_core::{EventPayload, PortAddress, Registry};
 use signal_engine::{RealtimeConfig, Stamp};
 use signal_output::{Driver, NullDriver, realtime};
-use signal_project::live::{Applied, reload};
+use signal_project::live::{Applied, ReloadError, reload};
 use signal_project::session::{LiveRecorder, SessionRecorder};
 use signal_project::{ParameterChange, Project, ProjectEdit, diff, provenance, write_parameter};
 
@@ -211,5 +211,62 @@ fn after_write_back_the_reload_applies_nothing_twice() {
     let applied = reload(&mut controller, &mut live, &mut current, &dir, &registry).unwrap();
     assert_eq!(applied, Applied::default());
     assert_eq!(applied.to_string(), "no change to apply");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// ADR 0056 §1: a write-back rebuilds the project from its text, with no
+/// folder to read WAVs from; the sampler's sample read before stays, so
+/// the edited project still plans (`projects/generative`'s `tex`).
+#[test]
+fn a_parameter_write_keeps_the_samples_read_before() {
+    let registry = registry();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/generative");
+    let project = Project::load(&dir).unwrap();
+    project.plan(&registry).unwrap();
+    let edited = project
+        .with_parameter("tex", "gain", Some(0.5), &["gain"])
+        .unwrap();
+    edited.plan(&registry).unwrap();
+    assert_eq!(edited.sample_files(), project.sample_files());
+}
+
+/// An edit of more commands than the whole queue holds is no refusal a
+/// wait cures (a watch would reload it every poll): it is invalid, with
+/// the advice to split it, and nothing is sent.
+#[test]
+fn an_edit_larger_than_the_queue_is_invalid_not_retried() {
+    let registry = registry();
+    let dir = copy("too-large");
+    let mut current = Project::load(&dir).unwrap();
+    let mut plan = current.plan(&registry).unwrap().plan;
+    plan.version = 0;
+    let rate = current.sample_rate;
+    let mut config = RealtimeConfig::new(rate, current.seed);
+    config.commands = 2;
+    let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+    let provenance = provenance::collect(&provenance::source_dir(), &current.files);
+    let recorder =
+        SessionRecorder::new(&current, &registry, rate, current.seed, provenance).unwrap();
+    let mut live = LiveRecorder::new(recorder, registry.clone());
+    let mut driver = NullDriver::new(rate, 2, 3);
+    driver.start(runner).unwrap();
+    let mut text = project_toml(&dir);
+    for (instance, parameter, value, order) in [
+        ("drums", "kick_decay", 500.0, DRUMS),
+        ("drums", "kick_drive", 2.0, DRUMS),
+        ("out", "gain", 0.5, OUT),
+    ] {
+        text = write_parameter(&text, instance, parameter, Some(value), order).unwrap();
+    }
+    fs::write(dir.join("project.toml"), text).unwrap();
+    let before = current.clone();
+    match reload(&mut controller, &mut live, &mut current, &dir, &registry) {
+        Err(ReloadError::Invalid(found)) => {
+            let message = found[0].to_string();
+            assert!(message.contains("Split it"), "{message}");
+        }
+        other => panic!("expected an invalid edit, got {other:?}"),
+    }
+    assert!(diff(&before, &current, &registry).unwrap().is_empty());
     fs::remove_dir_all(&dir).unwrap();
 }

@@ -167,7 +167,8 @@ fn a_removal_suspends_then_swaps_and_replays() {
 /// auditor-1's probe: removing more instances at once than the command queue
 /// can take. The edit is refused before anything is sent: no suspend reaches
 /// the runner, nothing is in flight, and the old version keeps playing with
-/// every instance running.
+/// every instance running. More than the whole queue holds, it is invalid
+/// (split it), not a refusal a wait would cure.
 #[test]
 fn an_edit_larger_than_the_command_queue_sends_nothing() {
     let registry = registry();
@@ -183,12 +184,14 @@ fn an_edit_larger_than_the_command_queue_sends_nothing() {
 
     let all: Vec<usize> = (0..extra).collect();
     let new = project(extra, &all);
-    let Err(EditError::Refused(message)) =
+    let Err(EditError::Invalid(found)) =
         send_edit(&mut controller, &mut live, &old, new, &registry)
     else {
-        panic!("expected a refusal");
+        panic!("expected an invalid edit");
     };
+    let message = found[0].to_string();
     assert!(message.contains("nothing was sent"), "{message}");
+    assert!(message.contains("Split it"), "{message}");
     assert_eq!(controller.in_flight(), 0);
     assert_eq!(controller.command_overflows(), 0, "nothing was pushed");
 
@@ -521,4 +524,57 @@ fn audition_notes_are_recorded_and_replay() {
     let replayed = replay(&session, &registry, None, 1).unwrap();
     let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(samples, output, "replay equals what was played");
+}
+
+/// The watcher reads only what a load reads: a folder of renders beside
+/// the project costs a poll nothing and changes nothing, while a sample's
+/// WAV kept under `ui/` is a change that plays (not presentation), and a
+/// project included inside the folder is watched with it.
+#[test]
+fn the_watcher_follows_what_the_project_reads() {
+    let dir = std::env::temp_dir().join(format!("signal-watch-reads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for folder in ["patterns", "ui", "past-renders/run1", "inner"] {
+        std::fs::create_dir_all(dir.join(folder)).unwrap();
+    }
+    std::fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"w\"\n[instances]\ninner = { project = \"inner\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("inner/project.toml"),
+        "schema_version = 1\n[project]\nname = \"inner\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("patterns/hit.toml"),
+        "schema_version = 1\nkind = \"sample\"\nfile = \"ui/hit.wav\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("ui/hit.wav"), b"RIFF").unwrap();
+    std::fs::write(dir.join("ui/main.html"), "<p>").unwrap();
+    let mut watcher = signal_project::live::ProjectWatcher::new(&dir).unwrap();
+    std::fs::write(dir.join("past-renders/run1/audio.wav"), b"x").unwrap();
+    assert!(
+        watcher.changes().unwrap().is_empty(),
+        "renders are not read"
+    );
+    std::fs::write(dir.join("ui/hit.wav"), b"RIFF2").unwrap();
+    let changed = watcher.changes().unwrap();
+    assert_eq!(changed, [std::path::PathBuf::from("ui/hit.wav")]);
+    assert!(!watcher.presentation_only(&changed), "a sample plays");
+    std::fs::write(dir.join("ui/main.html"), "<p>2").unwrap();
+    let changed = watcher.changes().unwrap();
+    assert!(watcher.presentation_only(&changed));
+    std::fs::write(
+        dir.join("inner/project.toml"),
+        "schema_version = 1\n[project]\nname = \"inner2\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        watcher.changes().unwrap(),
+        [std::path::PathBuf::from("inner/project.toml")]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1058,7 +1058,15 @@ impl Project {
     pub fn sample_files(&self) -> Vec<(String, std::sync::Arc<[u8]>)> {
         let mut files: Vec<(String, std::sync::Arc<[u8]>)> = Vec::new();
         for (name, (_, pattern)) in &self.patterns {
-            if name.contains('/') {
+            // An included project's own patterns are qualified by its id
+            // (`<id>/<name>`); deeper includes' carry more.
+            let own = match &self.content.id {
+                Some(id) => name
+                    .strip_prefix(id.as_str())
+                    .and_then(|n| n.strip_prefix('/')),
+                None => Some(name.as_str()),
+            };
+            if own.is_none_or(|n| n.contains('/')) {
                 continue;
             }
             if let (Some((path, _)), Some(bytes)) = (&pattern.file, &pattern.bytes)

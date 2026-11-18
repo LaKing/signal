@@ -714,7 +714,28 @@ pub(crate) fn run(
     let mut osc_records = Vec::new();
     let mut osc_inputs = Vec::new();
     let mut midi_feeds = Vec::new();
-    for side in signal_project::device::control_sides(&project, &plan) {
+    let sides = signal_project::device::control_sides(&project, &plan);
+    // The `osc` sides bound, one listener per address: roles bound to the
+    // same address share its socket.
+    let bound: Vec<(usize, (String, signal_output::osc::OscRoute))> = sides
+        .iter()
+        .enumerate()
+        .filter(|(_, side)| side.kind != signal_project::device::MIDI)
+        .filter_map(|(index, side)| {
+            let (_, address) = args.osc.iter().find(|(role, _)| *role == side.role)?;
+            let route = signal_output::osc::OscRoute {
+                role: side.role.clone(),
+                names: side.ports.clone(),
+            };
+            Some((index, (address.clone(), route)))
+        })
+        .collect();
+    let bindings: Vec<_> = bound.iter().map(|(_, b)| b.clone()).collect();
+    let (listeners, opened) = signal_output::osc::listen_each(&bindings);
+    osc_listeners.extend(listeners);
+    let mut opened: std::collections::BTreeMap<usize, signal_output::osc::Opened> =
+        bound.iter().map(|(index, _)| *index).zip(opened).collect();
+    for (index, side) in sides.into_iter().enumerate() {
         // ADR 0057 §3: a `midi` slot, from the CoreMIDI sources named.
         if side.kind == signal_project::device::MIDI {
             let filter = args
@@ -761,23 +782,18 @@ pub(crate) fn run(
             );
             continue;
         };
-        let route = signal_output::osc::OscRoute {
-            role: side.role.clone(),
-            names: side.ports.clone(),
+        let (source, local) = match opened.remove(&index) {
+            Some(Ok(opened)) => opened,
+            Some(Err(e)) => return Err(Failure::Io(format!("OSC on {address}: {e}"))),
+            None => continue,
         };
-        let (listener, mut sources) = signal_output::osc::listen(address, &[route])
-            .map_err(|e| Failure::Io(format!("OSC on {address}: {e}")))?;
         eprintln!(
-            "signal: {} ({}): OSC on {}, /{}/{{{}}}",
+            "signal: {} ({}): OSC on {local}, /{}/{{{}}}",
             side.role,
             side.address,
-            listener.local,
             side.role,
             side.ports.join(",")
         );
-        let Some(source) = sources.pop() else {
-            continue;
-        };
         let (input, record) = signal_output::inputs::RunInput::new(
             side.address.clone(),
             side.ports.len(),
@@ -787,7 +803,6 @@ pub(crate) fn run(
         );
         osc_inputs.push(input);
         osc_records.extend(record);
-        osc_listeners.push(listener);
     }
     runner.set_inputs(osc_inputs);
     if let Some(error) = runner.waiter_error() {

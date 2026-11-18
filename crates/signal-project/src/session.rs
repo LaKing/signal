@@ -942,7 +942,7 @@ impl SessionRecorder {
             provenance,
             machine: Machine::here(Vec::new()),
             state: State::new(&plan, 0),
-            versions: vec![(initial.session_copy(), plan, initial.sample_files())],
+            versions: vec![(initial.session_copy(), plan, initial.session_samples())],
             version_count: 1,
             history: true,
             edits: Vec::new(),
@@ -1140,7 +1140,7 @@ impl SessionRecorder {
             return Ok(version);
         }
         self.versions
-            .push((project.session_copy(), plan, project.sample_files()));
+            .push((project.session_copy(), plan, project.session_samples()));
         // ADR 0027 §4: the library composites of every version, so a swap
         // that brings one in is recorded too (`Session::library_hashes`).
         self.provenance
@@ -1858,7 +1858,12 @@ impl Session {
             };
             // ADR 0035 §13: with its includes' files under `includes/`.
             let mut present = file_hashes(&project.session_copy());
-            present.extend(project.sample_file_hashes());
+            present.extend(
+                project
+                    .session_samples()
+                    .iter()
+                    .map(|(path, bytes)| (path.clone(), hex(fnv1a64(bytes)))),
+            );
             for (path, hash) in &present {
                 match entry.files.get(path) {
                     Some(recorded) if recorded == hash => {}

@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use signal_project::PATTERNS;
-use signal_project::live::{
-    ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, is_presentation, reload_with_bases,
-};
+use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_with_bases};
 
 use crate::panel::Panel;
 use crate::panel_write::sha256_hex;
@@ -41,10 +39,15 @@ impl Host {
             .iter()
             .map(|f| f.to_string_lossy().into_owned())
             .collect();
-        // Presentation only (`ui/…`): no load reads it, so nothing is
-        // reloaded or planned; the clients are told, and `graph` (the
-        // schematic's positions) is pushed.
-        if !run.retry && changed.iter().all(|f| is_presentation(f)) {
+        // Presentation only (`ui/…`, but a sample's WAV there): no load
+        // reads it, so nothing is reloaded or planned; the clients are
+        // told, and `graph` (the schematic's positions) is pushed.
+        if !run.retry
+            && run
+                .watcher
+                .as_ref()
+                .is_some_and(|w| w.presentation_only(&changed))
+        {
             let message = format!(
                 "presentation files changed ({}): nothing to apply",
                 files.join(", ")

@@ -420,7 +420,9 @@ impl Project {
         for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
             text.clone_into(&mut file.text);
         }
-        Project::from_sources(files).map_err(WriteError::Invalid)
+        let mut project = Project::from_sources(files).map_err(WriteError::Invalid)?;
+        project.keep_samples(self);
+        Ok(project)
     }
 
     /// [`Project::with_parameter`] for several edits at once
@@ -443,7 +445,19 @@ impl Project {
         if !self.content.projects.is_empty() || !self.content.files.is_empty() {
             return Err(WriteError::Includes);
         }
-        Project::from_sources(files).map_err(WriteError::Invalid)
+        let mut project = Project::from_sources(files).map_err(WriteError::Invalid)?;
+        project.keep_samples(self);
+        Ok(project)
+    }
+
+    /// ADR 0056 §1: a project rebuilt from its text alone has read no WAV;
+    /// it keeps the samples `before` read for the same files.
+    fn keep_samples(&mut self, before: &Project) {
+        for (name, (_, pattern)) in &mut self.patterns {
+            if let Some((_, old)) = before.patterns.get(name) {
+                pattern.keep_sample(old, self.sample_rate);
+            }
+        }
     }
 }
 

@@ -221,6 +221,11 @@ impl Host {
         .ok();
         let files = signal_project::export::export_slot(&project, slot, part.as_deref())
             .map_err(|e| fail("bad-value", e))?;
+        let samples = signal_project::export::sample_files(
+            &self.opening.dir,
+            files.iter().map(|f| (f.path.as_str(), f.text.as_str())),
+        )
+        .map_err(|e| fail("bad-value", e))?;
         let busy = path.exists()
             && fs::read_dir(&path)
                 .map(|mut d| d.next().is_some())
@@ -231,20 +236,24 @@ impl Host {
                 format!("{} exists and is not empty", path.display()),
             ));
         }
-        for file in &files {
-            let full = path.join(&file.path);
+        let texts = files.iter().map(|f| (f.path.as_str(), f.text.as_bytes()));
+        let bytes = samples.iter().map(|(p, b)| (p.as_str(), &b[..]));
+        let mut written: Vec<&str> = Vec::new();
+        for (relative, content) in texts.chain(bytes) {
+            let full = path.join(relative);
             if let Some(dir) = full.parent() {
                 fs::create_dir_all(dir)
                     .map_err(|e| fail("write-failed", format!("{}: {e}", dir.display())))?;
             }
-            transaction::write_atomic(&full, file.text.as_bytes())
+            transaction::write_atomic(&full, content)
                 .map_err(|e| fail("write-failed", format!("{}: {e}", full.display())))?;
+            written.push(relative);
         }
         Ok(json!({
             "type": "slot.exported",
             "slot": slot,
             "path": path.display().to_string(),
-            "written": files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            "written": written,
         }))
     }
 
@@ -279,20 +288,30 @@ impl Host {
         }
         let files = crate::stacks::export_stack(&self.opening.dir, stack, &path)
             .map_err(|e| fail("bad-value", e))?;
-        for (relative, text) in &files {
+        // ADR 0056 §1: the samples its patterns read, beside them.
+        let samples = signal_project::export::sample_files(
+            &self.opening.dir,
+            files.iter().map(|(p, t)| (p.as_str(), t.as_str())),
+        )
+        .map_err(|e| fail("bad-value", e))?;
+        let texts = files.iter().map(|(p, t)| (p.as_str(), t.as_bytes()));
+        let bytes = samples.iter().map(|(p, b)| (p.as_str(), &b[..]));
+        let mut written: Vec<&str> = Vec::new();
+        for (relative, content) in texts.chain(bytes) {
             let full = path.join(relative);
             if let Some(dir) = full.parent() {
                 fs::create_dir_all(dir)
                     .map_err(|e| fail("write-failed", format!("{}: {e}", dir.display())))?;
             }
-            transaction::write_atomic(&full, text.as_bytes())
+            transaction::write_atomic(&full, content)
                 .map_err(|e| fail("write-failed", format!("{}: {e}", full.display())))?;
+            written.push(relative);
         }
         Ok(json!({
             "type": "stack.exported",
             "stack": stack,
             "path": path.display().to_string(),
-            "written": files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+            "written": written,
         }))
     }
 

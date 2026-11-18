@@ -28,10 +28,16 @@ type Snapshot = BTreeMap<PathBuf, (Option<SystemTime>, u64)>;
 
 /// Notices changes to the files of a project folder by polling their
 /// modification times and lengths (no file-system events, no new crates).
-/// Hidden files and folders are ignored.
+/// Only what a load reads is watched ([`WATCHED`], the top-level files and
+/// the files the project names, [`assets`]), with the projects it includes
+/// inside the folder: renders, sessions and other folders it holds cost a
+/// poll nothing. Hidden files and folders are ignored.
 pub struct ProjectWatcher {
     dir: PathBuf,
     last: Snapshot,
+    /// ADR 0035 §7: the projects it includes inside its own folder (a
+    /// folder, or a `.signal` file), by path in it.
+    inside: Vec<PathBuf>,
     /// ADR 0035 §7: the folders of the projects it includes outside its own
     /// folder (`../studio`), each by the path the host reaches it by, as
     /// they were at the last poll.
@@ -42,18 +48,30 @@ impl ProjectWatcher {
     /// Watches `dir`, as it is now, and the folders of the projects it
     /// includes outside it.
     pub fn new(dir: &Path) -> io::Result<ProjectWatcher> {
-        let includes = include_dirs(dir)
+        let (outside, inside) = include_folders(dir);
+        let includes = outside
             .into_iter()
             .map(|(shown, folder)| {
-                let files = snapshot(&folder).unwrap_or_default();
+                let files = snapshot(&folder, &[]).unwrap_or_default();
                 (shown, folder, files)
             })
             .collect();
         Ok(ProjectWatcher {
             dir: dir.to_owned(),
-            last: snapshot(dir)?,
+            last: snapshot(dir, &inside)?,
+            inside,
             includes,
         })
+    }
+
+    /// Whether every file of `changed` is presentation only
+    /// ([`is_presentation`]) and none is one the project reads (a sample's
+    /// WAV kept under `ui/`).
+    pub fn presentation_only(&self, changed: &[PathBuf]) -> bool {
+        let assets = assets(&self.dir);
+        changed
+            .iter()
+            .all(|f| is_presentation(f) && !assets.contains(f))
     }
 
     /// Whether a file was added, removed or changed since the last poll.
@@ -66,7 +84,7 @@ impl ProjectWatcher {
     /// tells a change that can alter what plays from one that cannot with
     /// [`is_presentation`].
     pub fn changes(&mut self) -> io::Result<Vec<PathBuf>> {
-        let now = snapshot(&self.dir)?;
+        let now = snapshot(&self.dir, &self.inside)?;
         let mut changed: Vec<PathBuf> = now
             .iter()
             .filter(|(path, state)| self.last.get(*path) != Some(*state))
@@ -92,7 +110,7 @@ impl ProjectWatcher {
         // reaches them by (`../studio/patterns/drums.toml`).
         let mut included_definition = false;
         for (shown, folder, last) in &mut self.includes {
-            let now = snapshot(folder).unwrap_or_default();
+            let now = snapshot(folder, &[]).unwrap_or_default();
             let found: Vec<PathBuf> = now
                 .iter()
                 .filter(|(path, state)| last.get(*path) != Some(*state))
@@ -109,6 +127,8 @@ impl ProjectWatcher {
             self.rediscover();
         }
         changed.sort();
+        // A project included inside the folder from now on is watched from
+        // the next poll, its files as they are then.
         self.last = now;
         Ok(changed)
     }
@@ -121,13 +141,15 @@ impl ProjectWatcher {
             .drain(..)
             .map(|(shown, _, files)| (shown, files))
             .collect();
-        self.includes = include_dirs(&self.dir)
+        let (outside, inside) = include_folders(&self.dir);
+        self.inside = inside;
+        self.includes = outside
             .into_iter()
             .map(|(shown, folder)| {
                 let files = known
                     .get(&shown)
                     .cloned()
-                    .unwrap_or_else(|| snapshot(&folder).unwrap_or_default());
+                    .unwrap_or_else(|| snapshot(&folder, &[]).unwrap_or_default());
                 (shown, folder, files)
             })
             .collect();
@@ -174,12 +196,15 @@ pub struct FolderState(Snapshot);
 impl FolderState {
     /// `dir` as it is now, without its presentation files.
     pub fn read(dir: &Path) -> io::Result<FolderState> {
-        let mut files = snapshot(dir)?;
-        files.retain(|path, _| !is_presentation(path));
+        let (outside, inside) = include_folders(dir);
+        let mut files = snapshot(dir, &inside)?;
+        let read = assets(dir);
+        files.retain(|path, _| !is_presentation(path) || read.contains(path));
         // ADR 0035 §7: what a load reads of the projects it includes outside it.
-        for (shown, folder) in include_dirs(dir) {
-            for (path, state) in snapshot(&folder).unwrap_or_default() {
-                if !is_presentation(&path) {
+        for (shown, folder) in outside {
+            let read = assets(&folder);
+            for (path, state) in snapshot(&folder, &[]).unwrap_or_default() {
+                if !is_presentation(&path) || read.contains(&path) {
                     files.insert(under(&shown, path), state);
                 }
             }
@@ -209,10 +234,25 @@ fn under(shown: &Path, path: PathBuf) -> PathBuf {
 /// `.signal` include outside `dir` names its file, watched as one (what it
 /// holds is its own); a folder that does not exist names none.
 pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    include_folders(dir).0
+}
+
+/// [`include_dirs`], and the projects included inside `dir` (a folder or
+/// a `.signal` file), by path in it, sorted.
+fn include_folders(dir: &Path) -> (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>) {
     let Ok(root) = fs::canonicalize(dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut inside: Vec<PathBuf> = Vec::new();
+    let mut within = |canonical: &Path| {
+        if let Ok(relative) = canonical.strip_prefix(&root)
+            && !relative.as_os_str().is_empty()
+            && !inside.iter().any(|p| p == relative)
+        {
+            inside.push(relative.to_owned());
+        }
+    };
     let mut seen = vec![root.clone()];
     let mut todo = vec![(PathBuf::new(), root.clone(), 0usize)];
     while let Some((shown, folder, depth)) = todo.pop() {
@@ -232,6 +272,7 @@ pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
                 if !seen.contains(&canonical) && !canonical.starts_with(&root) {
                     found.push((shown.join(&written), canonical.clone()));
                 }
+                within(&canonical);
                 seen.push(canonical);
                 continue;
             }
@@ -243,26 +284,82 @@ pub fn include_dirs(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
             if !canonical.starts_with(&root) {
                 found.push((path.clone(), canonical.clone()));
             }
+            within(&canonical);
             todo.push((path, canonical, depth + 1));
         }
     }
     found.sort();
+    inside.sort();
+    (found, inside)
+}
+
+/// The folders of a project folder a load reads, and `ui/` (presentation,
+/// [`is_presentation`]), each watched whole.
+const WATCHED: [&str; 4] = [crate::COMPOSITES, crate::PATTERNS, crate::INTERFACES, "ui"];
+
+/// The files a load of the project in `dir` reads outside its definitions,
+/// by path in the folder: each sample pattern's WAV (ADR 0056 §1) and each
+/// capture slot's render file (ADR 0038 §3).
+fn assets(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = crate::read_regular_to_string(dir.join(crate::PROJECT_FILE))
+        .map(|text| crate::render_paths(&text))
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    if let Ok(entries) = fs::read_dir(dir.join(crate::PATTERNS)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml")
+                && let Ok(text) = crate::read_regular_to_string(&path)
+                && let Some(file) = crate::sample_file(&text)
+            {
+                found.push(PathBuf::from(file));
+            }
+        }
+    }
     found
 }
 
-fn snapshot(dir: &Path) -> io::Result<Snapshot> {
+/// The files of the project in `dir` a load reads, each with its
+/// modification time and length: the top-level files, the [`WATCHED`]
+/// folders, its [`assets`], and the projects it includes `inside` it (by
+/// path in it). A `.signal` file is itself, by the empty path.
+fn snapshot(dir: &Path, inside: &[PathBuf]) -> io::Result<Snapshot> {
     let mut files = Snapshot::new();
-    // A `.signal` include's file: itself, by the empty path.
     let metadata = fs::metadata(dir)?;
     if metadata.is_file() {
         files.insert(PathBuf::new(), (metadata.modified().ok(), metadata.len()));
         return Ok(files);
     }
-    let mut folders = vec![dir.to_owned()];
+    let hidden = |entry: &fs::DirEntry| entry.file_name().to_string_lossy().starts_with('.');
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if !hidden(&entry) && !metadata.is_dir() {
+            files.insert(
+                PathBuf::from(entry.file_name()),
+                (metadata.modified().ok(), metadata.len()),
+            );
+        }
+    }
+    let mut folders: Vec<PathBuf> = WATCHED.iter().map(|f| dir.join(f)).collect();
     while let Some(folder) = folders.pop() {
-        for entry in fs::read_dir(&folder)? {
+        let entries = match fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
             let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            if hidden(&entry) {
                 continue;
             }
             let path = entry.path();
@@ -273,6 +370,20 @@ fn snapshot(dir: &Path) -> io::Result<Snapshot> {
                 let relative = path.strip_prefix(dir).unwrap_or(&path).to_owned();
                 files.insert(relative, (metadata.modified().ok(), metadata.len()));
             }
+        }
+    }
+    for asset in assets(dir) {
+        if let Ok(metadata) = fs::metadata(dir.join(&asset))
+            && metadata.is_file()
+        {
+            files
+                .entry(asset)
+                .or_insert((metadata.modified().ok(), metadata.len()));
+        }
+    }
+    for folder in inside {
+        for (path, state) in snapshot(&dir.join(folder), &[]).unwrap_or_default() {
+            files.insert(under(folder, path), state);
         }
     }
     Ok(files)
@@ -512,6 +623,40 @@ fn same_sides(
         };
         return Err(vec![new.instances_error(format!(
             "the inputs must stay {} while the project plays (now {}); restart to change them",
+            list(&was),
+            list(&now)
+        ))]);
+    }
+    // ADR 0057: the run binds its external sides when it starts (each `dmx`
+    // slot's Art-Net target, each `osc` and `midi` slot's listener) by role
+    // and kind, with the slot's ports in order; any of them changed live
+    // would keep the old binding until a restart.
+    let external = |project: &Project, plan: &signal_graph::ExecutionPlan| {
+        let mut sides: Vec<(String, String, String, Vec<String>)> =
+            crate::device::data_sides(project, plan)
+                .into_iter()
+                .chain(crate::device::control_sides(project, plan))
+                .map(|s| (s.address.to_string(), s.role, s.kind, s.ports))
+                .collect();
+        sides.sort();
+        sides
+    };
+    let (was, now) = (external(old, before), external(new, plan));
+    if was != now {
+        let list = |sides: &[(String, String, String, Vec<String>)]| {
+            if sides.is_empty() {
+                return "none".to_owned();
+            }
+            sides
+                .iter()
+                .map(|(address, role, kind, ports)| {
+                    format!("{address} ({kind} {role}: {})", ports.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        return Err(vec![new.instances_error(format!(
+            "the external sides must stay {} while the project plays (now {}); restart to change them",
             list(&was),
             list(&now)
         ))]);
@@ -1145,6 +1290,23 @@ fn room(controller: &Controller, commands: usize) -> Result<(), EditError> {
         return Ok(());
     }
     let in_flight = controller.in_flight();
+    // More than the whole queue holds: no wait makes room, so it is no
+    // refusal to retry (a watch would reload it every poll) but an edit to
+    // split.
+    let capacity = available + in_flight;
+    if commands > capacity {
+        return Err(EditError::Invalid(vec![Diagnostic {
+            severity: crate::Severity::Error,
+            file: crate::PROJECT_FILE.to_owned(),
+            line: 1,
+            column: 1,
+            message: format!(
+                "the edit needs {commands} commands, more than the command queue holds \
+                 ({capacity}); nothing was sent. Split it: save fewer changes at once (each \
+                 removal also reserves its resume)"
+            ),
+        }]));
+    }
     Err(EditError::Refused(format!(
         "the edit needs {commands} commands but the command queue has room for {available} \
          ({in_flight} in flight, at most {}); nothing was sent. Save again once the \

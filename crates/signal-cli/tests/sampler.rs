@@ -269,3 +269,101 @@ fn an_edited_wav_alone_reaches_the_running_sampler() {
         "replayed exactly"
     );
 }
+
+/// A host including the sampler project records a session whose version
+/// holds the include's WAV under `includes/<key>/`: the replay needs
+/// neither folder, and the copy checks itself.
+#[test]
+fn a_session_copies_an_included_project_s_samples() {
+    let child = project("included", 48_000);
+    let host = child.parent().unwrap().join("included-host");
+    let _ = fs::remove_dir_all(&host);
+    fs::create_dir_all(&host).unwrap();
+    fs::write(
+        host.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = 48000\nseed = 1\n\
+         [instances]\nchild = { project = \"../included\" }\n\
+         out = { module = \"std.audio_out\" }\n",
+    )
+    .unwrap();
+    let session = host.join("session");
+    ok(signal(&[
+        "play",
+        host.to_str().unwrap(),
+        "--driver",
+        "null",
+        "--fast",
+        "--seconds",
+        "1",
+        "--record-session",
+        session.to_str().unwrap(),
+    ]));
+    assert!(
+        session
+            .join("projects/v0/includes/child/samples/hit.wav")
+            .is_file()
+    );
+    fs::remove_file(child.join("samples/hit.wav")).unwrap();
+    ok(signal(&[
+        "replay",
+        session.to_str().unwrap(),
+        "--frames",
+        "48000",
+        "--out",
+        host.join("replayed").to_str().unwrap(),
+    ]));
+}
+
+/// A slot whose content plays a sample, saved as a project: the WAV goes
+/// with the pattern, and the new project renders as the slot played.
+#[test]
+fn a_slot_export_carries_its_samples() {
+    let dir = project("slot-export", 48_000);
+    fs::create_dir_all(dir.join("composites")).unwrap();
+    fs::write(
+        dir.join("composites/voice.toml"),
+        "schema_version = 1\n[composite]\nname = \"voice\"\n[instances]\n\
+         clock = { module = \"std.transport\", bpm = 120 }\n\
+         speed = { module = \"std.const\", value = 1 }\n\
+         hit = { module = \"std.sampler\", pattern = \"hit\" }\n\
+         [wiring]\nconnections = [\n  { from = \"clock.beat\", to = \"hit.trigger\" },\n  { from = \"speed.out\", to = \"hit.rate\" },\n]\n\
+         [exports]\noutputs = { l = \"hit.l\", r = \"hit.r\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"sampler\"\nsample_rate = 48000\nseed = 1\n\
+         [instances]\ns = { slot = { outputs = { l = {}, r = {} } }, load = \"voice\" }\n",
+    )
+    .unwrap();
+    let out = dir.join("exported");
+    ok(signal(&[
+        "slot-export",
+        dir.to_str().unwrap(),
+        "s",
+        "--out",
+        out.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        fs::read(out.join("samples/hit.wav")).unwrap(),
+        fs::read(dir.join("samples/hit.wav")).unwrap()
+    );
+    // It loads (its WAV read); with a sink it renders.
+    let text = fs::read_to_string(out.join("project.toml")).unwrap();
+    fs::write(
+        out.join("project.toml"),
+        text.replace(
+            "[instances]\n",
+            "[instances]\nout = { module = \"std.audio_out\" }\n",
+        ),
+    )
+    .unwrap();
+    ok(signal(&[
+        "render",
+        out.to_str().unwrap(),
+        "--frames",
+        "4800",
+        "--out",
+        dir.join("rendered").to_str().unwrap(),
+    ]));
+}

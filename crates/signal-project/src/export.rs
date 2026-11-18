@@ -7,7 +7,8 @@
 //!   a primitive or a library module gives one instance of it, named after
 //!   the slot, with every interface port exported under its name. The
 //!   project composites it uses are copied with it, and so are the
-//!   patterns its instances name.
+//!   patterns its instances name, with the WAVs sample patterns read
+//!   ([`sample_files`], ADR 0056 §1).
 //! - **The slot's values travel:** a value set on the slot under an
 //!   interface parameter's name, and a `set` key, are written on the
 //!   instances the export reaches.
@@ -29,6 +30,33 @@ use std::collections::{BTreeMap, BTreeSet};
 use toml_edit::{DocumentMut, Item, Value};
 
 use crate::{Project, SourceFile, is_project_path};
+
+/// ADR 0056 §1: the WAV files the sample patterns among `files` (path,
+/// text) read, from the project folder `dir`, by path: an exported project
+/// carries its samples beside its text, or it does not load. One that
+/// cannot be read is refused with its path.
+pub fn sample_files<'a>(
+    dir: &std::path::Path,
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut samples: Vec<(String, Vec<u8>)> = Vec::new();
+    for (path, text) in files {
+        let Some(file) = path
+            .strip_prefix("patterns/")
+            .filter(|p| p.ends_with(".toml"))
+            .and_then(|_| crate::sample_file(text))
+        else {
+            continue;
+        };
+        if samples.iter().any(|(p, _)| *p == file) {
+            continue;
+        }
+        let bytes = crate::read_regular(dir.join(&file))
+            .map_err(|e| format!("{file}, the sample {path} reads: {e}"))?;
+        samples.push((file, bytes));
+    }
+    Ok(samples)
+}
 
 /// The files of slot `slot` of `project` as a project of its own, with
 /// `part`, the text of its part (`ui/parts/<slot>.html`) if it has one.

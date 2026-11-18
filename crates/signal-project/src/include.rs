@@ -738,8 +738,8 @@ impl Project {
         hashes
     }
 
-    /// Every project file's hash and every include's
-    /// ([`include_file_hashes`](Project::include_file_hashes)).
+    /// Every project file's hash, its samples' (ADR 0056 §1) and every
+    /// include's ([`include_file_hashes`](Project::include_file_hashes)).
     fn file_hashes(&self) -> BTreeMap<String, String> {
         let mut hashes: BTreeMap<String, String> = self
             .files
@@ -751,6 +751,7 @@ impl Project {
                 )
             })
             .collect();
+        hashes.extend(self.sample_file_hashes());
         hashes.extend(self.include_file_hashes());
         hashes
     }
@@ -797,6 +798,24 @@ impl Project {
                     path: format!("{at}/{}", file.path),
                     text: file.text,
                 });
+            }
+        }
+        files
+    }
+
+    /// ADR 0056 §1: [`Project::sample_files`] with each included project's
+    /// under its `includes/<key>/` folder, nested as
+    /// [`session_copy`](Project::session_copy) nests their text: a session
+    /// version holds every WAV it plays.
+    pub fn session_samples(&self) -> Vec<(String, std::sync::Arc<[u8]>)> {
+        let mut files = self.sample_files();
+        for entry in &self.content.entries {
+            let Some(included) = self.content.projects.get(&entry.canonical) else {
+                continue;
+            };
+            let at = format!("includes/{}", key(&entry.def, &entry.instance));
+            for (path, bytes) in included.project.session_samples() {
+                files.push((format!("{at}/{path}"), bytes));
             }
         }
         files

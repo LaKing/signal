@@ -120,6 +120,26 @@ impl Pattern {
         self.bytes = Some(bytes.into());
         Ok(())
     }
+
+    /// Takes `before`'s sample as read when this is the same sample file at
+    /// the same `rate` and was rebuilt from text alone (no folder, so its
+    /// WAV unread): a parameter's write-back keeps the samples it does not
+    /// touch. A WAV edited on disk reloads through the folder instead.
+    pub(crate) fn keep_sample(&mut self, before: &Pattern, rate: u32) {
+        let same_file =
+            matches!((&self.file, &before.file), (Some((a, _)), Some((b, _))) if a == b);
+        if self.kind == SAMPLE
+            && self.bytes.is_none()
+            && same_file
+            && before.bytes.is_some()
+            && before.header.get(1).copied() == Some(f64::from(rate))
+        {
+            self.header.clone_from(&before.header);
+            self.rows = before.rows.clone();
+            self.hash.clone_from(&before.hash);
+            self.bytes.clone_from(&before.bytes);
+        }
+    }
 }
 
 /// A sample pattern file (`kind = "sample"`, ADR 0056 §1): the WAV it reads.

@@ -1551,18 +1551,19 @@ mod tests {
         const K: usize = 8;
         let cells = Cells::with_rows((0..2 * K).map(|x| x as f64).collect(), K, Vec::new());
         let refusals = AtomicU64::new(0);
-        // SAFETY: test of the window only; nothing else references `cells`.
-        let mut window = unsafe { cells.window(&refusals, &(0..2), 1..4) }.unwrap();
-        assert_eq!(window.get(1, 1), Some((K + 1) as f64), "the frame before");
-        assert_eq!(window.frames(0, (2, 4)), Some(&[2.0, 3.0][..]));
-        window.set(0, 3, -1.0);
-        assert_eq!(window.get(0, 3), Some(-1.0));
-        assert_eq!(refusals.load(Ordering::Relaxed), 0);
-        assert_eq!(window.get(0, 0), None, "two frames before");
-        assert_eq!(window.get(0, 4), None, "after the call");
-        assert_eq!(window.get(2, 2), None, "another instance's port");
-        assert_eq!(refusals.load(Ordering::Relaxed), 3);
-        drop(window);
+        {
+            // SAFETY: test of the window only; nothing else references `cells`.
+            let mut window = unsafe { cells.window(&refusals, &(0..2), 1..4) }.unwrap();
+            assert_eq!(window.get(1, 1), Some((K + 1) as f64), "the frame before");
+            assert_eq!(window.frames(0, (2, 4)), Some(&[2.0, 3.0][..]));
+            window.set(0, 3, -1.0);
+            assert_eq!(window.get(0, 3), Some(-1.0));
+            assert_eq!(refusals.load(Ordering::Relaxed), 0);
+            assert_eq!(window.get(0, 0), None, "two frames before");
+            assert_eq!(window.get(0, 4), None, "after the call");
+            assert_eq!(window.get(2, 2), None, "another instance's port");
+            assert_eq!(refusals.load(Ordering::Relaxed), 3);
+        }
         let first = unsafe { cells.window(&refusals, &(0..2), 0..2) }.unwrap();
         assert_eq!(first.get(0, 0), Some(0.0));
         assert_eq!(

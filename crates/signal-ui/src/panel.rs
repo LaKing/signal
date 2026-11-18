@@ -1183,6 +1183,13 @@ pub fn after_write_all(
         .map(|(e, order)| (e.instance, e.parameter, e.value, order.as_slice()))
         .collect();
     match current.with_parameters(&written) {
+        // A rebuilt project that no longer plans is not taken: it would
+        // leave an empty panel and a running project that cannot play.
+        Ok(project) if let Err(found) = project.plan(registry) => Written::NotTaken(
+            found
+                .first()
+                .map_or_else(|| "it does not plan".to_owned(), ToString::to_string),
+        ),
         Ok(project) => {
             let panel = Panel::new(&project, registry);
             // Sent, or a single-valued range (every send was that value):

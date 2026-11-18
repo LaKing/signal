@@ -32,6 +32,11 @@ pub(crate) fn run(args: &SlotExportArgs, json: bool) -> Result<(), Failure> {
     let part = signal_project::read_regular_to_string(&part_path).ok();
     let files = signal_project::export::export_slot(&project, &args.slot, part.as_deref())
         .map_err(Failure::Usage)?;
+    let samples = signal_project::export::sample_files(
+        &args.project,
+        files.iter().map(|f| (f.path.as_str(), f.text.as_str())),
+    )
+    .map_err(Failure::Usage)?;
     if args.out.exists()
         && std::fs::read_dir(&args.out)
             .map(|mut d| d.next().is_some())
@@ -42,16 +47,19 @@ pub(crate) fn run(args: &SlotExportArgs, json: bool) -> Result<(), Failure> {
             args.out.display()
         )));
     }
-    for file in &files {
-        let path = args.out.join(&file.path);
+    let texts = files.iter().map(|f| (f.path.as_str(), f.text.as_bytes()));
+    let bytes = samples.iter().map(|(p, b)| (p.as_str(), &b[..]));
+    let mut written: Vec<&str> = Vec::new();
+    for (relative, content) in texts.chain(bytes) {
+        let path = args.out.join(relative);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| Failure::Io(format!("{}: {e}", dir.display())))?;
         }
-        std::fs::write(&path, &file.text)
+        std::fs::write(&path, content)
             .map_err(|e| Failure::Io(format!("{}: {e}", path.display())))?;
+        written.push(relative);
     }
-    let written: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     if json {
         print_stdout(
             &json!({"project": args.out.display().to_string(), "written": written}).to_string(),

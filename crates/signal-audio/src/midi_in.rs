@@ -168,20 +168,31 @@ extern "C" fn read(packets: *const u8, refcon: *mut c_void, _source: *mut c_void
     // SAFETY: CoreMIDI hands a valid packet list for the call: a `u32`
     // count at its start, read unaligned.
     let count = unsafe { packets.cast::<u32>().read_unaligned() };
-    let mut at = 4usize;
-    for _ in 0..count {
-        // SAFETY: each packet lies within the list CoreMIDI passed: its
-        // time stamp (8 bytes), its length (2), then `length` bytes (at
-        // most 256), all read unaligned.
-        let length = unsafe { packets.add(at + 8).cast::<u16>().read_unaligned() };
-        let length = usize::from(length).min(256);
+    // SAFETY: each header `walk` asks for lies within the list CoreMIDI
+    // passed: a packet's length (2 bytes, after its 8-byte time stamp),
+    // read unaligned.
+    let length_at = |at: usize| unsafe { packets.add(at).cast::<u16>().read_unaligned() };
+    walk(count, length_at, |start, length| {
         for i in 0..length {
-            // SAFETY: as above, `i < length`.
-            let byte = unsafe { packets.add(at + 10 + i).read() };
+            // SAFETY: as above, the packet's `length` bytes follow its
+            // header.
+            let byte = unsafe { packets.add(start + i).read() };
             if feed.tx.push(byte).is_err() {
                 feed.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
+    });
+}
+
+/// Walks a packet list of `count` packets: `length_at(offset)` reads a
+/// packet's 16-bit length, and `packet(start, length)` gets each packet's
+/// bytes. A packet's declared length places the next one, whatever its
+/// size: the SDK allows packets longer than 256 bytes (`MIDIServices.h`).
+fn walk(count: u32, length_at: impl Fn(usize) -> u16, mut packet: impl FnMut(usize, usize)) {
+    let mut at = 4usize;
+    for _ in 0..count {
+        let length = usize::from(length_at(at + 8));
+        packet(at + 10, length);
         // arm64: the next packet at the next multiple of 4.
         at = (at + 10 + length + 3) & !3;
     }
@@ -396,6 +407,26 @@ impl Drop for MidiFeed {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A packet longer than 256 bytes is read whole, and the packet after
+    /// it is found from its declared length.
+    #[test]
+    fn a_long_packet_is_read_whole_and_the_next_one_found() {
+        let mut list = 2u32.to_ne_bytes().to_vec();
+        let long: Vec<u8> = (0..300u32).map(|i| (i % 128) as u8).collect();
+        for bytes in [&long[..], &[0x90, 60, 100]] {
+            list.extend_from_slice(&0u64.to_ne_bytes());
+            list.extend_from_slice(&(bytes.len() as u16).to_ne_bytes());
+            list.extend_from_slice(bytes);
+            list.resize((list.len() + 3) & !3, 0xEE);
+        }
+        let length_at = |at: usize| u16::from_ne_bytes([list[at], list[at + 1]]);
+        let mut got = Vec::new();
+        walk(2, length_at, |start, length| {
+            got.push(list[start..start + length].to_vec());
+        });
+        assert_eq!(got, [long, vec![0x90, 60, 100]]);
+    }
 
     /// ADR 0057 phase 3, without a device: bytes sent through a virtual
     /// source in this process arrive in the ring, in order.

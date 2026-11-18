@@ -71,7 +71,28 @@ impl External {
             }
         }
         let mut inputs = Vec::new();
-        for side in signal_project::device::control_sides(project, plan) {
+        let sides = signal_project::device::control_sides(project, plan);
+        // The `osc` sides bound, one listener per address: roles bound to
+        // the same address share its socket.
+        let bound: Vec<(usize, (String, OscRoute))> = sides
+            .iter()
+            .enumerate()
+            .filter(|(_, side)| side.kind != signal_project::device::MIDI)
+            .filter_map(|(index, side)| {
+                let address = setup.capture.get(&side.role)?.osc.clone()?;
+                let route = OscRoute {
+                    role: side.role.clone(),
+                    names: side.ports.clone(),
+                };
+                Some((index, (address, route)))
+            })
+            .collect();
+        let bindings: Vec<(String, OscRoute)> = bound.iter().map(|(_, b)| b.clone()).collect();
+        let (listeners, opened) = signal_output::osc::listen_each(&bindings);
+        external.osc = listeners;
+        let mut opened: std::collections::BTreeMap<usize, signal_output::osc::Opened> =
+            bound.iter().map(|(index, _)| *index).zip(opened).collect();
+        for (index, side) in sides.into_iter().enumerate() {
             let binding = setup.capture.get(&side.role);
             let source: Box<dyn signal_output::inputs::InputSource> =
                 if side.kind == signal_project::device::MIDI {
@@ -100,25 +121,16 @@ impl External {
                         ));
                         continue;
                     };
-                    let route = OscRoute {
-                        role: side.role.clone(),
-                        names: side.ports.clone(),
-                    };
-                    match signal_output::osc::listen(address, &[route]) {
-                        Ok((listener, mut sources)) => {
-                            external.osc.push(listener);
-                            let Some(source) = sources.pop() else {
-                                continue;
-                            };
-                            Box::new(source)
-                        }
-                        Err(why) => {
+                    match opened.remove(&index) {
+                        Some(Ok((source, _))) => Box::new(source),
+                        Some(Err(why)) => {
                             notes.push(format!(
                                 "{} ({}): OSC on {address}: {why}",
                                 side.role, side.address
                             ));
                             continue;
                         }
+                        None => continue,
                     }
                 };
             let (input, record) = RunInput::new(

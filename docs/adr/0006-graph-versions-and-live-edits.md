@@ -19,3 +19,7 @@ In-place mutation of the running graph: harder to make real-time safe and determ
 ## Consequences
 - Edit preparation latency is visible: an edit applies a few milliseconds after it is requested.
 - The command log is the single record of what happened in a session.
+
+**2026-11-18, the watch reads what a load reads; an edit too large for the queue is invalid** (operator, after an outside review of `5317b11`).
+- `ProjectWatcher` walked the whole folder every 100 ms on the control thread: 5,000 unrelated files under `past-renders/` made a poll about 23 ms (the reviewer's measurement). It now stats the top-level files, `composites/`, `patterns/`, `interfaces/` and `ui/`, the files the project names (sample WAVs, capture render files) and the projects included inside the folder, nothing else. A sample's WAV under `ui/` is no presentation change (`ProjectWatcher::presentation_only`), so its edit reloads (`crates/signal-project/tests/live.rs`, `the_watcher_follows_what_the_project_reads`).
+- An edit needing more commands than the whole command queue holds was refused like a full queue, so the host reloaded and replanned it every poll. It is now `EditError::Invalid` ("split it"), which the watch does not retry; only a queue that draining can free is retried (`an_edit_larger_than_the_command_queue_sends_nothing`, `crates/signal-project/tests/write.rs` `an_edit_larger_than_the_queue_is_invalid_not_retried`).

@@ -239,14 +239,26 @@ pub fn midi_channel(names: &[String]) -> (MidiWriter, MidiSource) {
         values: vec![0.0; names.len()],
     };
     let last = state.values.clone();
-    (MidiWriter { state, last, tx }, source)
+    (
+        MidiWriter {
+            state,
+            last,
+            barrier: false,
+            tx,
+        },
+        source,
+    )
 }
 
 /// The control thread's end of a `midi` slot: reads the bytes into a
 /// [`MidiState`] and hands each value that changed to the [`MidiSource`].
+/// What a full ring refuses stays pending and goes with the next call.
 pub struct MidiWriter {
     state: MidiState,
+    /// The values the source was handed.
     last: Vec<f32>,
+    /// A Start's barrier the ring has not taken yet.
+    barrier: bool,
     tx: Producer<(u16, f32)>,
 }
 
@@ -258,18 +270,27 @@ impl MidiWriter {
             self.state.byte(byte, now);
             if byte == 0xFA {
                 self.flush();
-                let _ = self.tx.push((BARRIER, 0.0));
+                self.barrier = true;
+                self.flush();
             }
         }
         self.flush();
     }
 
+    /// Hands each value that changed, then a pending barrier; a value
+    /// counts as handed only once the ring took it, so a full ring delays
+    /// a change (a release too) but never loses it.
     fn flush(&mut self) {
         for (i, (value, before)) in self.state.values.iter().zip(&mut self.last).enumerate() {
             if value.to_bits() != before.to_bits() {
+                if self.tx.push((i as u16, *value)).is_err() {
+                    return;
+                }
                 *before = *value;
-                let _ = self.tx.push((i as u16, *value));
             }
+        }
+        if self.barrier && self.tx.push((BARRIER, 0.0)).is_ok() {
+            self.barrier = false;
         }
     }
 }
@@ -386,5 +407,32 @@ mod tests {
         assert_eq!(out, [1.0 / 24.0; 4]);
         source.read(&mut out, 0);
         assert_eq!(out, [1.0 / 24.0; 4], "held");
+    }
+
+    /// A change the full ring refused goes with a later call: a note
+    /// played while the ring is full sounds once it drains, and so does
+    /// its release.
+    #[test]
+    fn a_full_ring_delays_a_change_but_never_loses_it() {
+        let (mut writer, mut source) = midi_channel(&names(&["cc1", "note_gate"]));
+        let now = Instant::now();
+        let mut out = [9.0f32; 2];
+        for i in 0..5000u32 {
+            writer.bytes([0xB0, 1, (i % 2) as u8], now);
+        }
+        writer.bytes([0x90, 60, 100], now);
+        while source.rx.pop().is_ok() {}
+        writer.bytes([], now);
+        source.read(&mut out, 0);
+        assert_eq!(out[1], 1.0, "the note held");
+        for i in 0..5000u32 {
+            writer.bytes([0xB0, 1, (i % 2) as u8], now);
+        }
+        writer.bytes([0x80, 60, 0, 0xFA], now);
+        while source.rx.pop().is_ok() {}
+        writer.bytes([], now);
+        source.read(&mut out, 0);
+        assert_eq!(out[1], 0.0, "the release arrives");
+        assert!(source.rx.is_empty(), "and the Start's barrier after it");
     }
 }

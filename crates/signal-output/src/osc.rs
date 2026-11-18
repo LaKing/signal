@@ -184,6 +184,57 @@ impl Drop for OscListener {
     }
 }
 
+/// What [`listen_each`] opened for one binding: its source and the address
+/// it listens on, or why its address could not be opened.
+pub type Opened = Result<(OscSource, SocketAddr), String>;
+
+/// Listens for each of `bindings` (an address and its route) with one
+/// socket per address, so the roles bound to the same address share it
+/// (each a route of its listener): the listeners, and what each binding
+/// got, in order.
+pub fn listen_each(bindings: &[(String, OscRoute)]) -> (Vec<OscListener>, Vec<Opened>) {
+    let mut opened: Vec<Option<Opened>> = bindings.iter().map(|_| None).collect();
+    let mut listeners = Vec::new();
+    let mut addresses: Vec<&str> = bindings.iter().map(|(a, _)| a.as_str()).collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    for address in addresses {
+        let members: Vec<usize> = bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, (a, _))| a == address)
+            .map(|(i, _)| i)
+            .collect();
+        let routes: Vec<OscRoute> = bindings
+            .iter()
+            .filter(|(a, _)| a == address)
+            .map(|(_, r)| r.clone())
+            .collect();
+        match listen(address, &routes) {
+            Ok((listener, sources)) => {
+                for (i, source) in members.into_iter().zip(sources) {
+                    if let Some(slot) = opened.get_mut(i) {
+                        *slot = Some(Ok((source, listener.local)));
+                    }
+                }
+                listeners.push(listener);
+            }
+            Err(error) => {
+                for i in members {
+                    if let Some(slot) = opened.get_mut(i) {
+                        *slot = Some(Err(error.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    let opened = opened
+        .into_iter()
+        .map(|o| o.unwrap_or_else(|| Err("not opened".to_owned())))
+        .collect();
+    (listeners, opened)
+}
+
 /// Listens on `address` for `routes`' messages: the listener, and one
 /// [`OscSource`] per route, in order.
 pub fn listen(address: &str, routes: &[OscRoute]) -> io::Result<(OscListener, Vec<OscSource>)> {
@@ -328,5 +379,39 @@ mod tests {
         sources[0].read(&mut out, 0);
         assert_eq!(out, [0.0, 0.75]);
         assert_eq!(listener.received.load(Ordering::Relaxed), 1);
+    }
+
+    /// Two roles bound to one address share its socket (a second bind of
+    /// it would fail), each reading its own messages.
+    #[test]
+    fn roles_bound_to_one_address_share_its_listener() {
+        let route = |role: &str| OscRoute {
+            role: role.to_owned(),
+            names: vec!["x".to_owned()],
+        };
+        let bindings = [
+            ("127.0.0.1:0".to_owned(), route("a")),
+            ("127.0.0.1:0".to_owned(), route("b")),
+        ];
+        let (listeners, opened) = listen_each(&bindings);
+        assert_eq!(listeners.len(), 1);
+        let mut sources: Vec<OscSource> = opened.into_iter().map(|o| o.unwrap().0).collect();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for (address, value) in [("/a/x", 0.25f32), ("/b/x", 0.5)] {
+            client
+                .send_to(&osc_message(address, value), listeners[0].local)
+                .unwrap();
+        }
+        for _ in 0..100 {
+            if listeners[0].received.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut out = [0.0f32; 1];
+        sources[0].read(&mut out, 0);
+        assert_eq!(out, [0.25]);
+        sources[1].read(&mut out, 0);
+        assert_eq!(out, [0.5]);
     }
 }
