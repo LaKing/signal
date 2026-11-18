@@ -71,12 +71,21 @@ impl Pattern {
     /// `[channels, rate]`, one row per frame. Refuses a file outside the
     /// folder, unreadable, of more than two channels, at another rate than
     /// `rate`, or longer than a table holds.
-    pub(crate) fn read_sample(&mut self, dir: &std::path::Path, rate: u32) -> Result<(), String> {
+    /// A WAV in `planned` (path, bytes: about to be written) is read from
+    /// there.
+    pub(crate) fn read_sample(
+        &mut self,
+        dir: &std::path::Path,
+        rate: u32,
+        planned: &[(String, Vec<u8>)],
+    ) -> Result<(), String> {
         let Some((file, _)) = &self.file else {
             return Ok(());
         };
-        let path = dir.join(file);
-        let bytes = crate::read_regular(&path).map_err(|e| format!("{file}: {e}"))?;
+        let bytes = match planned.iter().find(|(path, _)| path == file) {
+            Some((_, bytes)) => bytes.clone(),
+            None => crate::read_regular(dir.join(file)).map_err(|e| format!("{file}: {e}"))?,
+        };
         let reader = hound::WavReader::new(std::io::Cursor::new(&bytes))
             .map_err(|e| format!("{file}: not a WAV file ({e})"))?;
         let spec = reader.spec();

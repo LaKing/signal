@@ -350,8 +350,9 @@ impl Host {
         let (copies, edits, stack) = crate::stacks::import_stack(&self.opening.dir, &path)
             .map_err(|e| fail("bad-value", e))?;
         let library = signal_project::Library::builtin();
-        let prepared = vendor::Prepared::new(&self.opening.dir, copies, edits, library)
-            .map_err(|e| fail("does-not-load", e.to_string()))?;
+        let prepared =
+            vendor::Prepared::new(&self.opening.dir, copies, edits, (&path, &stack), library)
+                .map_err(|e| fail("does-not-load", e.to_string()))?;
         if let Some(file) = prepared.paths().find(|file| self.linked_file(file)) {
             return Err(fail(
                 "write-failed",

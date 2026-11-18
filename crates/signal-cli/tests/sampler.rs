@@ -367,3 +367,88 @@ fn a_slot_export_carries_its_samples() {
         dir.join("rendered").to_str().unwrap(),
     ]));
 }
+
+/// `signal vendor --slot`: the linked project's WAV is copied with its
+/// pattern; the host's own WAV of that name (other bytes) stays, and the
+/// copy goes beside it as `<slot>_<name>`. The host renders with the
+/// linked project gone.
+#[test]
+fn a_slot_s_own_copy_carries_its_samples() {
+    let linked = project("vendor-linked", 48_000);
+    let host = linked.parent().unwrap().join("vendor-host");
+    let _ = fs::remove_dir_all(&host);
+    wav(&host.join("samples/hit.wav"), 48_000, &[0.1; 10]);
+    fs::write(
+        host.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = 48000\nseed = 1\n\
+         [instances]\ns = { slot = { outputs = { l = {}, r = {} } }, load = \"../vendor-linked\" }\n\
+         out = { module = \"std.audio_out\" }\n\
+         [wiring]\nconnections = [\n  { from = \"s.l\", to = \"out.l\" },\n  { from = \"s.r\", to = \"out.r\" },\n]\n",
+    )
+    .unwrap();
+    let before = host.join("before");
+    let render = |out: &Path| {
+        ok(signal(&[
+            "render",
+            host.to_str().unwrap(),
+            "--frames",
+            "48000",
+            "--out",
+            out.to_str().unwrap(),
+        ]));
+    };
+    render(&before);
+    ok(signal(&["vendor", host.to_str().unwrap(), "--slot", "s"]));
+    assert_eq!(
+        fs::read(host.join("samples/s_hit.wav")).unwrap(),
+        fs::read(linked.join("samples/hit.wav")).unwrap()
+    );
+    assert!(
+        fs::read_to_string(host.join("patterns/hit.toml"))
+            .unwrap()
+            .contains("\"samples/s_hit.wav\"")
+    );
+    fs::remove_dir_all(&linked).unwrap();
+    let after = host.join("after");
+    render(&after);
+    assert_eq!(
+        left(&before.join("audio.wav")),
+        left(&after.join("audio.wav"))
+    );
+}
+
+/// `signal vendor --include`: the included project's WAV is copied with its
+/// pattern, so the host renders with the include gone.
+#[test]
+fn an_include_s_own_copy_carries_its_samples() {
+    let included = project("vendor-included", 48_000);
+    let host = included.parent().unwrap().join("vendor-include-host");
+    let _ = fs::remove_dir_all(&host);
+    fs::create_dir_all(&host).unwrap();
+    fs::write(
+        host.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = 48000\nseed = 1\n\
+         [instances]\nchild = { project = \"../vendor-included\" }\n\
+         out = { module = \"std.audio_out\" }\n",
+    )
+    .unwrap();
+    ok(signal(&[
+        "vendor",
+        host.to_str().unwrap(),
+        "--include",
+        "child",
+    ]));
+    assert_eq!(
+        fs::read(host.join("samples/hit.wav")).unwrap(),
+        fs::read(included.join("samples/hit.wav")).unwrap()
+    );
+    fs::remove_dir_all(&included).unwrap();
+    ok(signal(&[
+        "render",
+        host.to_str().unwrap(),
+        "--frames",
+        "4800",
+        "--out",
+        host.join("rendered").to_str().unwrap(),
+    ]));
+}

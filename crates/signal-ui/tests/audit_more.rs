@@ -61,7 +61,9 @@ fn importing_identical_parent_with_different_child_preserves_sound() {
         copies.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );
     let library = signal_project::Library::builtin();
-    let prepared = signal_project::vendor::Prepared::new(&dst, copies, edits, library).unwrap();
+    let prepared =
+        signal_project::vendor::Prepared::new(&dst, copies, edits, (&src, "rack"), library)
+            .unwrap();
     signal_project::vendor::write(&dst, prepared, library).unwrap();
     assert_eq!(freq(&dst, "/existing/x/osc"), 220.0);
     assert_eq!(
@@ -119,4 +121,77 @@ fn making_linked_project_own_preserves_dependency_context() {
         value, 440.0,
         "own-copy silently substitutes host dependency"
     );
+}
+
+/// A mono 16-bit WAV at 48 kHz holding `samples`.
+fn pcm16(samples: &[i16]) -> Vec<u8> {
+    let data = (samples.len() * 2) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&48_000u32.to_le_bytes());
+    bytes.extend_from_slice(&96_000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    bytes
+}
+
+/// ADR 0056: a Stack imported brings the WAVs its sample patterns read; a
+/// host WAV of the same name and other bytes stays, the copy beside it as
+/// `<stack>_<name>`.
+#[test]
+fn an_imported_stack_carries_its_samples() {
+    let base = fixture("stack-samples");
+    let src = base.join("src");
+    let dst = base.join("dst");
+    write(
+        &src,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"rack\"\nsample_rate = 48000\n[instances]\ns = { slot = { outputs = { l = {}, r = {} } }, load = \"voice\" }\n",
+    );
+    write(
+        &src,
+        "composites/voice.toml",
+        "schema_version = 1\n[composite]\nname = \"voice\"\n[instances]\nhit = { module = \"std.sampler\", pattern = \"hit\" }\n[exports]\noutputs = { l = \"hit.l\", r = \"hit.r\" }\n",
+    );
+    write(
+        &src,
+        "patterns/hit.toml",
+        "schema_version = 1\nkind = \"sample\"\nfile = \"samples/hit.wav\"\n",
+    );
+    let incoming = pcm16(&[100, 200, 300]);
+    fs::create_dir_all(src.join("samples")).unwrap();
+    fs::write(src.join("samples/hit.wav"), &incoming).unwrap();
+    write(
+        &dst,
+        "project.toml",
+        "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = 48000\n[instances]\n",
+    );
+    let own = pcm16(&[1, 2]);
+    fs::create_dir_all(dst.join("samples")).unwrap();
+    fs::write(dst.join("samples/hit.wav"), &own).unwrap();
+
+    let (copies, edits, stack) = signal_ui::stacks::import_stack(&dst, &src).unwrap();
+    let library = signal_project::Library::builtin();
+    let prepared =
+        signal_project::vendor::Prepared::new(&dst, copies, edits, (&src, &stack), library)
+            .unwrap();
+    signal_project::vendor::write(&dst, prepared, library).unwrap();
+    assert_eq!(fs::read(dst.join("samples/hit.wav")).unwrap(), own);
+    assert_eq!(
+        fs::read(dst.join(format!("samples/{stack}_hit.wav"))).unwrap(),
+        incoming
+    );
+    fs::remove_dir_all(&src).unwrap();
+    let project = Project::load(&dst).unwrap();
+    project.plan(&registry()).unwrap();
 }

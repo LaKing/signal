@@ -140,6 +140,8 @@ pub struct Prepared {
     reused: Vec<String>,
     files: Vec<SourceFile>,
     loaded_before: bool,
+    /// The WAVs the copied sample patterns read (ADR 0056), new files.
+    samples: Vec<(String, Vec<u8>)>,
 }
 
 impl Prepared {
@@ -147,11 +149,13 @@ impl Prepared {
     /// (never over an existing file), `edits` replacing the project's own
     /// files as `files` (read now) hold them; checked to load if the
     /// project loaded before. For copies made elsewhere (ADR 0051 §10: a
-    /// Stack imported).
+    /// Stack imported) from the project in `source`, whose sample files
+    /// come too ([`carry_samples`](Prepared::carry_samples), `prefix`).
     pub fn new(
         dir: &Path,
         copies: Vec<(String, String)>,
         edits: Vec<(String, String)>,
+        (source, prefix): (&Path, &str),
         library: &Library,
     ) -> Result<Prepared, VendorError> {
         let files = project_sources(dir)?;
@@ -161,14 +165,16 @@ impl Prepared {
             }
         }
         let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
-        let prepared = Prepared {
+        let mut prepared = Prepared {
             copies,
             edits,
             reused: Vec::new(),
             files,
             loaded_before,
+            samples: Vec::new(),
         };
-        if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+        prepared.carry_samples(dir, source, prefix)?;
+        if let Err(diagnostics) = prepared.check(dir, library) {
             return Err(VendorError::Invalid(diagnostics));
         }
         Ok(prepared)
@@ -180,12 +186,89 @@ impl Prepared {
             .iter()
             .chain(&self.edits)
             .map(|(path, _)| path.as_str())
+            .chain(self.samples.iter().map(|(path, _)| path.as_str()))
+    }
+
+    /// ADR 0056: the WAVs the sample patterns copied from the project in
+    /// `source` read, copied too, each under its own path. One the project
+    /// in `dir` has with the same bytes is shared; one it has with other
+    /// bytes is copied as `<prefix>_<name>` beside it, and the copied
+    /// patterns reading it rewritten. A pattern the project kept as its own
+    /// (the same text) reads the project's WAV, so a WAV of other bytes
+    /// under it refuses the copy.
+    fn carry_samples(
+        &mut self,
+        dir: &Path,
+        source: &Path,
+        prefix: &str,
+    ) -> Result<(), VendorError> {
+        let mut moved: BTreeMap<String, String> = BTreeMap::new();
+        for file in project_sources(source)? {
+            if !file.path.starts_with("patterns/") {
+                continue;
+            }
+            let Some(wav) = crate::sample_file(&file.text) else {
+                continue;
+            };
+            let kept = !self
+                .copies
+                .iter()
+                .any(|(path, text)| path.starts_with("patterns/") && *text == file.text);
+            if moved.contains_key(&wav) && !kept {
+                continue;
+            }
+            let bytes = read_sample(&source.join(&wav))?;
+            let target = match holds(dir, &self.samples, &wav, &bytes)? {
+                Some(true) => wav.clone(),
+                Some(false) if kept => return Err(VendorError::Exists(wav)),
+                None => {
+                    self.samples.push((wav.clone(), bytes));
+                    wav.clone()
+                }
+                Some(false) => {
+                    let other = match wav.rsplit_once('/') {
+                        Some((folder, name)) => format!("{folder}/{prefix}_{name}"),
+                        None => format!("{prefix}_{wav}"),
+                    };
+                    match holds(dir, &self.samples, &other, &bytes)? {
+                        Some(true) => {}
+                        Some(false) => return Err(VendorError::Exists(other)),
+                        None => self.samples.push((other.clone(), bytes)),
+                    }
+                    other
+                }
+            };
+            moved.insert(wav, target);
+        }
+        for (path, text) in &mut self.copies {
+            if !path.starts_with("patterns/") {
+                continue;
+            }
+            let Some(target) = crate::sample_file(text).and_then(|wav| moved.get(&wav).cloned())
+            else {
+                continue;
+            };
+            if crate::sample_file(text).as_deref() != Some(target.as_str()) {
+                let mut document = parse(path, text)?;
+                if let Some(item) = document.get_mut("file") {
+                    replace(item, &target);
+                }
+                *text = document.to_string();
+            }
+        }
+        Ok(())
     }
 
     /// The project's files as they were read when it was prepared: what
     /// [`write`] checks they still are.
     pub fn before(&self) -> &[SourceFile] {
         &self.files
+    }
+
+    /// The project in `dir` as vendoring would leave it, loaded, its new
+    /// sample files read as if written.
+    fn check(&self, dir: &Path, library: &Library) -> Result<Project, Vec<Diagnostic>> {
+        Project::from_sources_planned(self.after(), library, dir, &self.samples)
     }
 
     /// The project's files as vendoring would leave them.
@@ -311,6 +394,7 @@ pub fn prepare(
         reused,
         files,
         loaded_before,
+        samples: Vec::new(),
     };
     if loaded_before
         && let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir)
@@ -514,14 +598,16 @@ pub fn prepare_slot(dir: &Path, slot: &str, library: &Library) -> Result<Prepare
     table.insert("seed", Value::from(seed));
     let edits = vec![(PROJECT_FILE.to_owned(), host.to_string())];
     let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
-    let prepared = Prepared {
+    let mut prepared = Prepared {
         copies,
         edits,
         reused,
         files,
         loaded_before,
+        samples: Vec::new(),
     };
-    if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+    prepared.carry_samples(dir, &source_dir, slot)?;
+    if let Err(diagnostics) = prepared.check(dir, library) {
         return Err(VendorError::Invalid(diagnostics));
     }
     Ok(prepared)
@@ -819,14 +905,16 @@ pub fn prepare_include(
     *table = rebuilt;
     let edits = vec![(PROJECT_FILE.to_owned(), host.to_string())];
     let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
-    let prepared = Prepared {
+    let mut prepared = Prepared {
         copies,
         edits,
         reused,
         files,
         loaded_before,
+        samples: Vec::new(),
     };
-    if let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir) {
+    prepared.carry_samples(dir, &source_dir, &top)?;
+    if let Err(diagnostics) = prepared.check(dir, library) {
         return Err(VendorError::Invalid(diagnostics));
     }
     Ok(prepared)
@@ -908,6 +996,7 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
         reused,
         files,
         loaded_before,
+        samples,
     } = prepared;
     let _lock = ProjectLock::acquire(dir).map_err(|error| VendorError::Io {
         path: dir.to_owned(),
@@ -917,7 +1006,13 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
     // Only the project's own files are written (review 2026-11-01): never
     // through a link, a linked `composites/` included. `signal ui`'s
     // `vendor` checks the same first; `signal vendor` relies on this.
-    for (path, _) in copies.iter().chain(edits.iter()) {
+    let sample_paths = samples.iter().map(|(path, _)| path);
+    for path in copies
+        .iter()
+        .chain(edits.iter())
+        .map(|(p, _)| p)
+        .chain(sample_paths)
+    {
         if let Some(linked) = linked_on_the_way(dir, path) {
             return Err(VendorError::Io {
                 path: linked,
@@ -934,7 +1029,7 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
         rewritten: Vec::new(),
     };
     let mut written = Written::new(dir);
-    match written.apply(&copies, &edits, &files) {
+    match written.apply(&copies, &edits, &files, &samples) {
         Ok(()) => {}
         Err(error) => {
             written.undo();
@@ -952,9 +1047,39 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
             return Err(VendorError::Invalid(diagnostics));
         }
     }
-    vendored.copied = copies.into_iter().map(|(path, _)| path).collect();
+    vendored.copied = copies
+        .into_iter()
+        .map(|(path, _)| path)
+        .chain(samples.into_iter().map(|(path, _)| path))
+        .collect();
     vendored.rewritten = edits.into_iter().map(|(path, _)| path).collect();
     Ok(vendored)
+}
+
+/// A sample's bytes, read for a copy.
+fn read_sample(full: &Path) -> Result<Vec<u8>, VendorError> {
+    crate::read_regular(full).map_err(|error| VendorError::Io {
+        path: full.to_owned(),
+        error,
+    })
+}
+
+/// Whether `path` of the project in `dir`, or a sample already planned
+/// there, holds `bytes` (`None`: the path is free).
+fn holds(
+    dir: &Path,
+    planned: &[(String, Vec<u8>)],
+    path: &str,
+    bytes: &[u8],
+) -> Result<Option<bool>, VendorError> {
+    if let Some((_, planned)) = planned.iter().find(|(p, _)| p == path) {
+        return Ok(Some(planned == bytes));
+    }
+    let full = dir.join(path);
+    if !full.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_sample(&full)? == bytes))
 }
 
 /// The project's files as [`read_sources`] reads them.
@@ -1004,8 +1129,8 @@ fn unchanged(dir: &Path, read: &[SourceFile]) -> Result<(), VendorError> {
 /// person's editor, which takes no lock) is left as it is.
 struct Written<'d> {
     dir: &'d Path,
-    /// A new file and the text written to it.
-    created: Vec<(PathBuf, String)>,
+    /// A new file and the bytes written to it.
+    created: Vec<(PathBuf, Vec<u8>)>,
     /// A replaced file, its original text and the text written over it.
     replaced: Vec<(PathBuf, String, String)>,
 }
@@ -1024,10 +1149,15 @@ impl<'d> Written<'d> {
         copies: &[(String, String)],
         edits: &[(String, String)],
         files: &[SourceFile],
+        samples: &[(String, Vec<u8>)],
     ) -> Result<(), VendorError> {
         // Each copy's folder (`composites/`, and for `vendor --slot`
         // `patterns/` and `ui/parts/`).
-        for (path, _) in copies {
+        let new = copies
+            .iter()
+            .map(|(path, text)| (path, text.as_bytes()))
+            .chain(samples.iter().map(|(path, bytes)| (path, bytes.as_slice())));
+        for (path, _) in new.clone() {
             if let Some(folder) = self.dir.join(path).parent() {
                 fs::create_dir_all(folder).map_err(|error| VendorError::Io {
                     path: folder.to_owned(),
@@ -1035,8 +1165,8 @@ impl<'d> Written<'d> {
                 })?;
             }
         }
-        let staging = |full: &Path, text: &str| {
-            transaction::stage(full, text.as_bytes()).map_err(|error| VendorError::Io {
+        let staging = |full: &Path, bytes: &[u8]| {
+            transaction::stage(full, bytes).map_err(|error| VendorError::Io {
                 path: full.to_owned(),
                 error,
             })
@@ -1044,14 +1174,14 @@ impl<'d> Written<'d> {
         // Every file staged first; a staged file not committed is removed
         // when dropped, on any return.
         let mut staged = Vec::new();
-        for (path, text) in copies {
+        for (path, bytes) in new {
             let full = self.dir.join(path);
-            staged.push((staging(&full, text)?, full, path, text));
+            staged.push((staging(&full, bytes)?, full, path, bytes));
         }
         let mut replacing = Vec::new();
         for (path, text) in edits {
             let full = self.dir.join(path);
-            replacing.push((staging(&full, text)?, full, path, text));
+            replacing.push((staging(&full, text.as_bytes())?, full, path, text));
         }
         // The new files: a hard link fails if the name was taken meanwhile.
         for (file, full, path, text) in staged {
@@ -1062,7 +1192,7 @@ impl<'d> Written<'d> {
                     error,
                 },
             })?;
-            self.created.push((full, text.clone()));
+            self.created.push((full, text.to_vec()));
         }
         // The project's own files last, each replaced at once.
         for (file, full, path, text) in replacing {
@@ -1083,11 +1213,11 @@ impl<'d> Written<'d> {
     /// Takes back what was written, as far as the file system lets it, and
     /// never over an edit made since it was written.
     fn undo(&mut self) {
-        let ours = |full: &Path, text: &str| {
-            transaction::current(full).is_ok_and(|now| now.as_deref() == Some(text.as_bytes()))
+        let ours = |full: &Path, bytes: &[u8]| {
+            transaction::current(full).is_ok_and(|now| now.as_deref() == Some(bytes))
         };
         for (full, original, text) in self.replaced.drain(..) {
-            if ours(&full, &text) {
+            if ours(&full, text.as_bytes()) {
                 let _ = transaction::write_atomic(&full, original.as_bytes());
             }
         }

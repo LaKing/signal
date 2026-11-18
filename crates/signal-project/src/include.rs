@@ -505,7 +505,7 @@ fn load_included(
     })?;
     let mut chain = chain.to_vec();
     chain.push(canonical.to_owned());
-    let mut project = Project::assemble(files, library, Some(canonical), &chain)?;
+    let mut project = Project::assemble(files, library, Some(canonical), &chain, &[])?;
     project.qualify(&canonical.display().to_string());
     Ok(project)
 }

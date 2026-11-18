@@ -415,7 +415,7 @@ impl Project {
             error,
         })?;
         let chain = [canonical.clone()];
-        Project::assemble(files, Library::builtin(), Some(&canonical), &chain)
+        Project::assemble(files, Library::builtin(), Some(&canonical), &chain, &[])
             .map_err(LoadError::Invalid)
     }
 
@@ -470,6 +470,17 @@ impl Project {
         library: &Library,
         dir: &Path,
     ) -> Result<Project, Vec<Diagnostic>> {
+        Project::from_sources_planned(files, library, dir, &[])
+    }
+
+    /// [`from_sources_in_with`](Project::from_sources_in_with) with the
+    /// sample files `planned` (path, bytes) read as if written.
+    pub(crate) fn from_sources_planned(
+        files: Vec<SourceFile>,
+        library: &Library,
+        dir: &Path,
+        planned: &[(String, Vec<u8>)],
+    ) -> Result<Project, Vec<Diagnostic>> {
         let canonical = fs::canonicalize(dir).map_err(|error| {
             vec![Diagnostic {
                 severity: Severity::Error,
@@ -483,7 +494,7 @@ impl Project {
             }]
         })?;
         let chain = [canonical.clone()];
-        Project::assemble(files, library, Some(&canonical), &chain)
+        Project::assemble(files, library, Some(&canonical), &chain, planned)
     }
 
     /// [`from_sources`](Project::from_sources) with `library` as the library.
@@ -493,18 +504,20 @@ impl Project {
         files: Vec<SourceFile>,
         library: &Library,
     ) -> Result<Project, Vec<Diagnostic>> {
-        Project::assemble(files, library, None, &[])
+        Project::assemble(files, library, None, &[], &[])
     }
 
     /// Loads a project from its files; `dir` is its canonical folder, where
     /// the projects it includes are found, and `chain` the canonical
     /// folders of the projects including it, outermost first, itself last
-    /// (ADR 0035 §8: cycles and depth).
+    /// (ADR 0035 §8: cycles and depth); `planned` sample files (path,
+    /// bytes) are read as if written in `dir`.
     fn assemble(
         mut files: Vec<SourceFile>,
         library: &Library,
         dir: Option<&Path>,
         chain: &[PathBuf],
+        planned: &[(String, Vec<u8>)],
     ) -> Result<Project, Vec<Diagnostic>> {
         files.sort_by(|a, b| {
             (a.path != PROJECT_FILE, &a.path).cmp(&(b.path != PROJECT_FILE, &b.path))
@@ -569,7 +582,7 @@ impl Project {
         let mut patterns = patterns;
         if let Some(dir) = dir {
             for (file, pattern) in patterns.values_mut() {
-                if let Err(why) = pattern.read_sample(dir, settings.sample_rate) {
+                if let Err(why) = pattern.read_sample(dir, settings.sample_rate, planned) {
                     let offset = pattern.file.as_ref().map_or(0, |(_, at)| *at);
                     builder.error(*file, offset, why);
                 }
