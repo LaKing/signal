@@ -212,18 +212,13 @@ impl Host {
             })?;
         let project =
             Project::load(&self.opening.dir).map_err(|e| fail("does-not-load", e.to_string()))?;
-        let part = signal_project::read_regular_to_string(
-            self.opening
-                .dir
-                .join("ui/parts")
-                .join(format!("{slot}.html")),
-        )
-        .ok();
-        let files = signal_project::export::export_slot(&project, slot, part.as_deref())
-            .map_err(|e| fail("bad-value", e))?;
-        let samples = signal_project::export::sample_files(
+        // The files, samples and assets, checked to load and plan on their
+        // own (the review of 99b764b).
+        let files = signal_project::export::export_project(
             &self.opening.dir,
-            files.iter().map(|f| (f.path.as_str(), f.text.as_str())),
+            &project,
+            slot,
+            &self.registry,
         )
         .map_err(|e| fail("bad-value", e))?;
         let busy = path.exists()
@@ -236,10 +231,8 @@ impl Host {
                 format!("{} exists and is not empty", path.display()),
             ));
         }
-        let texts = files.iter().map(|f| (f.path.as_str(), f.text.as_bytes()));
-        let bytes = samples.iter().map(|(p, b)| (p.as_str(), &b[..]));
         let mut written: Vec<&str> = Vec::new();
-        for (relative, content) in texts.chain(bytes) {
+        for (relative, content) in &files {
             let full = path.join(relative);
             if let Some(dir) = full.parent() {
                 fs::create_dir_all(dir)

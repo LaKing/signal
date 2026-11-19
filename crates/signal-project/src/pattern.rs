@@ -82,13 +82,38 @@ impl Pattern {
         let Some((file, _)) = &self.file else {
             return Ok(());
         };
+        // The longest WAV a table can hold: its values at 32 bits, and room
+        // for the chunks around them. A larger file is refused unread (the
+        // review of 99b764b).
+        const MOST_BYTES: u64 = signal_core::MAX_TABLE_VALUES as u64 * 4 + (1 << 20);
         let bytes = match planned.iter().find(|(path, _)| path == file) {
             Some((_, bytes)) => bytes.clone(),
-            None => crate::read_regular(dir.join(file)).map_err(|e| format!("{file}: {e}"))?,
+            None => {
+                let path = dir.join(file);
+                if let Ok(meta) = std::fs::metadata(&path)
+                    && meta.len() > MOST_BYTES
+                {
+                    return Err(format!(
+                        "{file}: {} bytes; a sample holds at most {} values",
+                        meta.len(),
+                        signal_core::MAX_TABLE_VALUES
+                    ));
+                }
+                crate::read_regular(path).map_err(|e| format!("{file}: {e}"))?
+            }
         };
         let reader = hound::WavReader::new(std::io::Cursor::new(&bytes))
             .map_err(|e| format!("{file}: not a WAV file ({e})"))?;
         let spec = reader.spec();
+        // The header says how many samples the file holds: one past the
+        // bound is refused before any is decoded.
+        let declared = reader.len() as usize;
+        if declared > signal_core::MAX_TABLE_VALUES {
+            return Err(format!(
+                "{file}: {declared} samples; a sample holds at most {}",
+                signal_core::MAX_TABLE_VALUES
+            ));
+        }
         if !(1..=2).contains(&spec.channels) {
             return Err(format!(
                 "{file}: {} channels; a sample is mono or stereo",
@@ -104,12 +129,14 @@ impl Pattern {
         let values: Vec<f64> = match spec.sample_format {
             hound::SampleFormat::Float => reader
                 .into_samples::<f32>()
+                .take(signal_core::MAX_TABLE_VALUES + 1)
                 .map(|s| s.map(f64::from))
                 .collect::<Result<_, _>>(),
             hound::SampleFormat::Int => {
                 let scale = 1.0 / f64::from(1u32 << (spec.bits_per_sample.clamp(1, 32) - 1));
                 reader
                     .into_samples::<i32>()
+                    .take(signal_core::MAX_TABLE_VALUES + 1)
                     .map(|s| s.map(|v| f64::from(v) * scale))
                     .collect::<Result<_, _>>()
             }

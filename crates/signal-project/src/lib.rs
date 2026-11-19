@@ -582,8 +582,22 @@ impl Project {
         // project read without one has none: planning it says so).
         let mut patterns = patterns;
         if let Some(dir) = dir {
+            // One WAV named by several patterns is decoded once, its table
+            // shared (the review of 99b764b).
+            let mut decoded: BTreeMap<String, Pattern> = BTreeMap::new();
             for (file, pattern) in patterns.values_mut() {
-                if let Err(why) = pattern.read_sample(dir, settings.sample_rate, planned) {
+                let wav = pattern.file.as_ref().map(|(f, _)| f.clone());
+                if let Some(done) = wav.as_ref().and_then(|w| decoded.get(w)) {
+                    pattern.keep_sample(done, settings.sample_rate);
+                    continue;
+                }
+                let read = pattern.read_sample(dir, settings.sample_rate, planned);
+                if read.is_ok()
+                    && let Some(wav) = wav
+                {
+                    decoded.insert(wav, pattern.clone());
+                }
+                if let Err(why) = read {
                     let offset = pattern.file.as_ref().map_or(0, |(_, at)| *at);
                     builder.error(*file, offset, why);
                 }

@@ -23,13 +23,17 @@
 //!
 //! Refused, with the reason: a slot holding a project (that folder is the
 //! project already), an empty slot, a `map`, `voices`, a content with slots
-//! inside.
+//! inside, a content that includes a project.
+//!
+//! [`export_project`] is what Signal.app and `signal slot-export` write:
+//! the files, the samples and the panel's assets, and only once the
+//! project they make loads and plans on its own (the review of 99b764b).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use toml_edit::{DocumentMut, Item, Value};
 
-use crate::{Project, SourceFile, is_project_path};
+use crate::{Library, Match, Project, Role, SourceFile, is_project_path};
 
 /// ADR 0056 §1: the WAV files the sample patterns among `files` (path,
 /// text) read, from the project folder `dir`, by path: an exported project
@@ -60,10 +64,118 @@ pub fn sample_files<'a>(
 
 /// The files of slot `slot` of `project` as a project of its own, with
 /// `part`, the text of its part (`ui/parts/<slot>.html`) if it has one.
+/// [`export_project`] also carries the samples and assets, exports only
+/// the slot ports its content matches, and checks the result.
 pub fn export_slot(
     project: &Project,
     slot: &str,
     part: Option<&str>,
+) -> Result<Vec<SourceFile>, String> {
+    export_matched(project, slot, part, None)
+}
+
+/// ADR 0046 §9: everything "Save slot as project…" writes for slot `slot`
+/// of `project`, read from the folder `dir`, by path: [`export_slot`]'s
+/// files (its part read from `ui/parts/<slot>.html`), the WAVs its sample
+/// patterns read ([`sample_files`]) and the `ui/assets/` files its panel
+/// names. Refused unless that project loads and plans with `registry` on
+/// its own, so an export that reports success is one that opens.
+pub fn export_project(
+    dir: &std::path::Path,
+    project: &Project,
+    slot: &str,
+    registry: &signal_core::Registry,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let planned = project
+        .plan(registry)
+        .map_err(|d| format!("the project does not plan: {}", lines(&d)))?;
+    let matches = planned
+        .slots
+        .iter()
+        .find(|r| r.slot == format!("/{slot}"))
+        .map(|r| r.matches.as_slice());
+    let part =
+        crate::read_regular_to_string(dir.join("ui/parts").join(format!("{slot}.html"))).ok();
+    let files = export_matched(project, slot, part.as_deref(), matches)?;
+    let samples = sample_files(
+        dir,
+        files.iter().map(|f| (f.path.as_str(), f.text.as_str())),
+    )?;
+    let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(main) = files.iter().find(|f| f.path == "ui/main.html") {
+        for name in asset_names(&main.text) {
+            let path = format!("ui/assets/{name}");
+            let bytes = crate::read_regular(dir.join(&path))
+                .map_err(|e| format!("{path}, which the part names: {e}"))?;
+            assets.push((path, bytes));
+        }
+    }
+    // Loaded as the folder it becomes: nothing outside it (an empty
+    // folder of its own as its place), its samples from the export.
+    let place = std::env::temp_dir();
+    // Its render files: the panel is not planned (`ui check` reads it).
+    let render_files: Vec<SourceFile> = files
+        .iter()
+        .filter(|f| !f.path.starts_with("ui/"))
+        .cloned()
+        .collect();
+    let alone = Project::from_sources_planned(render_files, Library::builtin(), &place, &samples)
+        .map_err(|d| format!("the exported project does not load: {}", lines(&d)))?;
+    alone
+        .plan(registry)
+        .map_err(|d| format!("the exported project does not plan: {}", lines(&d)))?;
+    Ok(files
+        .into_iter()
+        .map(|f| (f.path, f.text.into_bytes()))
+        .chain(samples)
+        .chain(assets)
+        .collect())
+}
+
+/// Diagnostics on one line each, joined.
+fn lines(diagnostics: &[crate::Diagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The files under `ui/assets/` a panel's text names (`assets/dial.svg`),
+/// each once, in order: a name with no `..`, `.` or empty part.
+fn asset_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("assets/") {
+        let before = rest[..at].chars().last();
+        let after = &rest[at + "assets/".len()..];
+        let end = after
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '?' | '#' | '<' | '>')
+            })
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        let bounded = before.is_none_or(|c| matches!(c, '"' | '\'' | '(' | '/' | ' ' | '='));
+        let safe = !name.is_empty()
+            && name
+                .split('/')
+                .all(|p| !p.is_empty() && p != "." && p != "..");
+        if bounded && safe && !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+        rest = &after[end..];
+    }
+    names
+}
+
+/// [`export_slot`], the wrapper of a module's content exporting only the
+/// slot ports `matches` (the host plan's match table) says the content
+/// matched; all of them without one.
+fn export_matched(
+    project: &Project,
+    slot: &str,
+    part: Option<&str>,
+    matches: Option<&[Match]>,
 ) -> Result<Vec<SourceFile>, String> {
     let file = |path: &str| {
         project
@@ -100,11 +212,13 @@ pub fn export_slot(
     }
 
     let composite = |name: &str| file(&format!("{}/{name}.toml", crate::COMPOSITES));
+    // A module's content is one instance named after the slot.
+    let module = composite(load).is_none();
     let mut doc: DocumentMut = match composite(load) {
         Some(text) => text
             .parse()
             .map_err(|e| format!("composites/{load}.toml does not parse: {e}"))?,
-        None => wrapper(slot, load, interface)?
+        None => wrapper(slot, load, interface, matches)?
             .parse()
             .map_err(|e| format!("the wrapper does not parse: {e}"))?,
     };
@@ -171,7 +285,14 @@ pub fn export_slot(
                 .as_float()
                 .or_else(|| value.as_integer().map(|i| i as f64))
             {
-                values.extend(exported(key).into_iter().map(|t| (t, x)));
+                // A module's own parameter outside the interface (ADR 0037
+                // §5): on its one instance, as the host applied it.
+                let targets = exported(key);
+                if targets.is_empty() && module {
+                    values.push((format!("{slot}.{key}"), x));
+                } else {
+                    values.extend(targets.into_iter().map(|t| (t, x)));
+                }
             }
         }
     }
@@ -179,13 +300,15 @@ pub fn export_slot(
         let Some((instance, parameter)) = target.split_once('.') else {
             continue;
         };
-        if let Some(table) = doc
-            .get_mut("instances")
-            .and_then(|i| i.get_mut(instance))
-            .and_then(Item::as_value_mut)
-            .and_then(Value::as_inline_table_mut)
-        {
-            table.insert(parameter, crate::write::number(x));
+        // Inline or a `[instances.<name>]` table (the review of 99b764b).
+        match doc.get_mut("instances").and_then(|i| i.get_mut(instance)) {
+            Some(Item::Value(Value::InlineTable(table))) => {
+                table.insert(parameter, crate::write::number(x));
+            }
+            Some(Item::Table(table)) => {
+                table.insert(parameter, Item::Value(crate::write::number(x)));
+            }
+            _ => {}
         }
     }
 
@@ -201,6 +324,11 @@ pub fn export_slot(
             if entry.get("slot").is_some() {
                 return Err(format!(
                     "its content has a slot inside (`{name}`): saving nested slots is not built"
+                ));
+            }
+            if let Some(path) = entry.get("project").and_then(toml::Value::as_str) {
+                return Err(format!(
+                    "its content includes the project `{path}` (`{name}`): saving it with its includes is not built"
                 ));
             }
             if let Some(pattern) = entry.get("pattern").and_then(toml::Value::as_str) {
@@ -258,8 +386,14 @@ pub fn export_slot(
 }
 
 /// The project text of one instance `slot` of module `load`, every port of
-/// the slot's written interface exported under its name.
-fn wrapper(slot: &str, load: &str, interface: &toml::Value) -> Result<String, String> {
+/// the slot's written interface exported under its name, except one
+/// `matches` says the module does not have (an unmatched spare port).
+fn wrapper(
+    slot: &str,
+    load: &str,
+    interface: &toml::Value,
+    matches: Option<&[Match]>,
+) -> Result<String, String> {
     let table = interface
         .as_table()
         .ok_or("its interface is a template's: save its content after detaching it")?;
@@ -272,8 +406,20 @@ fn wrapper(slot: &str, load: &str, interface: &toml::Value) -> Result<String, St
         let Some(ports) = table.get(role).and_then(toml::Value::as_table) else {
             continue;
         };
+        let kind = match role {
+            "inputs" => Role::Input,
+            "outputs" => Role::Output,
+            _ => Role::Parameter,
+        };
+        let matched = |port: &str| {
+            matches.is_none_or(|all| {
+                all.iter()
+                    .any(|m| m.port == port && m.role == kind && m.content.is_some())
+            })
+        };
         let items: Vec<String> = ports
             .keys()
+            .filter(|p| matched(p))
             .map(|p| format!("{p} = {}", Value::from(format!("{slot}.{p}"))))
             .collect();
         if !items.is_empty() {
@@ -301,6 +447,23 @@ fn rooted_part(part: &str, slot: &str, doc: &DocumentMut) -> String {
                     Item::Value(Value::Array(a)) => {
                         a.iter().find_map(|v| v.as_str().map(str::to_owned))
                     }
+                    // ADR 0042: `{ to = "c.value", min = 0, max = 1 }`.
+                    Item::Value(Value::InlineTable(t)) => t.get("to").and_then(|to| match to {
+                        Value::String(s) => Some(s.value().clone()),
+                        Value::Array(a) => a.iter().find_map(|v| v.as_str().map(str::to_owned)),
+                        _ => None,
+                    }),
+                    Item::Table(t) => {
+                        t.get("to")
+                            .and_then(Item::as_value)
+                            .and_then(|to| match to {
+                                Value::String(s) => Some(s.value().clone()),
+                                Value::Array(a) => {
+                                    a.iter().find_map(|v| v.as_str().map(str::to_owned))
+                                }
+                                _ => None,
+                            })
+                    }
                     _ => None,
                 };
                 if let Some(first) = first {
@@ -312,13 +475,21 @@ fn rooted_part(part: &str, slot: &str, doc: &DocumentMut) -> String {
     let text = part
         .replace(&format!(" part=\"{slot}\""), "")
         .replace(&format!(" part='{slot}'"), "");
-    // Every binding attribute's addresses, `.p` rooted.
+    // Every binding attribute's addresses, `.p` rooted, in either quote.
     let mut out = String::with_capacity(text.len());
     let mut rest = text.as_str();
-    while let Some(at) = rest.find("bind=\"") {
-        let (before, after) = rest.split_at(at + "bind=\"".len());
+    loop {
+        let next = ["bind=\"", "bind='"]
+            .iter()
+            .filter_map(|open| rest.find(open).map(|at| (at, *open)))
+            .min();
+        let Some((at, open)) = next else {
+            break;
+        };
+        let quote = open.chars().last().unwrap_or('"');
+        let (before, after) = rest.split_at(at + open.len());
         out.push_str(before);
-        let end = after.find('"').unwrap_or(after.len());
+        let end = after.find(quote).unwrap_or(after.len());
         let value = &after[..end];
         let rooted: Vec<String> = value
             .split(|c: char| c.is_whitespace() || c == ',')

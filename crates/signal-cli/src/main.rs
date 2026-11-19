@@ -274,7 +274,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Pack(args) => files::pack(args, cli.json),
         Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Vendor(args) => vendor::run(args, cli.json),
-        Command::SlotExport(args) => slot_export::run(args, cli.json),
+        Command::SlotExport(args) => slot_export::run(args, &registry, cli.json),
         Command::Snapshot(args) => snapshot::run(args, &registry, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),

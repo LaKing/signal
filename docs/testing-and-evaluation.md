@@ -169,7 +169,7 @@ Printed values (V4, V5, V6, V8) are shown with `cargo test -p signal-cli --test 
 
 ### The V6 measurement
 
-`signal_eval::aliasing` windows the signal with a periodic Hann window, takes a real FFT, and compares the energy within ±2 bins of the fundamental with the energy further than ±2 bins from every harmonic below Nyquist. The test analyses 96 000 samples (1 s, 1 Hz bins) after 1000 frames of start-up: a whole number of periods of every tone, so the window adds no leakage.
+`signal_eval::aliasing` windows the signal with a periodic Hann window, takes a real FFT, and compares the energy within ±2 bins of the fundamental with the energy further than ±2 bins from every harmonic below Nyquist. A tone with no energy at its fundamental (silence included) reads −∞ dB, so a muted shaper fails V6 rather than passing at +∞ (the review of `99b764b`). The test analyses 96 000 samples (1 s, 1 Hz bins) after 1000 frames of start-up: a whole number of periods of every tone, so the window adds no leakage.
 
 **Tones.** The tones are fixed at 1009, 2003, 4001 and 8009 Hz (owner decision sq-4aece389, option A). They do not divide 96 kHz, so the shaped tone is not periodic in whole frames and its aliases fall between the harmonics, where they are counted. The original tones, 1, 2, 4 and 8 kHz, divide 96 kHz: the shaped tone repeated every 96, 48, 24 or 12 frames, every alias landed exactly on a harmonic, and the test passed for naive `tanh` as well (ADAA 253–306 dB, naive 244–294 dB), so it could not tell antialiasing from none. That check is removed, not kept as a sanity check, because it measures nothing.
 

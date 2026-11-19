@@ -16,7 +16,9 @@ pub struct Aliasing {
     /// The energy of the bins further than ±2 bins from every harmonic.
     pub inharmonic: f64,
     /// `10·log10(fundamental / inharmonic)`: how far the inharmonic energy is
-    /// below the fundamental, in dB. +∞ when there is no inharmonic energy.
+    /// below the fundamental, in dB. +∞ when there is no inharmonic energy
+    /// and a fundamental; −∞ when there is no fundamental (silence too, so a
+    /// muted tone never passes a threshold).
     pub ratio_db: f64,
 }
 
@@ -75,7 +77,9 @@ pub fn aliasing(samples: &[f64], sample_rate: f64, f0: f64) -> Option<Aliasing> 
             inharmonic += energy;
         }
     }
-    let ratio_db = if inharmonic == 0.0 {
+    let ratio_db = if fundamental == 0.0 {
+        f64::NEG_INFINITY
+    } else if inharmonic == 0.0 {
         f64::INFINITY
     } else {
         10.0 * (fundamental / inharmonic).log10()
@@ -120,6 +124,14 @@ mod tests {
 
     fn add(a: &[f64], b: &[f64]) -> Vec<f64> {
         a.iter().zip(b).map(|(x, y)| x + y).collect()
+    }
+
+    /// The review of 99b764b: silence has no fundamental, so it reads −∞,
+    /// never a pass.
+    #[test]
+    fn silence_reads_minus_infinity() {
+        let a = aliasing(&[0.0; 96_000], SR, 1009.0).unwrap();
+        assert_eq!(a.ratio_db, f64::NEG_INFINITY, "{a:?}");
     }
 
     #[test]
