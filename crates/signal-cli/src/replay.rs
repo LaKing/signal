@@ -93,10 +93,20 @@ pub(crate) fn replay_session(
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
-    let mut provenance = provenance::collect(
-        &provenance::source_dir(),
-        session.versions.first().map_or(&[][..], |p| &p.files),
-    );
+    let mut provenance = provenance::build(session.versions.first().map_or(&[][..], |p| &p.files));
+    // The inputs as the session holds them, validated by its load: what
+    // its includes and samples bring, as a render's manifest names them
+    // (the review of 4d37bf8).
+    if let Some(first) = session.versions.first() {
+        provenance
+            .project_file_hashes
+            .extend(first.include_file_hashes());
+        provenance
+            .project_file_hashes
+            .extend(first.sample_file_hashes());
+        provenance.included_projects = first.included_projects();
+        provenance.library_interface_hashes = first.library_interface_hashes();
+    }
     provenance.library_composite_hashes = session.library_hashes();
     // M2.7-2: latent instances placed on this machine's devices, by the
     // first version's pins (a running project cannot change them).
@@ -161,8 +171,17 @@ pub(crate) fn replay_session(
     }
 
     let (manifest, metrics) = match &args.out {
-        Some(out) => write_artifacts(rendered, out, provenance)
-            .map_err(|e| e.into_failure(|e| Failure::Io(e.to_string())))?,
+        Some(out) => {
+            let written = write_artifacts(rendered, out, provenance)
+                .map_err(|e| e.into_failure(|e| Failure::Io(e.to_string())))?;
+            if let (Some(project), Some(plan)) = (session.versions.first(), session.plans.first())
+                && crate::render::main_is_discrete(project, plan)
+            {
+                signal_output::set_speaker_mask(&out.join("audio.wav"), 0)
+                    .map_err(|e| Failure::Io(e.to_string()))?;
+            }
+            written
+        }
         None => (rendered.manifest(provenance), metrics_of(rendered)),
     };
 

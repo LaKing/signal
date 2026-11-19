@@ -820,7 +820,7 @@ fn a_live_pattern_edit_is_recorded_and_replays_bit_identically() {
     plan.version = 0;
     let (runner, mut controller) =
         realtime(&plan, &registry, RealtimeConfig::new(RATE, current.seed)).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &current.files);
+    let provenance = provenance::build(&current.files);
     let recorder =
         SessionRecorder::new(&current, &registry, RATE, current.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());

@@ -194,8 +194,8 @@ impl Prepared {
     /// in `dir` has with the same bytes is shared; one it has with other
     /// bytes is copied as `<prefix>_<name>` beside it, and the copied
     /// patterns reading it rewritten. A pattern the project kept as its own
-    /// (the same text) reads the project's WAV, so a WAV of other bytes
-    /// under it refuses the copy.
+    /// (the same name and text) reads the project's WAV, so a WAV of other
+    /// bytes under it refuses the copy.
     fn carry_samples(
         &mut self,
         dir: &Path,
@@ -210,10 +210,14 @@ impl Prepared {
             let Some(wav) = crate::sample_file(&file.text) else {
                 continue;
             };
-            let kept = !self
-                .copies
-                .iter()
-                .any(|(path, text)| path.starts_with("patterns/") && *text == file.text);
+            // Kept: every copy reuses a pattern of the same name and text
+            // (the review of 4d37bf8: decided by the pattern's own path,
+            // never by another pattern of the same text).
+            let kept = !self.copies.iter().any(|(path, _)| *path == file.path)
+                && self
+                    .files
+                    .iter()
+                    .any(|f| f.path == file.path && f.text == file.text);
             if moved.contains_key(&wav) && !kept {
                 continue;
             }

@@ -640,6 +640,9 @@ pub(crate) fn run(
             Err(_) => project.sample_rate,
         }
     };
+    for note in project.sample_notes(rate) {
+        eprintln!("signal: note: {note}");
+    }
     let limit = args.seconds.map(|s| (s * f64::from(rate)).round() as u64);
 
     // ADR 0036: sized for the period the device runs at (its own while it
@@ -812,7 +815,7 @@ pub(crate) fn run(
     for warning in gpu.placement_warnings() {
         eprintln!("signal: {warning}");
     }
-    let provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    let provenance = provenance::build(&project.files);
     let recorder = SessionRecorder::new(&project, registry, rate, seed, provenance)
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let watch = if args.watch {

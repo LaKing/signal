@@ -422,7 +422,7 @@ fn replacing_a_deck_is_an_unload_then_a_load() {
     plan.version = 0;
     let config = RealtimeConfig::with_buffer(48_000, old.seed, 1024);
     let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &old.files);
+    let provenance = provenance::build(&old.files);
     let recorder = SessionRecorder::new(&old, &registry, 48_000, old.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());
     let mut driver = NullDriver::new(48_000, 2, 3);

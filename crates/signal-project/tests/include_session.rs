@@ -83,7 +83,7 @@ fn a_live_join_of_an_include_replays_from_the_session_s_copies() {
     plan.version = 0;
     let config = RealtimeConfig::with_buffer(RATE, old.seed, 4096);
     let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &old.files);
+    let provenance = provenance::build(&old.files);
     let recorder = SessionRecorder::new(&old, &registry, RATE, old.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());
     let mut driver = NullDriver::new(RATE, 2, 21);

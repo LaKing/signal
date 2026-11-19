@@ -334,7 +334,7 @@ pub(crate) fn serve(
         rt: played.rt,
         boundary_data: played.boundary_data,
         recording: played.recording,
-        provenance: provenance::collect(&provenance::source_dir(), &project.files),
+        provenance: provenance::build(&project.files),
         compute: compute_lines(),
         server,
         ceiling: played.ceiling,

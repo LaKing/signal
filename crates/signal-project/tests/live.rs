@@ -89,7 +89,7 @@ fn start(old: &Project, registry: &Registry) -> (NullDriver, Controller, LiveRec
     plan.version = 0;
     let (runner, controller) =
         realtime(&plan, registry, RealtimeConfig::new(RATE, old.seed)).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &old.files);
+    let provenance = provenance::build(&old.files);
     let recorder = SessionRecorder::new(old, registry, RATE, old.seed, provenance).unwrap();
     let mut driver = NullDriver::new(RATE, 2, 3);
     driver.start(runner).unwrap();
@@ -290,7 +290,7 @@ fn a_slow_preparation_keeps_the_removal_fade_while_playing() {
     // A 512-frame buffer: the default stamp is 1 024 frames ahead.
     let config = RealtimeConfig::with_buffer(RATE, old.seed, 512);
     let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &old.files);
+    let provenance = provenance::build(&old.files);
     let recorder = SessionRecorder::new(&old, &registry, RATE, old.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());
 
@@ -577,4 +577,52 @@ fn the_watcher_follows_what_the_project_reads() {
         [std::path::PathBuf::from("inner/project.toml")]
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The review of 4d37bf8: a project included inside the folder that comes
+/// to include a third project outside it has that project watched from the
+/// next poll on.
+#[test]
+fn an_inside_include_s_new_include_is_watched() {
+    let base = std::env::temp_dir().join(format!("signal-watch-nested-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let host = base.join("host");
+    std::fs::create_dir_all(host.join("child")).unwrap();
+    std::fs::create_dir_all(base.join("third/patterns")).unwrap();
+    std::fs::write(
+        host.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"host\"\n[instances]\nchild = { project = \"child\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        host.join("child/project.toml"),
+        "schema_version = 1\n[project]\nname = \"child\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("third/project.toml"),
+        "schema_version = 1\n[project]\nname = \"third\"\n",
+    )
+    .unwrap();
+    let mut watcher = signal_project::live::ProjectWatcher::new(&host).unwrap();
+    std::fs::write(
+        host.join("child/project.toml"),
+        "schema_version = 1\n[project]\nname = \"child\"\n[instances]\nthird = { project = \"../../third\" }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        watcher.changes().unwrap(),
+        [std::path::PathBuf::from("child/project.toml")]
+    );
+    std::fs::write(
+        base.join("third/project.toml"),
+        "schema_version = 1\n[project]\nname = \"third2\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        watcher.changes().unwrap().len(),
+        1,
+        "the third project's edit"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -712,11 +712,13 @@ impl Project {
     }
 
     /// ADR 0035 §8: a note for every include written for another rate than
-    /// `rate`, the rate the host plays at. Never an error.
+    /// `rate`, the rate the host plays at, and for every sample
+    /// ([`sample_notes`](Project::sample_notes)). Never an error.
     pub fn rate_notes(&self, rate: u32) -> Vec<String> {
         self.includes()
             .iter()
             .filter_map(|include| include.rate_note(rate))
+            .chain(self.sample_notes(rate))
             .collect()
     }
 

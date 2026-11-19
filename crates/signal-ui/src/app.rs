@@ -197,6 +197,7 @@ pub fn start(
     // switching it; the project's `sample_rate` is its renders' rate.
     let (rate, notice) = live_rate(backend, devices, setup, project.sample_rate, &project.name);
     notes.extend(notice);
+    notes.extend(project.sample_notes(rate));
     let seed = project.seed;
     // ADR 0038 (M4.1): several play sides, or roles the Setup binds, are
     // routed; one sink alone plays as before.

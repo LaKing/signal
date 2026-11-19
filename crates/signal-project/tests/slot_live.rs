@@ -84,7 +84,7 @@ impl Run {
         let mut config = RealtimeConfig::with_buffer(RATE, project.seed, 4096);
         config.engine.threads = threads;
         let (runner, controller) = realtime(&plan, registry, config).unwrap();
-        let provenance = provenance::collect(&provenance::source_dir(), &project.files);
+        let provenance = provenance::build(&project.files);
         let recorder =
             SessionRecorder::new(project, registry, RATE, project.seed, provenance).unwrap();
         let mut driver = NullDriver::new(RATE, 2, seed);

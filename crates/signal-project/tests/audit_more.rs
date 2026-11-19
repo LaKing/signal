@@ -45,8 +45,7 @@ fn check_role(capture: bool) {
         signal_engine::RealtimeConfig::new(old.sample_rate, old.seed),
     )
     .unwrap();
-    let provenance =
-        signal_project::provenance::collect(&signal_project::provenance::source_dir(), &old.files);
+    let provenance = signal_project::provenance::build(&old.files);
     let recorder = signal_project::session::SessionRecorder::new(
         &old,
         &r,

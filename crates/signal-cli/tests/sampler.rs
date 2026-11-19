@@ -452,3 +452,65 @@ fn an_include_s_own_copy_carries_its_samples() {
         host.join("rendered").to_str().unwrap(),
     ]));
 }
+
+/// The review of 4d37bf8: an included project with two patterns of the
+/// same text reading one WAV, one of them the host's own (same name and
+/// text) over a WAV of other bytes: the copy is refused, never played
+/// with the host's WAV.
+#[test]
+fn copying_an_include_never_substitutes_the_host_s_sample() {
+    let included = project("vendor-twin", 48_000);
+    let text = fs::read_to_string(included.join("patterns/hit.toml")).unwrap();
+    fs::write(included.join("patterns/twin.toml"), &text).unwrap();
+    let host = included.parent().unwrap().join("vendor-twin-host");
+    let _ = fs::remove_dir_all(&host);
+    fs::create_dir_all(host.join("patterns")).unwrap();
+    fs::write(host.join("patterns/hit.toml"), &text).unwrap();
+    wav(&host.join("samples/hit.wav"), 48_000, &[-0.25; 10]);
+    fs::write(
+        host.join("project.toml"),
+        "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = 48000\nseed = 1\n\
+         [instances]\nchild = { project = \"../vendor-twin\" }\n\
+         out = { module = \"std.audio_out\" }\n",
+    )
+    .unwrap();
+    let before = fs::read_to_string(host.join("project.toml")).unwrap();
+    let run = signal(&["vendor", host.to_str().unwrap(), "--include", "child"]);
+    assert!(!run.status.success(), "the copy is refused");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("samples/hit.wav"),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("project.toml")).unwrap(),
+        before
+    );
+    assert!(!host.join("composites").exists(), "nothing written");
+}
+
+/// The review of 4d37bf8: a sample written at another rate than the
+/// render's plays faster (it is not resampled), and the render says so.
+#[test]
+fn a_sample_at_another_rate_is_noted() {
+    let dir = project("rate-note", 48_000);
+    let run = ok(signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--frames",
+        "4800",
+        "--sample-rate",
+        "96000",
+        "--out",
+        dir.join("out").to_str().unwrap(),
+    ]));
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        said.contains("is written at 48000 Hz and plays at 96000 Hz"),
+        "{said}"
+    );
+}

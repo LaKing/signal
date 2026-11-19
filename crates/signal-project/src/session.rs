@@ -2630,10 +2630,7 @@ pub fn replay_with(
     let mut trusted = false;
     if let (Some(recorded), true) = (&session.machine, recomputed) {
         let here = options.here.clone().unwrap_or_else(|| Here {
-            build: crate::provenance::collect(
-                &crate::provenance::source_dir(),
-                session.versions.first().map_or(&[][..], |p| &p.files),
-            ),
+            build: crate::provenance::build(session.versions.first().map_or(&[][..], |p| &p.files)),
             machine: Machine::here(Vec::new()),
         });
         let differences = provenance_differences(&session.provenance, recorded, &here);

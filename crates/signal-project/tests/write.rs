@@ -174,7 +174,7 @@ fn after_write_back_the_reload_applies_nothing_twice() {
     let rate = current.sample_rate;
     let (runner, mut controller) =
         realtime(&plan, &registry, RealtimeConfig::new(rate, current.seed)).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &current.files);
+    let provenance = provenance::build(&current.files);
     let recorder =
         SessionRecorder::new(&current, &registry, rate, current.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());
@@ -244,7 +244,7 @@ fn an_edit_larger_than_the_queue_is_invalid_not_retried() {
     let mut config = RealtimeConfig::new(rate, current.seed);
     config.commands = 2;
     let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &current.files);
+    let provenance = provenance::build(&current.files);
     let recorder =
         SessionRecorder::new(&current, &registry, rate, current.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());

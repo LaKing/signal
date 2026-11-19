@@ -83,7 +83,7 @@ fn record(name: &str, capture: Capture) -> (PathBuf, Vec<f32>) {
     plan.version = 0;
     let (mut runner, mut controller) =
         realtime(&plan, &registry, RealtimeConfig::new(RATE, project.seed)).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    let provenance = provenance::build(&project.files);
     let recorder =
         SessionRecorder::new(&project, &registry, RATE, project.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());

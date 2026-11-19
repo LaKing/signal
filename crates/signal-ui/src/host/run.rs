@@ -355,7 +355,10 @@ impl Host {
             return None;
         }
         self.list_devices();
-        let seen = output_state(&self.devices, &self.setup);
+        // The output the run opens: this project's devices.local.toml over
+        // the Setup (the review of 4d37bf8), as `play_app` opens it.
+        let (setup, _) = crate::devices::effective_setup(&self.setup, &self.local_dir());
+        let seen = output_state(&self.devices, &setup);
         let ready = ready_at(seen.as_ref());
         let mode = self.app.as_mut()?;
         let once = ready && !mode.retrying;
@@ -403,7 +406,8 @@ impl Host {
         wait.probed = Instant::now();
         let (seen, once) = (wait.seen.clone(), wait.once);
         self.list_devices();
-        let now = output_state(&self.devices, &self.setup);
+        let (setup, _) = crate::devices::effective_setup(&self.setup, &self.local_dir());
+        let now = output_state(&self.devices, &setup);
         let changed = now != seen;
         if !once && !(changed && ready_at(now.as_ref())) {
             if let Some(wait) = self.app.as_mut().and_then(|m| m.device_wait.as_mut()) {
@@ -496,6 +500,7 @@ impl Host {
             ),
         };
         notes.extend(notice);
+        notes.extend(project.sample_notes(rate));
         let mut sinks = Vec::new();
         let mut mixes = Vec::new();
         let mut width = width;

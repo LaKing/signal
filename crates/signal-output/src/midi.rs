@@ -243,7 +243,7 @@ pub fn midi_channel(names: &[String]) -> (MidiWriter, MidiSource) {
         MidiWriter {
             state,
             last,
-            barrier: false,
+            start: None,
             tx,
         },
         source,
@@ -257,42 +257,57 @@ pub struct MidiWriter {
     state: MidiState,
     /// The values the source was handed.
     last: Vec<f32>,
-    /// A Start's barrier the ring has not taken yet.
-    barrier: bool,
+    /// The values at a Start the ring has not taken whole, with the
+    /// barrier after them: the restart stays a block of its own however
+    /// late the ring takes it (the review of 4d37bf8), and what came after
+    /// the Start waits behind it.
+    start: Option<Vec<f32>>,
     tx: Producer<(u16, f32)>,
 }
 
 impl MidiWriter {
     /// Reads `bytes`, received at `now`, and hands what changed; a Start
-    /// hands what changed up to it, then a barrier.
+    /// hands the values at it, then a barrier.
     pub fn bytes(&mut self, bytes: impl IntoIterator<Item = u8>, now: Instant) {
         for byte in bytes {
             self.state.byte(byte, now);
             if byte == 0xFA {
                 self.flush();
-                self.barrier = true;
+                // A later Start while one waits replaces it: the restart
+                // the source sees is the last.
+                self.start = Some(self.state.values.clone());
                 self.flush();
             }
         }
         self.flush();
     }
 
-    /// Hands each value that changed, then a pending barrier; a value
-    /// counts as handed only once the ring took it, so a full ring delays
-    /// a change (a release too) but never loses it.
+    /// Hands a waiting Start's values and its barrier, then each value
+    /// that changed; a value counts as handed only once the ring took it,
+    /// so a full ring delays a change (a release too) but never loses it.
     fn flush(&mut self) {
-        for (i, (value, before)) in self.state.values.iter().zip(&mut self.last).enumerate() {
-            if value.to_bits() != before.to_bits() {
-                if self.tx.push((i as u16, *value)).is_err() {
-                    return;
-                }
-                *before = *value;
+        if let Some(start) = &self.start {
+            if !hand(&mut self.tx, start, &mut self.last) || self.tx.push((BARRIER, 0.0)).is_err() {
+                return;
             }
+            self.start = None;
         }
-        if self.barrier && self.tx.push((BARRIER, 0.0)).is_ok() {
-            self.barrier = false;
+        hand(&mut self.tx, &self.state.values, &mut self.last);
+    }
+}
+
+/// Pushes each of `values` that differs from `last` (updating it), until
+/// the ring refuses one; whether all went.
+fn hand(tx: &mut Producer<(u16, f32)>, values: &[f32], last: &mut [f32]) -> bool {
+    for (i, (value, before)) in values.iter().zip(last).enumerate() {
+        if value.to_bits() != before.to_bits() {
+            if tx.push((i as u16, *value)).is_err() {
+                return false;
+            }
+            *before = *value;
         }
     }
+    true
 }
 
 /// The audio thread's end of a `midi` slot: the values the control thread
@@ -434,5 +449,27 @@ mod tests {
         source.read(&mut out, 0);
         assert_eq!(out[1], 0.0, "the release arrives");
         assert!(source.rx.is_empty(), "and the Start's barrier after it");
+    }
+
+    /// The review of 4d37bf8: a Start and its first tick arriving while the
+    /// ring is full still reach the source as a block at the restarted
+    /// position, then the tick.
+    #[test]
+    fn a_start_behind_a_full_ring_keeps_its_downbeat() {
+        let (mut writer, mut source) = midi_channel(&names(&["cc1", "clock_position"]));
+        let now = Instant::now();
+        let mut out = [9.0f32; 2];
+        writer.bytes([0xFA, 0xF8, 0xF8, 0xFC], now);
+        while source.rx.pop().is_ok() {}
+        for i in 0..5000u32 {
+            writer.bytes([0xB0, 1, (i % 2) as u8], now);
+        }
+        writer.bytes([0xFA, 0xF8], now);
+        while source.rx.pop().is_ok() {}
+        writer.bytes([], now);
+        source.read(&mut out, 0);
+        assert_eq!(out[1], 0.0, "the restart, a block of its own");
+        source.read(&mut out, 0);
+        assert_eq!(out[1], 1.0 / 24.0, "then the first tick");
     }
 }

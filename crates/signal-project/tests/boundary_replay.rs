@@ -250,7 +250,7 @@ fn live(
         config.boundary_data = run.data_queue;
     }
     let (runner, mut controller) = realtime(&plan, registry, config).unwrap();
-    let provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    let provenance = provenance::build(&project.files);
     let recorder = SessionRecorder::new(project, registry, RATE, project.seed, provenance).unwrap();
     let mut live = LiveRecorder::new(recorder, registry.clone());
     if run.data {

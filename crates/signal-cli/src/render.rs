@@ -194,7 +194,7 @@ pub(crate) fn render_project(
             .map_err(|e| render_failure(&project, dir, e))?;
     (rendered.compute_devices, rendered.placement) = gpu.record();
     let gpu_warnings = gpu.warnings();
-    let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    let mut provenance = provenance::build(&project.files);
     provenance.library_composite_hashes = project.library_hashes();
     // ADR 0035 §13, ADR 0037 §3: what includes and slots bring; absent
     // without them.
@@ -209,6 +209,9 @@ pub(crate) fn render_project(
     provenance.library_interface_hashes = project.library_interface_hashes();
     provenance.render_input_hashes = input_hashes;
     provenance.project_file_hashes.extend(fixture_hashes);
+    // A render replacing an earlier one in the folder retires the device
+    // files it no longer writes (below).
+    let earlier = args.out.join("manifest.json").is_file();
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
     // ADR 0038 §9: the other play sides, each in its own WAV.
@@ -250,6 +253,10 @@ pub(crate) fn render_project(
             name.to_owned(),
             json!({"file": file, "channels": track.width, "dmx_frames": track.frames.len()}),
         );
+    }
+
+    if earlier {
+        retire_devices(&args.out, &devices).map_err(|e| Failure::Io(e.to_string()))?;
     }
 
     let warnings = located(dir, planned.warnings.clone());
@@ -436,6 +443,42 @@ pub(crate) fn write_artifacts(
         .write(&metrics_path)
         .map_err(|e| WriteError::Metrics(format!("writing {}: {e}", metrics_path.display())))?;
     Ok((manifest, metrics))
+}
+
+/// The review of 4d37bf8: in the folder `out` of an earlier render, the
+/// device files (`devices/<slot>.wav`, `.dmx`) this render did not write
+/// (`devices`, by slot) removed, and `devices/` with them when it is left
+/// empty, so the folder holds one render's artifacts. Nothing else there
+/// is touched.
+fn retire_devices(out: &Path, devices: &serde_json::Map<String, Value>) -> std::io::Result<()> {
+    let folder = out.join("devices");
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return Ok(());
+    };
+    let written: Vec<&str> = devices
+        .values()
+        .filter_map(|d| d.get("file")?.as_str()?.strip_prefix("devices/"))
+        .collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let artifact = name.ends_with(".wav") || name.ends_with(".dmx");
+        if artifact && !written.contains(&name) && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    if std::fs::read_dir(&folder)?.next().is_none() {
+        std::fs::remove_dir(&folder)?;
+    }
+    Ok(())
+}
+
+/// ADR 0038 §5.5: whether `plan`'s main play side is discrete, its
+/// `audio.wav` then without speaker positions (mask 0); a render and a
+/// replay of it write the same file (the review of 4d37bf8).
+pub(crate) fn main_is_discrete(project: &Project, plan: &signal_graph::ExecutionPlan) -> bool {
+    let sides = signal_project::device::play_sides(project, plan);
+    signal_project::device::main_side(&sides).is_some_and(|s| !s.ports.is_empty())
 }
 
 /// The metrics of a render's audio, as `metrics.json` holds them.

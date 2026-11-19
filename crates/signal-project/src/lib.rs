@@ -1091,6 +1091,29 @@ impl Project {
         files
     }
 
+    /// ADR 0056 §1 (the review of 4d37bf8): each sample written at another
+    /// rate than `rate`, the rate a run or render plays at, said: a sample
+    /// is not resampled, so it plays faster or slower and pitched with it.
+    /// Empty when every sample matches.
+    pub fn sample_notes(&self, rate: u32) -> Vec<String> {
+        let mut said: Vec<&str> = Vec::new();
+        let mut notes = Vec::new();
+        for (name, (_, pattern)) in &self.patterns {
+            let (Some((file, _)), Some(&written)) = (&pattern.file, pattern.header.get(1)) else {
+                continue;
+            };
+            if written == f64::from(rate) || said.contains(&file.as_str()) {
+                continue;
+            }
+            said.push(file);
+            notes.push(format!(
+                "sample `{name}` ({file}) is written at {written} Hz and plays at {rate} Hz here: {:.3}× its speed and pitch (a sample is not resampled)",
+                f64::from(rate) / written
+            ));
+        }
+        notes
+    }
+
     /// The `gpu` pins (M2.7-2) of `plan`'s instances (a plan of this
     /// project), by address: what a GPU host places them by.
     pub fn gpu_pins(&self, plan: &ExecutionPlan) -> BTreeMap<String, String> {

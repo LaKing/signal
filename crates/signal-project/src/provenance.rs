@@ -20,7 +20,28 @@ pub fn source_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
-/// The provenance of a render of `files`, with the Signal source at `source`.
+/// The provenance of a render of `files` by this build: its revision,
+/// dirty flag, compiler and `Cargo.lock` hash as they were when it was
+/// built (`build.rs`; the review of 4d37bf8), never the checkout's or the
+/// PATH's at run time.
+pub fn build(files: &[SourceFile]) -> Provenance {
+    let embedded = |value: &str| value.to_owned();
+    Provenance {
+        signal_revision: embedded(env!("SIGNAL_BUILD_REVISION")),
+        signal_dirty: match env!("SIGNAL_BUILD_DIRTY") {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        rustc_version: embedded(env!("SIGNAL_BUILD_RUSTC")),
+        cargo_lock_hash: embedded(env!("SIGNAL_BUILD_LOCK")),
+        ..collect(Path::new(""), files)
+    }
+}
+
+/// The provenance of a render of `files`, with the Signal source at `source`
+/// as it is now (a checkout's, read at run time; [`build`] is this
+/// binary's).
 pub fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
     let git = |args: &[&str]| {
         let mut command = Command::new("git");
@@ -121,6 +142,21 @@ mod tests {
         );
         let json = serde_json::to_value(&provenance).unwrap();
         assert_eq!(json["signal_dirty"], "unknown");
+    }
+
+    /// This build's identity is embedded: the lock file's hash as it was
+    /// built (the checkout's now, unless it changed since), a compiler.
+    #[test]
+    fn the_build_s_identity_is_embedded() {
+        let built = build(&[]);
+        assert!(
+            built.rustc_version.starts_with("rustc "),
+            "{}",
+            built.rustc_version
+        );
+        let lock = fs::read(source_dir().join("Cargo.lock")).unwrap();
+        assert_eq!(built.cargo_lock_hash, hex(fnv1a64(&lock)));
+        assert_eq!(built.signal_revision.len(), 40);
     }
 
     /// A clean status (success, empty output) is `false`, not unknown; only a

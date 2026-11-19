@@ -103,7 +103,16 @@ impl ProjectWatcher {
                 || p == Path::new(crate::PROJECT_FILE)
                 || p.starts_with(crate::COMPOSITES)
         };
-        if changed.iter().any(|p| definition(p)) {
+        // A project included inside the folder has its definitions under
+        // its own root (`child/project.toml`; the review of 4d37bf8).
+        let inside = &self.inside;
+        let definition_here = |p: &Path| {
+            definition(p)
+                || inside
+                    .iter()
+                    .any(|root| p.strip_prefix(root).is_ok_and(definition))
+        };
+        if changed.iter().any(|p| definition_here(p)) {
             self.rediscover();
         }
         // ADR 0035 §7: an included project's files, by the path the host
@@ -311,14 +320,37 @@ fn assets(dir: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "toml")
-                && let Ok(text) = crate::read_regular_to_string(&path)
-                && let Some(file) = crate::sample_file(&text)
+                && let Some(file) = sample_of(&path)
             {
                 found.push(PathBuf::from(file));
             }
         }
     }
     found
+}
+
+/// [`crate::sample_file`] of the pattern file `path`, remembered by its
+/// modification time and length, the watch's own test of a change: the
+/// watch asks every poll, and parsing a large note pattern takes
+/// milliseconds (the review of 4d37bf8).
+fn sample_of(path: &Path) -> Option<String> {
+    type Seen = BTreeMap<PathBuf, ((Option<SystemTime>, u64), Option<String>)>;
+    static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(BTreeMap::new());
+    let metadata = fs::metadata(path).ok()?;
+    let stamp = (metadata.modified().ok(), metadata.len());
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, file)) = seen.get(path)
+        && *at == stamp
+    {
+        return file.clone();
+    }
+    let file = crate::read_regular_to_string(path)
+        .ok()
+        .and_then(|text| crate::sample_file(&text));
+    seen.insert(path.to_owned(), (stamp, file.clone()));
+    file
 }
 
 /// The files of the project in `dir` a load reads, each with its

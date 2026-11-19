@@ -20,3 +20,6 @@ The PO requires (mostly) bit-exact reproducibility, with all randomness seeded (
 
 ## Consequences
 Golden renders are tied to the pinned toolchain; updating the toolchain is an explicit, reviewed act.
+
+## Notes
+**2026-11-19, the build's identity is embedded** (operator, after an outside review of `4d37bf8`). The manifest's revision, dirty flag, `rustc` version and `Cargo.lock` hash were read when a render ran: `git` in the checkout the binary was built from and the first `rustc` on the PATH, so the same executable reported another compiler under another PATH, and a checkout that moved on named a revision the binary was not built from. `signal-project`'s `build.rs` now reads them when it is built (the compiler cargo builds with, `git --no-optional-locks`, the lock file) and `provenance::build` reports those; the build script runs again when the revision, the index, the sources (`crates/`, `lab/`), the lock file or the toolchain change. `provenance::collect` still reads a given checkout at run time. A replay's manifest now also names the hashes its session's first version brings (includes, samples, interfaces), as a render's does.
