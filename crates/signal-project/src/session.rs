@@ -1984,7 +1984,7 @@ impl Session {
             }
         };
 
-        let inputs = load_inputs(&file.inputs, |name| read(name), at)?;
+        let inputs = load_inputs(&file.inputs, |name| read(name), at, file.frames)?;
 
         Ok(Session {
             sample_rate: *file.sample_rate.get_ref(),
@@ -2556,6 +2556,14 @@ pub fn replay_with(
     options: ReplayOptions,
 ) -> Result<Replay, ReplayError> {
     let frames = options.frames.unwrap_or_else(|| session.default_frames());
+    // Frames past the recorded end were never played: nothing to reproduce,
+    // whatever the session holds (the review of 99b764b); `ideal` renders
+    // past it.
+    if !options.ideal
+        && let Some(end) = session.frames.filter(|&end| frames > end)
+    {
+        return Err(ReplayError::BeyondRecordedEnd { frames, end });
+    }
     let mode = match (&session.boundaries, options.ideal) {
         (_, true) => BoundaryReplay::Ideal,
         (Some(boundaries), false) if !boundaries.complete => {
@@ -2566,13 +2574,7 @@ pub fn replay_with(
                     .unwrap_or_else(|| "records are missing".to_owned()),
             });
         }
-        (Some(_), false) => {
-            // Frames past the end were never played: nothing to reproduce.
-            if let Some(end) = session.frames.filter(|&end| frames > end) {
-                return Err(ReplayError::BeyondRecordedEnd { frames, end });
-            }
-            BoundaryReplay::Exact
-        }
+        (Some(_), false) => BoundaryReplay::Exact,
         (None, false) if session.latent() => BoundaryReplay::NotRecorded,
         (None, false) => BoundaryReplay::NotLatent,
     };
@@ -2610,12 +2612,6 @@ pub fn replay_with(
                 inputs.push(replay_input(input, EngineConfig::DEFAULT_BLOCK_CAPACITY));
             }
         }
-    }
-    if !sources.is_empty()
-        && !options.ideal
-        && let Some(end) = session.frames.filter(|&end| frames > end)
-    {
-        return Err(ReplayError::BeyondRecordedEnd { frames, end });
     }
     let script: &[BoundaryRecord] = match (&session.boundaries, mode) {
         (Some(b), BoundaryReplay::Exact) => &b.records,

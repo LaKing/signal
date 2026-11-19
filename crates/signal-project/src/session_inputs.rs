@@ -244,6 +244,7 @@ pub(crate) fn load_inputs(
     tables: &[toml::Spanned<InputToml>],
     mut read: impl FnMut(&str) -> Result<Vec<u8>, crate::LoadError>,
     at: impl Fn(usize, String) -> Diagnostic,
+    end: Option<u64>,
 ) -> Result<Vec<SessionInput>, crate::LoadError> {
     let mut inputs = Vec::new();
     let mut diagnostics = Vec::new();
@@ -282,6 +283,18 @@ pub(crate) fn load_inputs(
         if table.complete == table.reason.is_some() {
             fail(format!(
                 "input {address}: `reason` is given exactly when it is not complete"
+            ));
+            continue;
+        }
+        // The review of 99b764b: a complete input holds every frame the
+        // session recorded, else its end would replay as silence.
+        if let Some(end) = end
+            && table.complete
+            && table.frames < end
+        {
+            fail(format!(
+                "input {address} is complete but holds {} frames of the session's {end}",
+                table.frames
             ));
             continue;
         }

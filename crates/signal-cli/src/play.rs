@@ -77,7 +77,8 @@ pub(crate) struct PlayArgs {
     #[arg(long)]
     pub(crate) fast: bool,
     /// Null driver only: write the output to this WAV file at the end (kept
-    /// in memory while playing).
+    /// in memory while playing): with `--route`, mapped onto device channels
+    /// as a device of as many channels as the routes need would get them.
     #[arg(long)]
     pub(crate) record_audio: Option<PathBuf>,
     /// With --record-session: also record each delivered result of a latent
@@ -120,19 +121,21 @@ pub(crate) struct PlayArgs {
     /// Sends the `dmx` slots of role ROLE as Art-Net (ADR 0057 §2), for
     /// this run only: `--artnet lights=2.0.0.1/0` (port 6454 and universe 0
     /// unless written). Repeatable; a `dmx` role without one is not sent.
+    /// `signal play` only: `signal ui` binds it in the Setup.
     #[arg(long, value_name = "ROLE=IP[:PORT][/UNIVERSE]", value_parser = parse_artnet_arg)]
     pub(crate) artnet: Vec<(String, signal_output::ArtNetTarget)>,
     /// Takes the `osc` slots of role ROLE from OSC messages received on
     /// this address (ADR 0057 §1), for this run only: `--osc
     /// surface=0.0.0.0:9000`; a value `<name>` of the slot reads the last
     /// `/<role>/<name>` message's number. Repeatable; a role without one
-    /// reads 0.
+    /// reads 0. `signal play` only: `signal ui` binds it in the Setup.
     #[arg(long, value_name = "ROLE=IP:PORT", value_parser = parse_osc_arg)]
     pub(crate) osc: Vec<(String, String)>,
     /// Takes the `midi` slots of role ROLE from the MIDI sources whose
     /// names contain NAME (`*`: every source) through CoreMIDI (ADR 0057
     /// §1, §3), for this run only: `--midi keys=Arturia`. Repeatable; a
-    /// role without one reads 0.
+    /// role without one reads 0. `signal play` only: `signal ui` binds it
+    /// in the Setup.
     #[arg(long, value_name = "ROLE=NAME")]
     pub(crate) midi: Vec<String>,
 }
@@ -433,13 +436,45 @@ pub(crate) fn check(args: &PlayArgs) -> Result<(), Failure> {
             "--seconds must be a positive number, not {seconds}"
         )));
     }
-    if let Some(dir) = &args.record_session
-        && fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
-    {
-        return Err(Failure::Usage(format!(
-            "{} is not empty; a session is written into a new directory",
-            dir.display()
-        )));
+    if let Some(dir) = &args.record_session {
+        if fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some()) {
+            return Err(Failure::Usage(format!(
+                "{} is not empty; a session is written into a new directory",
+                dir.display()
+            )));
+        }
+        // The review of 99b764b: known to fail at the end, said before the
+        // run instead of after it.
+        if fs::symlink_metadata(dir).is_ok_and(|m| !m.is_dir()) {
+            return Err(Failure::Usage(format!(
+                "{} exists and is not a directory; a session is written into a new directory",
+                dir.display()
+            )));
+        }
+    }
+    if let Some(path) = &args.record_audio {
+        if path.is_dir() {
+            return Err(Failure::Usage(format!(
+                "--record-audio {} is a directory, not a WAV file's path",
+                path.display()
+            )));
+        }
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        if parent.is_some_and(|p| !p.is_dir()) {
+            return Err(Failure::Usage(format!(
+                "--record-audio {}: its folder does not exist",
+                path.display()
+            )));
+        }
+        if args
+            .record_session
+            .as_ref()
+            .is_some_and(|dir| path.starts_with(dir))
+        {
+            return Err(Failure::Usage(
+                "--record-audio is written outside the --record-session directory".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -821,6 +856,13 @@ pub(crate) fn run(
     let provenance = provenance::build(&project.files);
     let recorder = SessionRecorder::new(&project, registry, rate, seed, provenance)
         .map_err(|e| Failure::Internal(e.to_string()))?;
+    // The review of 99b764b: a run not recorded keeps no version's plan and
+    // samples (as Signal.app's), so its memory does not grow with edits.
+    let recorder = if args.record_session.is_some() {
+        recorder
+    } else {
+        recorder.without_history()
+    };
     let watch = if args.watch {
         let watcher = ProjectWatcher::new(dir).map_err(|e| Failure::Io(e.to_string()))?;
         Some((watcher, Instant::now()))
@@ -859,7 +901,7 @@ pub(crate) fn run(
     }
 
     let ended = if null {
-        play_null(args, &mut control, runner, width, limit, &stop)?
+        play_null(args, &mut control, runner, width, routes, limit, &stop)?
     } else {
         play_device(
             args,
@@ -889,17 +931,31 @@ pub(crate) fn run(
     for message in &refused {
         eprintln!("signal: not recorded: {message}");
     }
+    // Each output requested is written, whichever of them fails (the review
+    // of 99b764b): a failed session never loses the audio, nor the reverse.
+    let mut unwritten: Vec<Failure> = Vec::new();
     if let Some(dir) = &args.record_session {
         let mut recorder = live.into_recorder();
         // The GPU devices the run's latent modules could use (M2.7-8, M2.7-2).
         recorder.set_devices(gpu.devices());
-        recorder.write(dir).map_err(|error| match error {
-            SessionError::Io { .. } => Failure::Io(error.to_string()),
-            error => Failure::Internal(error.to_string()),
-        })?;
+        if let Err(error) = recorder.write(dir) {
+            unwritten.push(match error {
+                SessionError::Io { .. } => Failure::Io(error.to_string()),
+                error => Failure::Internal(error.to_string()),
+            });
+        }
     }
-    if let (Some(path), Some(samples)) = (&args.record_audio, &ended.audio) {
-        write_wav(path, samples, ended.device_channels, rate)?;
+    if let (Some(path), Some(samples)) = (&args.record_audio, &ended.audio)
+        && let Err(failure) = write_wav(path, samples, ended.device_channels, rate)
+    {
+        unwritten.push(failure);
+    }
+    if !unwritten.is_empty() {
+        let first = unwritten.remove(0);
+        for later in &unwritten {
+            eprintln!("signal: {}", later.message());
+        }
+        return Err(first);
     }
 
     if let Some(fault) = ended.fault {
@@ -1061,6 +1117,7 @@ fn play_null(
     control: &mut Control<'_>,
     runner: Runner,
     width: usize,
+    routes: Option<Vec<Option<usize>>>,
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
@@ -1133,12 +1190,26 @@ fn play_null(
         .map_err(|e| Failure::Internal(e.to_string()))?
         .ok_or_else(|| Failure::Internal("the null driver lost the runner".to_owned()))?;
     control.controller.poll(&mut Recording(&mut control.live));
+    // The review of 99b764b: with routes, the recording is what a device of
+    // as many channels as they need would get (`--route main=3,4` on its
+    // channels 3 and 4), not the run's frame before the map.
+    let mut device_channels = width;
+    if let Some(routes) = routes {
+        device_channels = signal_audio::ChannelMap::width_for_routes(1, &routes);
+        let map = signal_audio::ChannelMap::with_routes(device_channels, routes)
+            .map_err(|e| Failure::Internal(e.to_string()))?;
+        if let Some(samples) = audio.as_mut() {
+            let mut mapped = vec![0.0; samples.len() / width.max(1) * device_channels];
+            map.scatter(samples, &mut mapped);
+            *samples = mapped;
+        }
+    }
     Ok(Ended {
         status: runner.status(),
         clipped: runner.clipped(),
         meter_overflows: runner.meter_overflows(),
         stats: stats.snapshot(),
-        device_channels: width,
+        device_channels,
         scheduling,
         audio,
         waiter: runner.schedule_stats().waiter,

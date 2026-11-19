@@ -209,9 +209,6 @@ pub(crate) fn render_project(
     provenance.library_interface_hashes = project.library_interface_hashes();
     provenance.render_input_hashes = input_hashes;
     provenance.project_file_hashes.extend(fixture_hashes);
-    // A render replacing an earlier one in the folder retires the device
-    // files it no longer writes (below).
-    let earlier = args.out.join("manifest.json").is_file();
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
     // ADR 0038 §9: the other play sides, each in its own WAV.
@@ -255,9 +252,13 @@ pub(crate) fn render_project(
         );
     }
 
-    if earlier {
-        retire_devices(&args.out, &devices).map_err(|e| Failure::Io(e.to_string()))?;
-    }
+    // A render replacing an earlier run in the folder retires the device
+    // files that run recorded and this one no longer writes.
+    let written: Vec<String> = devices
+        .values()
+        .filter_map(|d| Some(d.get("file")?.as_str()?.to_owned()))
+        .collect();
+    retire_outputs(&args.out, &written).map_err(|e| Failure::Io(e.to_string()))?;
 
     let warnings = located(dir, planned.warnings.clone());
     // ADR 0019 §3: offline the engine waits for a due result, so any late
@@ -445,32 +446,47 @@ pub(crate) fn write_artifacts(
     Ok((manifest, metrics))
 }
 
-/// The review of 4d37bf8: in the folder `out` of an earlier render, the
-/// device files (`devices/<slot>.wav`, `.dmx`) this render did not write
-/// (`devices`, by slot) removed, and `devices/` with them when it is left
-/// empty, so the folder holds one render's artifacts. Nothing else there
-/// is touched.
-fn retire_devices(out: &Path, devices: &serde_json::Map<String, Value>) -> std::io::Result<()> {
-    let folder = out.join("devices");
-    let Ok(entries) = std::fs::read_dir(&folder) else {
-        return Ok(());
-    };
-    let written: Vec<&str> = devices
-        .values()
-        .filter_map(|d| d.get("file")?.as_str()?.strip_prefix("devices/"))
-        .collect();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let artifact = name.ends_with(".wav") || name.ends_with(".dmx");
-        if artifact && !written.contains(&name) && entry.file_type()?.is_file() {
-            std::fs::remove_file(entry.path())?;
+/// The record a render or replay leaves in its folder of the device files
+/// it wrote (`devices/<slot>.wav`, `.dmx`), one path a line.
+pub(crate) const OUTPUTS: &str = ".signal-outputs";
+
+/// The review of 4d37bf8 and 99b764b: in the folder `out`, the device files
+/// the run before recorded as its own ([`OUTPUTS`]) and this one did not
+/// write (`written`, `devices/<name>` paths) removed, and `devices/` with
+/// them when it is left empty; then this run's record written (removed
+/// when it wrote none). A file the record does not name (one placed there
+/// by hand, or a run that kept no record) is never touched.
+pub(crate) fn retire_outputs(out: &Path, written: &[String]) -> std::io::Result<()> {
+    let record = out.join(OUTPUTS);
+    let before = std::fs::read_to_string(&record).unwrap_or_default();
+    for line in before.lines() {
+        let Some(name) = line.strip_prefix("devices/") else {
+            continue;
+        };
+        let ours = !name.is_empty()
+            && !name.contains('/')
+            && !name.starts_with('.')
+            && (name.ends_with(".wav") || name.ends_with(".dmx"));
+        if !ours || written.iter().any(|w| w == line) {
+            continue;
+        }
+        let path = out.join(line);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            std::fs::remove_file(&path)?;
         }
     }
-    if std::fs::read_dir(&folder)?.next().is_none() {
+    let folder = out.join("devices");
+    if std::fs::read_dir(&folder).is_ok_and(|mut entries| entries.next().is_none()) {
         std::fs::remove_dir(&folder)?;
     }
-    Ok(())
+    if written.is_empty() {
+        match std::fs::remove_file(&record) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    } else {
+        signal_project::transaction::write_atomic(&record, (written.join("\n") + "\n").as_bytes())
+    }
 }
 
 /// ADR 0038 §5.5: whether `plan`'s main play side is discrete, its

@@ -180,6 +180,9 @@ pub(crate) fn replay_session(
                 signal_output::set_speaker_mask(&out.join("audio.wav"), 0)
                     .map_err(|e| Failure::Io(e.to_string()))?;
             }
+            // A replay writes no device file: an earlier run's, recorded,
+            // go (the review of 99b764b).
+            crate::render::retire_outputs(out, &[]).map_err(|e| Failure::Io(e.to_string()))?;
             written
         }
         None => (rendered.manifest(provenance), metrics_of(rendered)),

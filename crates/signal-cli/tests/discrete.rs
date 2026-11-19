@@ -154,4 +154,59 @@ fn a_render_over_another_retires_its_device_files() {
     render("plain");
     assert!(!out.join("devices").exists(), "the stems' file retired");
     assert!(out.join("audio.wav").is_file());
+
+    // The review of 99b764b: files placed beside a render's own are never
+    // retired, only the ones a run recorded as its outputs.
+    render("stems");
+    fs::write(out.join("devices/reference.wav"), b"mine").unwrap();
+    fs::write(out.join("devices/fixture.dmx"), b"mine").unwrap();
+    fs::write(out.join("devices/notes.txt"), b"mine").unwrap();
+    render("plain");
+    assert!(!out.join("devices/stems.wav").exists());
+    for kept in ["reference.wav", "fixture.dmx", "notes.txt"] {
+        assert!(out.join("devices").join(kept).is_file(), "{kept} deleted");
+    }
+
+    // A replay into the folder retires the earlier render's device files.
+    let session = dir.join("session");
+    let play = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args([
+            "play",
+            dir.join("plain").to_str().unwrap(),
+            "--driver",
+            "null",
+            "--fast",
+            "--seconds",
+            "0.01",
+            "--record-session",
+            session.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        play.status.success(),
+        "{}",
+        String::from_utf8_lossy(&play.stderr)
+    );
+    render("stems");
+    assert!(out.join("devices/stems.wav").is_file());
+    let replay = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args([
+            "replay",
+            session.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(
+        !out.join("devices/stems.wav").exists(),
+        "the replay left it"
+    );
+    assert!(out.join("devices/reference.wav").is_file());
 }

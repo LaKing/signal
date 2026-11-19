@@ -95,6 +95,14 @@ pub(crate) fn run(
                 .to_owned(),
         ));
     }
+    // The review of 99b764b: the host binds external devices from the Setup
+    // alone, so a per-run binding would be ignored for another one.
+    if !play.artnet.is_empty() || !play.osc.is_empty() || !play.midi.is_empty() {
+        return Err(Failure::Usage(
+            "signal ui binds external devices with the Setup's [play.<role>] artnet and [capture.<role>] osc or midi (--setup, ADR 0057); --artnet, --osc and --midi are signal play's"
+                .to_owned(),
+        ));
+    }
     let null = play.driver == DriverKind::Null;
     let played = Played {
         project: &play.project,
