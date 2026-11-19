@@ -1287,3 +1287,29 @@ fn a_restore_from_the_files_alone() {
     assert!(snapshot::read(&dir).unwrap().0.snapshots.is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// The review of 4d37bf8: a restore that changes no control (its only
+/// instance gone) says there is no undo snapshot, as `snapshot list` does.
+#[test]
+fn a_restore_that_changes_nothing_reports_no_undo() {
+    let dir =
+        std::env::temp_dir().join(format!("signal-ui-snapshot-noundo-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("project.toml"), common::TONE).unwrap();
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let values: snapshot::Values = [("/gone.freq".to_owned(), 1.0)].into_iter().collect();
+    let restored =
+        signal_ui::snapshot::restore_files_with(&dir, &registry, |_| Ok(values)).unwrap();
+    assert!(restored.restore.edits.is_empty());
+    assert!(!restored.undo);
+    assert!(snapshot::read(&dir).unwrap().0.undo.is_none());
+    // One that changes a control leaves its undo snapshot.
+    let values: snapshot::Values = [("/b.freq".to_owned(), 330.0)].into_iter().collect();
+    let restored =
+        signal_ui::snapshot::restore_files_with(&dir, &registry, |_| Ok(values)).unwrap();
+    assert!(restored.undo);
+    assert!(snapshot::read(&dir).unwrap().0.undo.is_some());
+    let _ = fs::remove_dir_all(&dir);
+}

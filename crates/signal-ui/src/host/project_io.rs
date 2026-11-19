@@ -96,7 +96,7 @@ fn pack_folder(ctx: &WriteCtx, dir: &Path, file: &Path, id: &str) -> (Result<(),
         let packed = match ctx.lock() {
             // ADR 0035 §13: Save As embeds the projects included from
             // outside the folder (the same archive as `pack` without any).
-            Ok(_lock) => archive::pack_embedded(dir, Some(id)),
+            Ok(_lock) => archive::pack_staged(dir, Some(id), true, file),
             Err(error) => {
                 return (
                     Err(format!(
@@ -110,7 +110,8 @@ fn pack_folder(ctx: &WriteCtx, dir: &Path, file: &Path, id: &str) -> (Result<(),
         let now = folder_look(dir);
         if now == last {
             let saved = packed
-                .and_then(|bytes| archive::write_atomic(file, &bytes))
+                .map_err(|e| e.to_string())
+                .and_then(|staged| staged.replace(file).map_err(|e| e.to_string()))
                 .map_err(|e| format!("{} was not saved: {e}", file.display()));
             return (saved, now);
         }

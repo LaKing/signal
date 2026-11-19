@@ -276,6 +276,10 @@ pub struct ArtNetSender {
     pub sent: u64,
     /// Packets the socket refused.
     pub failed: u64,
+    /// The last refusal (the target and the socket's error), and the one
+    /// [`ArtNetSender::take_failure`] said last.
+    error: Option<String>,
+    said: Option<String>,
 }
 
 impl ArtNetSender {
@@ -291,7 +295,25 @@ impl ArtNetSender {
             sequences,
             sent: 0,
             failed: 0,
+            error: None,
+            said: None,
         })
+    }
+
+    /// What an operator should hear of refused packets (a dark fixture):
+    /// `Some` when the socket refused one since the last call with an error
+    /// other than the one said last, so a lasting failure is said once.
+    pub fn take_failure(&mut self) -> Option<String> {
+        if self.error.is_none() || self.error == self.said {
+            return None;
+        }
+        self.said = self.error.clone();
+        Some(format!(
+            "Art-Net: {} of {} packets not sent ({})",
+            self.failed,
+            self.failed + self.sent,
+            self.error.as_deref().unwrap_or_default()
+        ))
     }
 
     /// Sends every frame waiting in `rx`; how many were sent.
@@ -312,7 +334,10 @@ impl ArtNetSender {
                     self.sent += 1;
                     count += 1;
                 }
-                Err(_) => self.failed += 1,
+                Err(error) => {
+                    self.failed += 1;
+                    self.error = Some(format!("{}: {error}", target.address));
+                }
             }
         }
         count
@@ -341,6 +366,10 @@ pub fn parse_artnet(text: &str) -> Result<ArtNetTarget, String> {
     let address = with_port
         .parse::<SocketAddr>()
         .map_err(|_| format!("`{host}` is not IP[:PORT]"))?;
+    // Art-Net is IPv4, and the sender's socket is one.
+    if !address.is_ipv4() {
+        return Err(format!("`{host}` is not an IPv4 address (Art-Net is IPv4)"));
+    }
     Ok(ArtNetTarget { address, universe })
 }
 
@@ -382,6 +411,36 @@ mod tests {
         );
         assert!(parse_artnet("lamp").is_err());
         assert!(parse_artnet("2.0.0.1/40000").is_err());
+        // The review of 4d37bf8: the sender's socket is IPv4.
+        assert!(parse_artnet("[::1]:6454/0").is_err());
+        assert!(parse_artnet("[::1]").is_err());
+    }
+
+    /// The review of 4d37bf8: a refused packet is said, once per error.
+    #[test]
+    fn a_refused_packet_is_said_once() {
+        // Port 0 is never a destination: every send is refused.
+        let target = ArtNetTarget {
+            address: "127.0.0.1:0".parse().unwrap(),
+            universe: 0,
+        };
+        let mut sender = ArtNetSender::new(vec![Some(target)]).unwrap();
+        assert_eq!(sender.take_failure(), None);
+        let (mut tx, mut rx) = RingBuffer::new(4);
+        for frame in 0..2 {
+            let _ = tx.push(DataFrame {
+                sink: 0,
+                frame,
+                len: 2,
+                bytes: [0; MAX_DATA_FRAME],
+            });
+        }
+        assert_eq!(sender.drain(&mut rx), 0);
+        assert_eq!(sender.failed, 2);
+        let said = sender.take_failure().unwrap();
+        assert!(said.contains("2 of 2 packets not sent"), "{said}");
+        assert!(said.contains("127.0.0.1:0"), "{said}");
+        assert_eq!(sender.take_failure(), None);
     }
 
     #[test]

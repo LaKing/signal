@@ -359,6 +359,9 @@ impl Control<'_> {
         self.controller.poll(&mut Recording(&mut self.live));
         if let Some((rx, sender)) = self.artnet.as_mut() {
             sender.drain(rx);
+            if let Some(failure) = sender.take_failure() {
+                eprintln!("signal: {failure}");
+            }
         }
         let Some((watcher, last)) = self.watch.as_mut() else {
             return;

@@ -721,7 +721,9 @@ impl Host {
         let Some(run) = self.run.as_mut() else {
             return;
         };
-        run.external.poll();
+        if let Some(failure) = run.external.poll() {
+            self.messages.push(failure);
+        }
         let mut observed = Observed {
             values: &mut self.live.values,
             reports: &mut self.reports,

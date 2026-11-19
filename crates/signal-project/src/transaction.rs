@@ -133,11 +133,26 @@ pub fn stage(target: &Path, bytes: &[u8]) -> io::Result<Staged> {
 }
 
 /// [`stage`] with the staging names numbered by `next`.
-fn stage_numbered(
+fn stage_numbered(target: &Path, bytes: &[u8], next: impl FnMut() -> u64) -> io::Result<Staged> {
+    stage_written(target, next, |file| file.write_all(bytes))
+}
+
+/// A new staging file of this writer's beside `target` that `write` fills
+/// (as many bytes as it streams, never held at once: a `.signal` archive,
+/// the review of 4d37bf8), synced. A failure removes it.
+pub fn stage_with<E: From<io::Error>>(
     target: &Path,
-    bytes: &[u8],
+    write: impl FnOnce(&mut File) -> Result<(), E>,
+) -> Result<Staged, E> {
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
+    stage_written(target, || NEXT.fetch_add(1, Ordering::Relaxed), write)
+}
+
+fn stage_written<E: From<io::Error>>(
+    target: &Path,
     mut next: impl FnMut() -> u64,
-) -> io::Result<Staged> {
+    write: impl FnOnce(&mut File) -> Result<(), E>,
+) -> Result<Staged, E> {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let pid = std::process::id();
     let mut attempts = 0u32;
@@ -151,14 +166,14 @@ fn stage_numbered(
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempts < 1000 => {
                 attempts += 1;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     };
     let staged = Staged {
         path,
         committed: false,
     };
-    file.write_all(bytes)?;
+    write(&mut file)?;
     file.sync_all()?;
     Ok(staged)
 }

@@ -1264,7 +1264,7 @@ pub fn write_project_all(
 }
 
 /// [`write_project_all`] of the edits `keep` takes, decided from the text
-/// read under the writer lock (`keep(text, index)`), so the choice is made
+/// read under the writer lock (`keep(values, index)`, the text parsed once), so the choice is made
 /// on the version written over, not on a cached one: a snapshot's restore
 /// writes only the values the file does not hold. Gives the texts before and
 /// after and the indices written; nothing is written (and the lock is the
@@ -1272,7 +1272,7 @@ pub fn write_project_all(
 pub fn write_project_chosen(
     dir: &Path,
     edits: &[(&str, &str, Option<f64>, &[&str])],
-    keep: &dyn Fn(&str, usize) -> bool,
+    keep: &dyn Fn(&signal_project::Parameters, usize) -> bool,
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     write_project_between(dir, edits, keep, &mut || {})
 }
@@ -1282,7 +1282,7 @@ pub fn write_project_chosen(
 fn write_project_between(
     dir: &Path,
     edits: &[(&str, &str, Option<f64>, &[&str])],
-    keep: &dyn Fn(&str, usize) -> bool,
+    keep: &dyn Fn(&signal_project::Parameters, usize) -> bool,
     between: &mut dyn FnMut(),
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     let lock = ProjectLock::acquire(dir).map_err(|e| lock_failed(dir, edits, &e))?;
@@ -1297,7 +1297,7 @@ pub fn write_project_chosen_under(
     dir: &Path,
     lock: io::Result<ProjectLock>,
     edits: &[(&str, &str, Option<f64>, &[&str])],
-    keep: &dyn Fn(&str, usize) -> bool,
+    keep: &dyn Fn(&signal_project::Parameters, usize) -> bool,
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     let lock = lock.map_err(|e| lock_failed(dir, edits, &e))?;
     write_project_locked(dir, &lock, edits, keep, &mut || {})
@@ -1331,7 +1331,7 @@ pub fn write_project_chosen_locked(
     dir: &Path,
     lock: &ProjectLock,
     edits: &[(&str, &str, Option<f64>, &[&str])],
-    keep: &dyn Fn(&str, usize) -> bool,
+    keep: &dyn Fn(&signal_project::Parameters, usize) -> bool,
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     write_project_locked(dir, lock, edits, keep, &mut || {})
 }
@@ -1340,7 +1340,7 @@ fn write_project_locked(
     dir: &Path,
     _lock: &ProjectLock,
     edits: &[(&str, &str, Option<f64>, &[&str])],
-    keep: &dyn Fn(&str, usize) -> bool,
+    keep: &dyn Fn(&signal_project::Parameters, usize) -> bool,
     between: &mut dyn FnMut(),
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     use signal_project::transaction::replace_unchanged;
@@ -1351,7 +1351,8 @@ fn write_project_locked(
     };
     let before =
         signal_project::read_regular_to_string(&path).map_err(|e| failed(e.to_string()))?;
-    let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&before, i)).collect();
+    let read = signal_project::Parameters::read(&before);
+    let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&read, i)).collect();
     if kept.is_empty() {
         return Ok((before.clone(), before, kept));
     }

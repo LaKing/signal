@@ -188,7 +188,7 @@ impl Host {
         let chosen =
             write_project_chosen_under(&self.opening.dir, ctx.lock(), &texts, &|text, i| {
                 pending.get(i).is_some_and(|(e, from)| {
-                    signal_project::read_parameter(text, &e.instance, &e.parameter)
+                    text.get(&e.instance, &e.parameter)
                         .is_some_and(|v| v.to_bits() == from.to_bits())
                 })
             });

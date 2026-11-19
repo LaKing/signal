@@ -73,9 +73,24 @@ pub fn write_parameter(
     value: Option<f64>,
     order: &[&str],
 ) -> Result<String, WriteError> {
-    let mut document: DocumentMut = text
-        .parse()
-        .map_err(|e: toml_edit::TomlError| WriteError::Syntax(e.message().to_owned()))?;
+    let mut document = parse(text)?;
+    apply_parameter(&mut document, instance, parameter, value, order)?;
+    Ok(document.to_string())
+}
+
+fn parse(text: &str) -> Result<DocumentMut, WriteError> {
+    text.parse()
+        .map_err(|e: toml_edit::TomlError| WriteError::Syntax(e.message().to_owned()))
+}
+
+/// [`write_parameter`] on a parsed `document`.
+fn apply_parameter(
+    document: &mut DocumentMut,
+    instance: &str,
+    parameter: &str,
+    value: Option<f64>,
+    order: &[&str],
+) -> Result<(), WriteError> {
     let value = match value {
         Some(v) if !v.is_finite() => return Err(WriteError::NotFinite(parameter.to_owned())),
         Some(v) => Some(number(v)),
@@ -91,7 +106,7 @@ pub fn write_parameter(
         Item::Table(table) => standard(table, parameter, value),
         _ => return Err(WriteError::NoInstance(instance.to_owned())),
     }
-    Ok(document.to_string())
+    Ok(())
 }
 
 /// `text`, a `project.toml`, with `parameter` of the top-level `instance`
@@ -166,34 +181,51 @@ pub fn write_snapshot_exclude(
 /// top-level `instance`: `None` when the entry has no such key (or the text
 /// does not read), so the parameter is at its default.
 pub fn read_parameter(text: &str, instance: &str, parameter: &str) -> Option<f64> {
-    let document: DocumentMut = text.parse().ok()?;
-    let value = document
-        .get("instances")?
-        .as_table_like()?
-        .get(instance)?
-        .as_table_like()?
-        .get(parameter)?
-        .as_value()?
-        .clone();
-    match value {
-        Value::Integer(i) => Some(*i.value() as f64),
-        Value::Float(f) => Some(*f.value()),
-        _ => None,
+    Parameters::read(text).get(instance, parameter)
+}
+
+/// A `project.toml` parsed once for many [`Parameters::get`]s (a snapshot's
+/// restore asks for each of its values; the review of 4d37bf8).
+pub struct Parameters(Option<DocumentMut>);
+
+impl Parameters {
+    /// `text` parsed; one that does not read holds no values.
+    pub fn read(text: &str) -> Parameters {
+        Parameters(text.parse().ok())
+    }
+
+    /// [`read_parameter`] of the parsed text.
+    pub fn get(&self, instance: &str, parameter: &str) -> Option<f64> {
+        let value = self
+            .0
+            .as_ref()?
+            .get("instances")?
+            .as_table_like()?
+            .get(instance)?
+            .as_table_like()?
+            .get(parameter)?
+            .as_value()?;
+        match value {
+            Value::Integer(i) => Some(*i.value() as f64),
+            Value::Float(f) => Some(*f.value()),
+            _ => None,
+        }
     }
 }
 
 /// `text` with every edit of `edits` applied in order by [`write_parameter`]:
-/// `(instance, parameter, value, order)`. One text, so a caller writes the
-/// edits as one change (a snapshot's restore, ADR 0041).
+/// `(instance, parameter, value, order)`. One text, parsed once and written
+/// once, so a caller writes the edits as one change (a snapshot's restore,
+/// ADR 0041).
 pub fn write_parameters(
     text: &str,
     edits: &[(&str, &str, Option<f64>, &[&str])],
 ) -> Result<String, WriteError> {
-    let mut text = text.to_owned();
+    let mut document = parse(text)?;
     for (instance, parameter, value, order) in edits {
-        text = write_parameter(&text, instance, parameter, *value, order)?;
+        apply_parameter(&mut document, instance, parameter, *value, order)?;
     }
-    Ok(text)
+    Ok(document.to_string())
 }
 
 /// ADR 0046 §4 (phase 2): the file a control's value is written into and

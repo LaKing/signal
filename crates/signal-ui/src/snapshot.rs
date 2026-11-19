@@ -68,9 +68,9 @@ impl Edit {
     /// Whether `text` (a `project.toml`) already holds this value: the key
     /// with exactly this value, or no key while every port's own default is
     /// this value. Decided on the text a writer read under the lock.
-    pub fn held_by(&self, text: &str) -> bool {
+    pub fn held_by(&self, text: &signal_project::Parameters) -> bool {
         let bits = self.value.to_bits();
-        match signal_project::read_parameter(text, &self.instance, &self.parameter) {
+        match text.get(&self.instance, &self.parameter) {
             Some(v) => v.to_bits() == bits,
             None => {
                 !self.target.defaults.is_empty()
@@ -182,6 +182,9 @@ pub struct Restored {
     pub restore: Restore,
     /// The controls written (the others already held their value).
     pub written: Vec<String>,
+    /// Whether an undo snapshot is there afterwards (a restore that changes
+    /// no control leaves the one from before, or none).
+    pub undo: bool,
 }
 
 /// Restores `values` into the project folder `dir` from its files alone
@@ -202,7 +205,8 @@ pub fn restore_files(
         )))
     })?;
     let panel = planned_panel(dir, registry)?;
-    restore_locked(dir, &lock, &panel, values)
+    let undo = snapshot::read(dir).is_ok_and(|(all, _)| all.undo.is_some());
+    restore_locked(dir, &lock, &panel, values, undo)
 }
 
 /// [`restore_files`] by a writer that holds the project's writer `lock`,
@@ -212,6 +216,7 @@ fn restore_locked(
     lock: &ProjectLock,
     panel: &Panel,
     values: &Values,
+    undo: bool,
 ) -> Result<Restored, RestoreError> {
     let restore = plan(panel, values);
     let orders: Vec<Vec<&str>> = restore.edits.iter().map(Edit::order).collect();
@@ -236,7 +241,11 @@ fn restore_locked(
         .iter()
         .filter_map(|&i| restore.edits.get(i).map(|e| e.address.clone()))
         .collect();
-    Ok(Restored { restore, written })
+    Ok(Restored {
+        restore,
+        written,
+        undo,
+    })
 }
 
 /// The undo snapshot of a restore of `values` into `panel`'s controls
@@ -280,11 +289,12 @@ pub fn restore_files_with(
                 panel.file_base(i, p).map_or(0.0, |(base, _)| base)
             });
             all.undo = if undo.is_empty() { before } else { Some(undo) };
-            Ok(values)
+            Ok((values, all.undo.is_some()))
         },
     )
     .map_err(RestoreError::Snapshot)?;
-    match restore_locked(dir, &lock, &panel, &edited.result) {
+    let (values, undo) = &edited.result;
+    match restore_locked(dir, &lock, &panel, values, *undo) {
         Ok(restored) => Ok(restored),
         Err(error) => {
             // Nothing is sent from the files alone: the undo snapshot goes

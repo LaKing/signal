@@ -340,8 +340,13 @@ fn outside_includes(dir: &Path, root: &Path) -> Vec<String> {
             continue;
         };
         for written in crate::include::included_paths(&sources) {
+            // An absolute path reads the original even from an unpacked copy
+            // (the review of 4d37bf8): --embed writes it relative.
+            let absolute = Path::new(&written).is_absolute();
             let inside = fs::canonicalize(folder.join(&written)).is_ok_and(|f| f.starts_with(root));
-            if !inside {
+            if absolute && inside {
+                outside.push(format!("{written} (an absolute path)"));
+            } else if !inside {
                 let canonical_dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
                 outside.push(match folder.strip_prefix(&canonical_dir) {
                     Ok(rel) if !rel.as_os_str().is_empty() => {
@@ -381,6 +386,52 @@ pub fn valid_project_id(id: &str) -> bool {
 /// makes; only the comment differs. An id that is not
 /// [`valid_project_id`] is left out.
 pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
+    in_memory(&plain_entries(dir)?, id)
+}
+
+/// [`pack_identified`] (or [`pack_embedded`] when `embed`) written into a
+/// staging file beside `file` ([`write_atomic`]'s), each file streamed into
+/// it from the folder rather than held in memory, and the limits checked on
+/// the files' sizes before anything is written (the review of 4d37bf8). The
+/// caller renames it over `file` ([`Staged::replace`]); dropped, it is
+/// removed.
+///
+/// [`Staged::replace`]: crate::transaction::Staged::replace
+pub fn pack_staged(
+    dir: &Path,
+    id: Option<&str>,
+    embed: bool,
+    file: &Path,
+) -> Result<crate::transaction::Staged, ArchiveError> {
+    let entries = if embed {
+        embedded_entries(dir)?
+    } else {
+        plain_entries(dir)?
+    };
+    check_limits(&entries)?;
+    let staged = crate::transaction::stage_with(file, |out: &mut fs::File| {
+        write_zip(&entries, id, io::BufWriter::new(out))
+            .and_then(|w| {
+                w.into_inner()
+                    .map(drop)
+                    .map_err(|e| io_error(file)(e.into_error()))
+            })
+            .map_err(|e| io::Error::other(e.to_string()))
+    })
+    .map_err(io_error(file))?;
+    Ok(staged)
+}
+
+/// What an entry holds: a file of the folder, read as it is written, or
+/// text rewritten here.
+enum Content {
+    File(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+/// [`pack_identified`]'s entries: the folder's files and its inside
+/// includes', refused when it includes from outside.
+fn plain_entries(dir: &Path) -> Result<Vec<(String, Content)>, ArchiveError> {
     let mut files = project_files(dir)?;
     let root = fs::canonicalize(dir).map_err(io_error(dir))?;
     files.extend(inside_includes(dir, &root)?);
@@ -391,61 +442,99 @@ pub fn pack_identified(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveE
     if !outside.is_empty() {
         return Err(ArchiveError::Includes(outside));
     }
-    let mut entries = Vec::with_capacity(files.len());
-    for (name, path) in &files {
-        entries.push((name.clone(), fs::read(path).map_err(io_error(path))?));
-    }
-    write_zip(entries, id)
+    Ok(files
+        .into_iter()
+        .map(|(name, path)| (name, Content::File(path)))
+        .collect())
 }
 
 /// ADR 0035 §13: the project folder `dir` as a `.signal` archive with every
 /// project it includes (or loads into a slot) from outside the folder
 /// **embedded**, under `includes/<key>/` (`<key>` the including instance,
-/// `<composite>_<instance>` in a composite's file, numbered when taken),
-/// and the `project` (or `load`) values naming them rewritten to that path
-/// (only those values, with `toml_edit`), so the archive renders as the
-/// folder does. One folder included twice is embedded once. An include
-/// inside the folder is packed as it is (a `.signal` one as its file); one
-/// from outside that is a `.signal` file is embedded unpacked; an outside
-/// include of an embedded project is refused (not built yet).
+/// `<composite>_<instance>` in a composite's file, numbered when taken).
+/// Every project in the archive is walked, the included ones too (the
+/// review of 4d37bf8: a child's own outside include was left out), and
+/// each `project` (or `load`) value naming one is rewritten (only those
+/// values, with `toml_edit`) to its path in the archive, relative, so the
+/// archive renders as the folder does and never reads the folder it came
+/// from (an absolute path to a project inside is rewritten too). One
+/// folder included twice is embedded once. An include inside the folder is
+/// packed at its path (a `.signal` one as its file); a `.signal` file from
+/// outside is embedded unpacked.
 pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
-    let mut files = project_files(dir)?;
-    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
-    files.extend(inside_includes(dir, &root)?);
-    let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (name, path) in &files {
-        entries.insert(name.clone(), fs::read(path).map_err(io_error(path))?);
+    in_memory(&embedded_entries(dir)?, id)
+}
+
+/// `rest` under the archive folder `at` (`""`: the root).
+fn under(at: &str, rest: &str) -> String {
+    if at.is_empty() {
+        rest.to_owned()
+    } else {
+        format!("{at}/{rest}")
     }
-    let mut embedded: BTreeMap<PathBuf, String> = BTreeMap::new();
+}
+
+/// The path from the archive folder `from` to `to`, `/`-separated.
+fn relative(from: &str, to: &str) -> String {
+    let from: Vec<&str> = from.split('/').filter(|p| !p.is_empty()).collect();
+    let to: Vec<&str> = to.split('/').filter(|p| !p.is_empty()).collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - common];
+    parts.extend(&to[common..]);
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// `written` as [`relative`] would spell it: no `./`, no trailing `/`.
+fn spelled(written: &str) -> &str {
+    let mut text = written.trim_end_matches('/');
+    while let Some(rest) = text.strip_prefix("./") {
+        text = rest;
+    }
+    text
+}
+
+/// [`pack_embedded`]'s entries.
+fn embedded_entries(dir: &Path) -> Result<Vec<(String, Content)>, ArchiveError> {
+    let root = fs::canonicalize(dir).map_err(io_error(dir))?;
+    // Each project (or `.signal` file) the archive holds, by its canonical
+    // path, at its folder in the archive (`""`: the root).
+    let mut placed: BTreeMap<PathBuf, String> = BTreeMap::from([(root.clone(), String::new())]);
+    let mut todo = vec![(root.clone(), String::new())];
+    let mut entries: BTreeMap<String, Content> = BTreeMap::new();
     let mut refused: Vec<String> = Vec::new();
-    let definitions: Vec<String> = entries
-        .keys()
-        .filter(|n| {
-            n.as_str() == crate::PROJECT_FILE
-                || (n.starts_with("composites/") && n.ends_with(".toml"))
-        })
-        .cloned()
-        .collect();
-    for name in definitions {
-        let Some(text) = entries
-            .get(&name)
-            .and_then(|b| String::from_utf8(b.clone()).ok())
-        else {
-            continue;
-        };
-        let Ok(mut document) = text.parse::<toml_edit::DocumentMut>() else {
-            continue;
-        };
-        let prefix = name
-            .strip_prefix("composites/")
-            .and_then(|n| n.strip_suffix(".toml"))
-            .map(|c| format!("{c}_"))
-            .unwrap_or_default();
-        let mut changed = false;
-        if let Some(instances) = document
-            .get_mut("instances")
-            .and_then(toml_edit::Item::as_table_like_mut)
-        {
+    while let Some((folder, at)) = todo.pop() {
+        let files = project_files(&folder)?;
+        for (name, path) in &files {
+            entries.insert(under(&at, name), Content::File(path.clone()));
+        }
+        for (name, path) in &files {
+            let definition = name == PROJECT_FILE
+                || (name.starts_with("composites/") && name.ends_with(".toml"));
+            if !definition {
+                continue;
+            }
+            let Ok(text) = crate::read_regular_to_string(path) else {
+                continue;
+            };
+            let Ok(mut document) = text.parse::<toml_edit::DocumentMut>() else {
+                continue;
+            };
+            let prefix = name
+                .strip_prefix("composites/")
+                .and_then(|n| n.strip_suffix(".toml"))
+                .map(|c| format!("{c}_"))
+                .unwrap_or_default();
+            let mut changed = false;
+            let Some(instances) = document
+                .get_mut("instances")
+                .and_then(toml_edit::Item::as_table_like_mut)
+            else {
+                continue;
+            };
             for (instance, entry) in instances.iter_mut() {
                 let Some(entry) = entry.as_table_like_mut() else {
                     continue;
@@ -464,79 +553,102 @@ pub fn pack_embedded(dir: &Path, id: Option<&str>) -> Result<Vec<u8>, ArchiveErr
                 if !crate::is_project_path(&written) && key == "load" {
                     continue;
                 }
-                let Ok(folder) = fs::canonicalize(dir.join(&written)) else {
+                // One that does not resolve does not render from the folder
+                // either; the loader names it.
+                let Ok(found) = fs::canonicalize(folder.join(&written)) else {
                     continue;
                 };
-                if folder.starts_with(&root) {
+                let place = if let Some(place) = placed.get(&found) {
+                    place.clone()
+                } else if let Ok(place) = found
+                    .strip_prefix(&root)
+                    .map(|rest| under("", &rest.to_string_lossy()))
+                    .or_else(|_| {
+                        found
+                            .strip_prefix(&folder)
+                            .map(|rest| under(&at, &rest.to_string_lossy()))
+                    })
+                {
+                    // Inside the folder (or inside the embedded project
+                    // naming it): at its own path.
+                    placed.insert(found.clone(), place.clone());
+                    if found.is_file() {
+                        entries.insert(place.clone(), Content::File(found.clone()));
+                    } else {
+                        todo.push((found.clone(), place.clone()));
+                    }
+                    place
+                } else {
+                    // ADR 0035 §13: a `.signal` include is embedded unpacked.
+                    let found = if found.is_file() {
+                        match unpacked_include(&found)
+                            .and_then(|f| fs::canonicalize(&f).map_err(io_error(&f)))
+                        {
+                            Ok(unpacked) => unpacked,
+                            Err(why) => {
+                                refused.push(format!("{written} ({why})"));
+                                continue;
+                            }
+                        }
+                    } else {
+                        found
+                    };
+                    match placed.get(&found) {
+                        Some(place) => place.clone(),
+                        None => {
+                            let base = format!("includes/{prefix}{}", instance.get());
+                            let mut place = base.clone();
+                            let mut n = 2;
+                            let taken = |place: &str| {
+                                placed.values().any(|v| v == place)
+                                    || entries.keys().any(|e| e.starts_with(&format!("{place}/")))
+                                    || root.join(place).exists()
+                            };
+                            while taken(&place) {
+                                place = format!("{base}_{n}");
+                                n += 1;
+                            }
+                            placed.insert(found.clone(), place.clone());
+                            todo.push((found, place.clone()));
+                            place
+                        }
+                    }
+                };
+                let wanted = relative(&at, &place);
+                if spelled(&written) == wanted {
                     continue;
                 }
-                // ADR 0035 §13: a `.signal` include is embedded unpacked.
-                let folder = if folder.is_file() {
-                    match unpacked_include(&folder)
-                        .and_then(|f| fs::canonicalize(&f).map_err(io_error(&f)))
-                    {
-                        Ok(unpacked) => unpacked,
-                        Err(why) => {
-                            refused.push(format!("{written} ({why})"));
-                            continue;
-                        }
-                    }
-                } else {
-                    folder
-                };
-                let at = match embedded.get(&folder) {
-                    Some(at) => at.clone(),
-                    None => {
-                        let base = format!("includes/{prefix}{}", instance.get());
-                        let mut at = base.clone();
-                        let mut n = 2;
-                        while embedded.values().any(|v| *v == at)
-                            || files.keys().any(|f| f.starts_with(&format!("{at}/")))
-                        {
-                            at = format!("{base}_{n}");
-                            n += 1;
-                        }
-                        embedded.insert(folder.clone(), at.clone());
-                        at
-                    }
-                };
                 if let Some(value) = entry.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
                     let decor = value.decor().clone();
-                    *value = toml_edit::Value::from(at.as_str());
+                    *value = toml_edit::Value::from(wanted.as_str());
                     *value.decor_mut() = decor;
                     changed = true;
                 }
             }
-        }
-        if changed {
-            entries.insert(name, document.to_string().into_bytes());
-        }
-    }
-    for (folder, at) in &embedded {
-        // Its own outside includes (and its inside includes') would need
-        // their paths rewritten too.
-        for written in outside_includes(folder, folder) {
-            refused.push(format!("{written} (in {at})"));
-        }
-        // Its files and its inside includes', at their paths under it.
-        let mut files = project_files(folder)?;
-        files.extend(inside_includes(folder, folder)?);
-        for (name, path) in files {
-            entries.insert(
-                format!("{at}/{name}"),
-                fs::read(&path).map_err(io_error(&path))?,
-            );
+            if changed {
+                entries.insert(
+                    under(&at, name),
+                    Content::Bytes(document.to_string().into_bytes()),
+                );
+            }
         }
     }
     if !refused.is_empty() {
         return Err(ArchiveError::Includes(refused));
     }
-    write_zip(entries.into_iter().collect(), id)
+    Ok(entries.into_iter().collect())
 }
 
-/// The archive of `entries` (name, bytes), in order, with the library
-/// version (and project id `id`, when valid) in its comment.
-fn write_zip(entries: Vec<(String, Vec<u8>)>, id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
+/// The bytes `content` holds: a file's length as the folder says now.
+fn content_len(content: &Content) -> Result<u64, ArchiveError> {
+    match content {
+        Content::File(path) => Ok(fs::metadata(path).map_err(io_error(path))?.len()),
+        Content::Bytes(bytes) => Ok(bytes.len() as u64),
+    }
+}
+
+/// [`Limits::DEFAULT`] checked on the entries' sizes, before any is read.
+fn check_limits(entries: &[(String, Content)]) -> Result<(), ArchiveError> {
     let limits = Limits::DEFAULT;
     if entries.len() > limits.entries {
         return Err(ArchiveError::TooManyEntries {
@@ -544,13 +656,39 @@ fn write_zip(entries: Vec<(String, Vec<u8>)>, id: Option<&str>) -> Result<Vec<u8
             max: limits.entries,
         });
     }
+    let mut total = 0u64;
+    for (_, content) in entries {
+        total = total.saturating_add(content_len(content)?);
+        if total > limits.bytes {
+            return Err(ArchiveError::TooLarge { max: limits.bytes });
+        }
+    }
+    Ok(())
+}
+
+/// The archive of `entries` as bytes.
+fn in_memory(entries: &[(String, Content)], id: Option<&str>) -> Result<Vec<u8>, ArchiveError> {
+    check_limits(entries)?;
+    Ok(write_zip(entries, id, Cursor::new(Vec::new()))?.into_inner())
+}
+
+/// The archive of `entries` (name, content), in order, with the library
+/// version (and project id `id`, when valid) in its comment, written into
+/// `out`; each file streamed from the folder, never more bytes in all than
+/// [`Limits::DEFAULT`] (a file grown since its size was checked included).
+fn write_zip<W: Write + io::Seek>(
+    entries: &[(String, Content)],
+    id: Option<&str>,
+    out: W,
+) -> Result<W, ArchiveError> {
+    let limits = Limits::DEFAULT;
     let options = SimpleFileOptions::DEFAULT
         .compression_method(CompressionMethod::Deflated)
         .compression_level(Some(6))
         .last_modified_time(DateTime::DEFAULT)
         .unix_permissions(0o644)
         .system(System::Unix);
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let mut writer = ZipWriter::new(out);
     writer
         .set_comment(match id.filter(|id| valid_project_id(id)) {
             Some(id) => format!(
@@ -561,15 +699,25 @@ fn write_zip(entries: Vec<(String, Vec<u8>)>, id: Option<&str>) -> Result<Vec<u8
         })
         .map_err(zip_error)?;
     let mut total = 0u64;
-    for (name, bytes) in &entries {
-        total += bytes.len() as u64;
-        if total > limits.bytes {
+    for (name, content) in entries {
+        writer.start_file(name, options).map_err(zip_error)?;
+        let room = limits.bytes - total;
+        let copied = match content {
+            Content::File(path) => {
+                let file = fs::File::open(path).map_err(io_error(path))?;
+                io::copy(&mut file.take(room + 1), &mut writer).map_err(io_error(path))?
+            }
+            Content::Bytes(bytes) => {
+                writer.write_all(bytes).map_err(io_error(Path::new(name)))?;
+                bytes.len() as u64
+            }
+        };
+        if copied > room {
             return Err(ArchiveError::TooLarge { max: limits.bytes });
         }
-        writer.start_file(name, options).map_err(zip_error)?;
-        writer.write_all(bytes).map_err(io_error(Path::new(name)))?;
+        total += copied;
     }
-    Ok(writer.finish().map_err(zip_error)?.into_inner())
+    writer.finish().map_err(zip_error)
 }
 
 /// Whether the project folder `dir` packs to `packed`, an archive [`pack`]

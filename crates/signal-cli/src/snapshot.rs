@@ -146,14 +146,21 @@ fn report(name: &str, restored: &Restored, json: bool) {
                 "written": restored.written,
                 "skipped": restore.skipped.iter().map(|s| json!({"address": s.address, "reason": s.reason})).collect::<Vec<_>>(),
                 "clamped": restore.clamped.iter().map(|c| json!({"address": c.address, "value": c.value, "to": c.to})).collect::<Vec<_>>(),
-                "undo": true,
+                "undo": restored.undo,
             })
             .to_string(),
         );
         return;
     }
+    let undo = if !restore.edits.is_empty() {
+        "the values it replaced are the undo snapshot"
+    } else if restored.undo {
+        "nothing to replace, so the undo snapshot is the one from before"
+    } else {
+        "nothing to replace, so there is no undo snapshot"
+    };
     print_stdout(&format!(
-        "restored \"{name}\": {} values, {} written into project.toml (the values it replaced are the undo snapshot)",
+        "restored \"{name}\": {} values, {} written into project.toml ({undo})",
         restore.edits.len(),
         restored.written.len()
     ));

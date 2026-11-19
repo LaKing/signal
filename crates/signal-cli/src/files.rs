@@ -44,23 +44,24 @@ pub(crate) fn archive_failure(file: &Path) -> impl FnOnce(ArchiveError) -> Failu
 
 /// `signal pack`.
 pub(crate) fn pack(args: &PackArgs, json: bool) -> Result<(), Failure> {
-    let bytes = if args.embed {
-        archive::pack_embedded(&args.folder, None)
-    } else {
-        archive::pack(&args.folder)
-    }
-    .map_err(archive_failure(&args.folder))?;
-    archive::write_atomic(&args.file, &bytes).map_err(archive_failure(&args.file))?;
+    let staged = archive::pack_staged(&args.folder, None, args.embed, &args.file)
+        .map_err(archive_failure(&args.folder))?;
+    let written = |error: std::io::Error| {
+        archive_failure(&args.file)(ArchiveError::Io {
+            path: args.file.clone(),
+            error,
+        })
+    };
+    let bytes = std::fs::metadata(staged.path()).map_err(written)?.len();
+    staged.replace(&args.file).map_err(written)?;
     if json {
-        print_stdout(
-            &json!({"file": args.file.display().to_string(), "bytes": bytes.len()}).to_string(),
-        );
+        print_stdout(&json!({"file": args.file.display().to_string(), "bytes": bytes}).to_string());
     } else {
         print_stdout(&format!(
             "packed {} into {} ({} bytes)",
             args.folder.display(),
             args.file.display(),
-            bytes.len()
+            bytes
         ));
     }
     Ok(())

@@ -147,11 +147,12 @@ impl External {
         external
     }
 
-    /// Sends the data frames waiting (control thread, while playing).
-    pub fn poll(&mut self) {
-        if let Some((rx, sender)) = self.artnet.as_mut() {
-            sender.drain(rx);
-        }
+    /// Sends the data frames waiting (control thread, while playing); a
+    /// send failure to say ([`ArtNetSender::take_failure`]).
+    pub fn poll(&mut self) -> Option<String> {
+        let (rx, sender) = self.artnet.as_mut()?;
+        sender.drain(rx);
+        sender.take_failure()
     }
 
     /// The control inputs' records, once (a recording run's session).
