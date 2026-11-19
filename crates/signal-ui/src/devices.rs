@@ -575,8 +575,21 @@ pub fn route(message: &Value, setup: &mut Setup, dir: Option<&Path>) -> Result<R
                 {
                     setup.output = Some(device);
                 }
-                setup.output_channels = Some(channels);
-                setup.play.remove(MAIN);
+                // `[play.main]`'s layout, adapter and `prefer` stay; only
+                // a binding with nothing but channels takes the short form.
+                let entry = PlayEntry::rebound(setup.play.get(MAIN), channels.clone(), None);
+                if entry
+                    == (PlayEntry {
+                        channels: channels.clone(),
+                        ..PlayEntry::default()
+                    })
+                {
+                    setup.output_channels = Some(channels);
+                    setup.play.remove(MAIN);
+                } else {
+                    setup.output_channels = None;
+                    setup.play.insert(MAIN.to_owned(), entry);
+                }
             } else {
                 // A device equal to the clock device is written as none,
                 // so the binding follows the clock.
@@ -715,22 +728,46 @@ fn write_local(
             play.remove(role);
         }
         Some((channels, device)) => {
-            let mut table = toml_edit::Table::new();
+            // Only the channels and the device change: the role's layout
+            // (while it has as many channels), adapter, `prefer` and
+            // comments stay.
+            if !play.get(role).is_some_and(toml_edit::Item::is_table_like) {
+                play.insert(role, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let table = play
+                .get_mut(role)
+                .and_then(toml_edit::Item::as_table_like_mut)
+                .ok_or_else(|| failed(format!("{section}.{role} is not a table")))?;
             let mut list = toml_edit::Array::new();
             for &c in channels {
                 list.push(i64::from(c));
             }
             table.insert("channels", toml_edit::value(list));
-            if let Some(device) = device {
-                let mut inline = toml_edit::InlineTable::new();
-                inline.insert("name", device.name.as_str().into());
-                if let Some(id) = &device.id {
-                    inline.insert("id", id.as_str().into());
+            match device {
+                Some(device) => {
+                    let mut inline = toml_edit::InlineTable::new();
+                    inline.insert("name", device.name.as_str().into());
+                    if let Some(id) = &device.id {
+                        inline.insert("id", id.as_str().into());
+                    }
+                    inline.insert("signature", device.signature.as_str().into());
+                    table.insert("device", toml_edit::value(inline));
                 }
-                inline.insert("signature", device.signature.as_str().into());
-                table.insert("device", toml_edit::value(inline));
+                None => {
+                    table.remove("device");
+                }
             }
-            play.insert(role, toml_edit::Item::Table(table));
+            let fits = |layout: &str| {
+                signal_output::layouts::layout_channels(layout)
+                    .is_some_and(|c| c.len() == channels.len())
+            };
+            if table
+                .get("layout")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(|l| !fits(l))
+            {
+                table.remove("layout");
+            }
         }
     }
     let text = doc.to_string();
@@ -1088,6 +1125,58 @@ mod tests {
         .unwrap();
         assert!(routed.setup_changed && setup.capture.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Moving a role to other channels changes its channels and device
+    /// only: its layout, adapter and `prefer` (the mix) stay, on both
+    /// scopes.
+    #[test]
+    fn a_route_keeps_the_mix() {
+        let text = "version = 1\n[play.main]\nchannels = [1, 2]\nlayout = \"stereo\"\nadapter = { kind = \"direct\" }\nprefer = \"adapter\"\n";
+        let (mut setup, problems) = Setup::parse(text, Path::new("setup.toml"));
+        assert!(problems.is_empty(), "{problems:?}");
+        route(
+            &json!({"role": "main", "channels": [3, 4]}),
+            &mut setup,
+            None,
+        )
+        .unwrap();
+        let main = &setup.play["main"];
+        assert_eq!(main.channels, vec![3, 4]);
+        assert_eq!(main.layout.as_deref(), Some("stereo"));
+        assert_eq!(main.prefer.as_deref(), Some("adapter"));
+        assert_eq!(main.adapter(), signal_output::layouts::Adapter::Direct);
+        assert_eq!(setup.output_channels, None);
+        let read = Setup::parse(&setup.to_toml(), Path::new("setup.toml")).0;
+        assert_eq!(read, setup);
+
+        let dir = std::env::temp_dir().join(format!("signal-devices-mix-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(LOCAL_FILE),
+            "# mine\n[play.cue]\nchannels = [1, 2] # first pair\nlayout = \"stereo\"\nadapter = { kind = \"direct\" }\nprefer = \"author\"\n",
+        )
+        .unwrap();
+        let mut setup = Setup::default();
+        let message = json!({"role": "cue", "channels": [3, 4], "scope": "project"});
+        route(&message, &mut setup, Some(&dir)).unwrap();
+        let written = fs::read_to_string(dir.join(LOCAL_FILE)).unwrap();
+        let (local, problems) = read_local(&dir);
+        assert!(problems.is_empty(), "{problems:?}");
+        let cue = &local.play["cue"];
+        assert_eq!(cue.channels.as_deref(), Some(&[3, 4][..]), "{written}");
+        assert_eq!(cue.layout.as_deref(), Some("stereo"), "{written}");
+        assert_eq!(cue.prefer.as_deref(), Some("author"), "{written}");
+        assert!(cue.adapter.is_some(), "{written}");
+        assert!(written.starts_with("# mine\n"), "{written}");
+        // Three channels: the stereo layout no longer fits and goes.
+        let message = json!({"role": "cue", "channels": [3, 4, 5], "scope": "project"});
+        route(&message, &mut setup, Some(&dir)).unwrap();
+        let (local, _) = read_local(&dir);
+        assert_eq!(local.play["cue"].layout, None);
+        assert!(local.play["cue"].adapter.is_some());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

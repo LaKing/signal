@@ -36,3 +36,7 @@ The wheel was taken by whatever was under the pointer: a knob or fader changed i
 - Every shortcut is listed in one file and in Settings; the toggle's Page and Home/End keys and ⌥+wheel in the piano roll changed (above); ⌘, opens Settings, ⌥⌘, the interface setup.
 - A broken `keys.toml` never stops Signal: the built-in keys work and the problem is shown.
 - New commands are added to `ui/lib/keys.default.js` first; a control looks its commands up (`keyCommand`, `wheelCommand`) and never compares `event.key` for one.
+
+## Notes
+
+**2026-11-19** (operator, after an outside review of `0139f4d`). A fixed command keeps its chord before any other of its scope, so the Settings editor offered a Replace (and an Add Anyway) that could never take effect: ⌘C on Save still copied. A chord a fixed command of the same scope holds is now refused when it is pressed or typed, before any choice (`taken` in `ui/app/lib/keys-editor.js`). A letter is written as its capital only when that is one character: 'ß' (capital "SS") was saved as `SS`, which reads back as no key; it stays 'ß' in both readers (shared case in `ui/lib/fixtures/keys-cases.json`, `a_saved_chord_reads_back`).

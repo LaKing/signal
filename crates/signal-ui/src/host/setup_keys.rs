@@ -49,7 +49,7 @@ impl Host {
     /// it went is told (a message, and one more of the Setup's problems,
     /// which `setup.get` and `app` show).
     pub(super) fn save_setup(&mut self) -> Result<(), String> {
-        if let Some(kept) = self.setup_file.save(&self.setup)? {
+        if let Some(kept) = self.setup_file.save(&mut self.setup)? {
             let note = format!(
                 "{} did not read wholly; it was kept as {} before the Setup was saved",
                 self.setup_file.path().display(),
@@ -146,10 +146,12 @@ impl Host {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(fail("write-failed", format!("{}: {error}", path.display()))),
         };
-        let next = keys::with_override(&text, command, chords.as_deref())
+        // Refused here as a bad value; written below under the lock, from
+        // the file as it is then.
+        keys::with_override(&text, command, chords.as_deref())
             .map_err(|reason| fail("bad-value", reason))?;
-        keys::write_atomic(&path, &next)
-            .map_err(|error| fail("write-failed", format!("{}: {error}", path.display())))?;
+        keys::write_override(&path, command, chords.as_deref())
+            .map_err(|reason| fail("write-failed", reason))?;
         self.reload_keys();
         Ok(self.keys.message())
     }

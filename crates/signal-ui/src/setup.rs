@@ -735,6 +735,10 @@ pub struct SetupFile {
     unread: Option<String>,
     /// The top-level keys this build does not know, as written.
     unknown: toml::Table,
+    /// The file as last read or saved, in the Setup's own form: a save
+    /// merges what changed on disk since (another Signal, a hand edit)
+    /// with what changed here.
+    base: Option<toml::Table>,
 }
 
 impl SetupFile {
@@ -748,6 +752,7 @@ impl SetupFile {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                file.base = Some(normal_form(&Setup::default(), &toml::Table::new()));
                 return (Setup::default(), Vec::new(), file);
             }
             Err(error) => {
@@ -764,6 +769,7 @@ impl SetupFile {
         {
             file.original = Some(bytes);
         }
+        file.base = Some(normal_form(&setup, &unknown));
         file.unknown = unknown;
         (setup, problems, file)
     }
@@ -773,14 +779,18 @@ impl SetupFile {
         &self.path
     }
 
-    /// Writes `setup` atomically, with the unknown keys read. Before the
-    /// first save of a file that did not read wholly, its bytes are kept as
-    /// `<file>.bad-<n>` beside it: `Ok(Some(copy))` says where (nothing is
-    /// written when the copy fails). A file that could not be read is
-    /// refused, never replaced.
-    pub fn save(&mut self, setup: &Setup) -> Result<Option<PathBuf>, String> {
+    /// Writes `setup` atomically, with the unknown keys read. A setting
+    /// changed in the file since it was read or saved here, and not here,
+    /// is kept: the file's version replaces `setup`'s, so a save never
+    /// undoes another Signal's or a hand edit (a setting changed in both
+    /// takes `setup`'s). Before the first save of a file that did not read
+    /// wholly, its bytes are kept as `<file>.bad-<n>` beside it:
+    /// `Ok(Some(copy))` says where (nothing is written when the copy
+    /// fails). A file that could not be read is refused, never replaced.
+    pub fn save(&mut self, setup: &mut Setup) -> Result<Option<PathBuf>, String> {
+        let path = self.path.clone();
         let not_saved =
-            |why: String| format!("the Setup was not saved to {}: {why}", self.path.display());
+            |why: String| format!("the Setup was not saved to {}: {why}", path.display());
         if let Some(why) = &self.unread {
             return Err(not_saved(format!(
                 "it could not be read ({why}), so it is not replaced"
@@ -795,14 +805,93 @@ impl SetupFile {
             None => None,
         };
         self.original = None;
-        let text = with_unknown(setup.to_toml(), &self.unknown);
-        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            fs::create_dir_all(dir).map_err(|error| not_saved(error.to_string()))?;
-        }
-        signal_project::transaction::write_atomic(&self.path, text.as_bytes())
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(dir).map_err(|error| not_saved(error.to_string()))?;
+        // Two Signals saving at once: the second merges the first's file.
+        let _lock = signal_project::transaction::ProjectLock::acquire(dir)
             .map_err(|error| not_saved(error.to_string()))?;
+        self.merge_disk(setup);
+        let text = with_unknown(setup.to_toml(), &self.unknown);
+        signal_project::transaction::write_atomic(&path, text.as_bytes())
+            .map_err(|error| not_saved(error.to_string()))?;
+        self.base = Some(normal_form(setup, &self.unknown));
         Ok(kept)
     }
+
+    /// Takes into `setup` (and the unknown keys) what the file changed
+    /// since [`base`](SetupFile::base) and `setup` did not.
+    fn merge_disk(&mut self, setup: &mut Setup) {
+        let Some(base) = &self.base else { return };
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        let (on_disk, problems, unknown) = Setup::read_text(&text, &self.path);
+        if problems.iter().any(|p| !p.ends_with(KEPT)) {
+            return;
+        }
+        let disk = normal_form(&on_disk, &unknown);
+        if &disk == base {
+            return;
+        }
+        let ours = normal_form(setup, &self.unknown);
+        let merged = toml::Table::from_iter(merge3(base, &ours, &disk));
+        let Ok(merged_text) = toml::to_string(&merged) else {
+            return;
+        };
+        let (next, problems, unknown) = Setup::read_text(&merged_text, &self.path);
+        if problems.iter().all(|p| p.ends_with(KEPT)) {
+            *setup = next;
+            self.unknown = unknown;
+        }
+    }
+}
+
+/// `setup` with `unknown` as one TOML table, the form saves compare.
+fn normal_form(setup: &Setup, unknown: &toml::Table) -> toml::Table {
+    with_unknown(setup.to_toml(), unknown)
+        .parse()
+        .unwrap_or_default()
+}
+
+/// The three-way merge of tables `ours` and `theirs` from `base`, key by
+/// key and into tables both changed: a key only one side changed takes
+/// that side's value (absent: removed); one both changed takes `ours`.
+fn merge3(
+    base: &toml::Table,
+    ours: &toml::Table,
+    theirs: &toml::Table,
+) -> Vec<(String, toml::Value)> {
+    let keys: std::collections::BTreeSet<&String> = base
+        .keys()
+        .chain(ours.keys())
+        .chain(theirs.keys())
+        .collect();
+    let mut merged = Vec::new();
+    for key in keys {
+        let (b, o, t) = (base.get(key), ours.get(key), theirs.get(key));
+        let value = if o == b {
+            t
+        } else if t == b || o == t {
+            o
+        } else if let (Some(toml::Value::Table(o)), Some(toml::Value::Table(t))) = (o, t) {
+            let empty = toml::Table::new();
+            let b = b.and_then(toml::Value::as_table).unwrap_or(&empty);
+            merged.push((
+                key.clone(),
+                toml::Value::Table(toml::Table::from_iter(merge3(b, o, t))),
+            ));
+            continue;
+        } else {
+            o
+        };
+        if let Some(value) = value {
+            merged.push((key.clone(), value.clone()));
+        }
+    }
+    merged
 }
 
 /// `text` (a Setup's TOML) with the keys of `unknown` it does not hold.

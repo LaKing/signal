@@ -49,7 +49,8 @@ export function changedCount(map) {
  * that hold it in `id`'s scope (`same`: one of the two would not get it),
  * in a parent scope (`hides`: the new one hides it there) or in a scope
  * under it (`hidden`: there it does the other command). `[{command, label,
- * scope, scopeLabel, kind}]`.
+ * scope, scopeLabel, kind, fixed}]`: a `same` holder that is `fixed` keeps
+ * the chord whatever is written (`taken`).
  */
 export function collisions(map, id, chord) {
   const command = map.commands.get(id);
@@ -57,7 +58,7 @@ export function collisions(map, id, chord) {
   const found = [];
   const add = (scope, kind) => {
     const holder = map.bindings.get(scope)?.get(chord);
-    if (holder && holder !== id) found.push({ command: holder, label: map.commands.get(holder)?.label ?? holder, scope, scopeLabel: map.scopes.get(scope)?.label ?? scope, kind });
+    if (holder && holder !== id) found.push({ command: holder, label: map.commands.get(holder)?.label ?? holder, scope, scopeLabel: map.scopes.get(scope)?.label ?? scope, kind, fixed: Boolean(map.commands.get(holder)?.fixed) });
   };
   add(command.scope, 'same');
   for (const parent of ancestors(map.scopes, command.scope)) add(parent, 'hides');
@@ -65,6 +66,16 @@ export function collisions(map, id, chord) {
     if (scope !== command.scope && ancestors(map.scopes, scope).includes(command.scope)) add(scope, 'hidden');
   }
   return found;
+}
+
+/**
+ * Why command `id` cannot take `chord`, or null: a fixed command of its
+ * scope holds it, and a fixed one keeps its chord before any other (so
+ * neither Replace nor Add Anyway would make it do `id`).
+ */
+export function taken(map, id, chord, { mac = true } = {}) {
+  const fixed = collisions(map, id, chord).find((c) => c.kind === 'same' && c.fixed);
+  return fixed ? `${formatChord(chord, { mac })} is ${fixed.scopeLabel} ▸ ${fixed.label}, a fixed key; choose another` : null;
 }
 
 /** A collision as a sentence for the page. */

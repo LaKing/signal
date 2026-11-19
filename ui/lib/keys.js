@@ -38,6 +38,12 @@ function isLetter(key) {
   return key.length === 1 && /\p{L}/u.test(key) && key.toUpperCase() !== key.toLowerCase();
 }
 
+/** Letter `key` as its capital, where that is one character ('ß' stays). */
+function capital(key) {
+  const upper = key.toUpperCase();
+  return [...upper].length === 1 ? upper : key;
+}
+
 /**
  * The canonical text of chord `text` (`"cmd+shift+n"` → `"Shift+Cmd+N"`),
  * or `{error}` saying why it is not one. Shift goes with a letter or a named
@@ -65,7 +71,7 @@ export function parseChord(text) {
   if (!key) {
     if ([...keyToken].length !== 1) return { error: `'${keyToken}' is not a key (a letter, a digit, a character, or a name such as PageDown)` };
     if (MODIFIER_NAMES.has(keyToken.toLowerCase())) return { error: `'${raw}' has no key` };
-    key = isLetter(keyToken) ? keyToken.toUpperCase() : keyToken;
+    key = isLetter(keyToken) ? capital(keyToken) : keyToken;
   }
   if (/\s/u.test(key)) return { error: 'write Space for the space bar' };
   if (present.has('Shift') && key.length === 1 && !isLetter(key)) {
@@ -167,7 +173,7 @@ export function eventChord(event, { mac = isMac() } = {}) {
     if (!key) return null;
   }
   if ([...key].length === 1) {
-    if (isLetter(key)) key = key.toUpperCase();
+    if (isLetter(key)) key = capital(key);
     else mods.delete('Shift');
   }
   // Another named key (media keys, …) is as the browser names it.

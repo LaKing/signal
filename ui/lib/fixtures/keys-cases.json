@@ -2,6 +2,8 @@
   "about": "Cases both keymap readers must agree on (ADR 0034): ui/lib/keys.test.js and crates/signal-ui/tests/keys.rs. A chord's canonical text (or that it is refused), and overrides with the conflicts and the number of problems they give against ui/lib/keys.default.js.",
   "chords": [
     { "text": "Cmd+S", "chord": "Cmd+S" },
+    { "text": "Cmd+ß", "chord": "Cmd+ß" },
+    { "text": "Cmd+é", "chord": "Cmd+É" },
     { "text": "cmd+shift+s", "chord": "Shift+Cmd+S" },
     { "text": "Command+Option+,", "chord": "Alt+Cmd+," },
     { "text": "⌃⌘F", "error": true },

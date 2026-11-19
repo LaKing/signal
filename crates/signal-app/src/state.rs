@@ -558,7 +558,7 @@ impl AppState {
     }
 
     fn save(&mut self) {
-        match self.setup_file.save(&self.setup) {
+        match self.setup_file.save(&mut self.setup) {
             Ok(None) => {}
             Ok(Some(kept)) => {
                 self.message = Some(format!(

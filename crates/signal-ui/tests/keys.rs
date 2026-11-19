@@ -276,6 +276,53 @@ fn the_file_is_beside_the_setup_and_written_atomically() {
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// Writers at once (two Signals, two requests) each start from the file
+/// as the one before left it: every change stays.
+#[test]
+fn writers_at_once_keep_every_change() {
+    let base = std::env::temp_dir().join(format!("signal-keys-many-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let path = base.join("Signal/keys.toml");
+    let commands = [
+        "view.page_down",
+        "view.page_up",
+        "view.line_down",
+        "view.line_up",
+        "view.top",
+        "view.bottom",
+    ];
+    for _ in 0..4 {
+        let _ = fs::remove_file(&path);
+        std::thread::scope(|scope| {
+            for (n, command) in commands.iter().enumerate() {
+                let path = &path;
+                scope.spawn(move || {
+                    keys::write_override(path, command, Some(&[format!("F{}", n + 1)])).unwrap();
+                });
+            }
+        });
+        let read = Keys::load(&path);
+        for (n, command) in commands.iter().enumerate() {
+            assert_eq!(read.overrides[*command], vec![format!("F{}", n + 1)]);
+        }
+    }
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// A chord saved reads back as itself: 'ß', whose capital is two
+/// letters, stays 'ß'.
+#[test]
+fn a_saved_chord_reads_back() {
+    let base = std::env::temp_dir().join(format!("signal-keys-sz-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let path = base.join("Signal/keys.toml");
+    keys::write_override(&path, "view.top", Some(&["Cmd+ß".to_owned()])).unwrap();
+    let read = Keys::load(&path);
+    assert!(read.problems.is_empty(), "{:?}", read.problems);
+    assert_eq!(read.overrides["view.top"], vec!["Cmd+ß"]);
+    fs::remove_dir_all(&base).unwrap();
+}
+
 fn keys_over_the_protocol(transport: Transport) {
     let mut rig = rig(
         "keys",

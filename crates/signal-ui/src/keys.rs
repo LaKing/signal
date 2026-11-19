@@ -234,7 +234,14 @@ pub fn parse_chord(text: &str) -> Result<String, String> {
                 return Err("write Space for the space bar".to_owned());
             }
             if is_letter(c) {
-                c.to_uppercase().collect()
+                // A letter written as its capital, where it has one of a
+                // single character: 'ß' (capital "SS") stays 'ß', a key the
+                // file reads back.
+                let mut capital = c.to_uppercase();
+                match (capital.next(), capital.next()) {
+                    (Some(one), None) => one.to_string(),
+                    _ => c.to_string(),
+                }
             } else {
                 c.to_string()
             }
@@ -920,17 +927,33 @@ fn read_or_empty(path: &Path) -> Result<String, String> {
     }
 }
 
+/// Rewrites the file at `path` as `change` makes its text, atomically,
+/// under the writer lock of the folder it is in (ADR 0040's
+/// [`ProjectLock`](signal_project::transaction::ProjectLock)): two writers
+/// (two Signals, or two requests) never both start from the same old text,
+/// so neither change is lost.
+fn edit(path: &Path, change: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
+    let at = |error: io::Error| format!("{}: {error}", path.display());
+    let resolved = fs::canonicalize(path).ok();
+    let file = resolved.as_deref().unwrap_or(path);
+    let dir = file
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).map_err(at)?;
+    let _lock = signal_project::transaction::ProjectLock::acquire(dir).map_err(at)?;
+    let text = read_or_empty(path)?;
+    let next = change(&text)?;
+    write_atomic(path, &next).map_err(at)
+}
+
 /// Gives command `id` `chords` in the file at `path` (`None`: back to the
 /// built-in ones), atomically, keeping what else it says.
 pub fn write_override(path: &Path, id: &str, chords: Option<&[String]>) -> Result<(), String> {
-    let text = read_or_empty(path)?;
-    let next = with_override(&text, id, chords)?;
-    write_atomic(path, &next).map_err(|error| format!("{}: {error}", path.display()))
+    edit(path, |text| with_override(text, id, chords))
 }
 
 /// Every command back to the built-in keys in the file at `path`.
 pub fn reset(path: &Path) -> Result<(), String> {
-    let text = read_or_empty(path)?;
-    let next = without_overrides(&text)?;
-    write_atomic(path, &next).map_err(|error| format!("{}: {error}", path.display()))
+    edit(path, without_overrides)
 }

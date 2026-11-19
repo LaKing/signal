@@ -12,7 +12,7 @@
 import { getDefaultConnection } from '../signal-ui.js';
 import '../controls/keyboard.js';
 import { MENU_CHORD, formatChord, isMac, keymap, keysInfo, applyKeys, menuChord, onKeys } from '../lib/keys.js';
-import { addWrites, changedCount, collisions, describeCollision, groups, recorded, removeWrite, resetMessage, typed } from './lib/keys-editor.js';
+import { addWrites, changedCount, collisions, describeCollision, groups, recorded, removeWrite, resetMessage, taken, typed } from './lib/keys-editor.js';
 import { applyProps } from './lib/dom.js';
 
 function el(tag, props = {}, ...children) {
@@ -143,6 +143,12 @@ export class SignalSettingsKeys extends HTMLElement {
       return;
     }
     chord = checked.chord;
+    // A fixed command's chord: refused before any choice, still recording.
+    const refused = taken(map, id, chord, { mac: this.mac });
+    if (refused) {
+      this.say(refused, true);
+      return;
+    }
     const same = collisions(map, id, chord).filter((c) => c.kind === 'same');
     if (same.length) {
       this.pending = { id, chord, same };

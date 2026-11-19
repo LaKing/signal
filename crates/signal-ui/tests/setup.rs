@@ -255,10 +255,10 @@ fn a_save_keeps_what_did_not_read() {
     let bad = "version = 1\nbuffer = \"lots\"\n";
     fs::write(&path, bad).unwrap();
     fs::write(dir.join("setup.toml.bad-1"), "older").unwrap();
-    let (setup, problems, mut file) = SetupFile::load(&path);
+    let (mut setup, problems, mut file) = SetupFile::load(&path);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert_eq!(
-        file.save(&setup).unwrap(),
+        file.save(&mut setup).unwrap(),
         Some(dir.join("setup.toml.bad-2"))
     );
     assert_eq!(
@@ -269,7 +269,7 @@ fn a_save_keeps_what_did_not_read() {
         fs::read_to_string(dir.join("setup.toml.bad-1")).unwrap(),
         "older"
     );
-    assert_eq!(file.save(&setup).unwrap(), None, "kept once");
+    assert_eq!(file.save(&mut setup).unwrap(), None, "kept once");
     assert_eq!(Setup::load(&path), (Setup::default(), Vec::new()));
 
     // Unknown keys and tables survive, beside the known ones; nothing kept.
@@ -281,7 +281,7 @@ fn a_save_keeps_what_did_not_read() {
     let (mut setup, problems, mut file) = SetupFile::load(&path);
     assert_eq!(problems.len(), 2, "{problems:?}");
     setup.buffer = 256;
-    assert_eq!(file.save(&setup).unwrap(), None);
+    assert_eq!(file.save(&mut setup).unwrap(), None);
     let text = fs::read_to_string(&path).unwrap();
     let table: toml::Table = text.parse().unwrap();
     assert_eq!(table["future"].as_integer(), Some(3), "{text}");
@@ -294,7 +294,7 @@ fn a_save_keeps_what_did_not_read() {
         width: 800.0,
         height: 600.0,
     });
-    file.save(&setup).unwrap();
+    file.save(&mut setup).unwrap();
     let text = fs::read_to_string(&path).unwrap();
     let table: toml::Table = text.parse().unwrap();
     assert_eq!(table["zeta"].as_integer(), Some(1), "{text}");
@@ -303,10 +303,10 @@ fn a_save_keeps_what_did_not_read() {
     // Unreadable: refused, the file unchanged.
     fs::write(&path, "version = 1\nbuffer = 512\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    let (setup, problems, mut file) = SetupFile::load(&path);
+    let (mut setup, problems, mut file) = SetupFile::load(&path);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(problems.len(), 1, "{problems:?}");
-    let refused = file.save(&setup).unwrap_err();
+    let refused = file.save(&mut setup).unwrap_err();
     assert!(refused.contains("not replaced"), "{refused}");
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
@@ -430,4 +430,47 @@ fn external_roles_bind_without_channels() {
             "{text}: {problems:?}"
         );
     }
+}
+
+/// Two Signals (or a hand edit) saving one Setup: a save keeps what the
+/// other changed since this one read the file, and takes it in.
+#[test]
+fn a_save_keeps_another_save_since() {
+    let dir = scratch("merged");
+    let path = dir.join("setup.toml");
+    fs::write(&path, "version = 1\nbuffer = 512\n").unwrap();
+    let (mut first, _, mut first_file) = SetupFile::load(&path);
+    let (mut second, _, mut second_file) = SetupFile::load(&path);
+    first.output_channels = Some(vec![3, 4]);
+    first.play.insert(
+        "cue".to_owned(),
+        PlayEntry {
+            channels: vec![5, 6],
+            ..PlayEntry::default()
+        },
+    );
+    first_file.save(&mut first).unwrap();
+    second.buffer = 256;
+    second_file.save(&mut second).unwrap();
+    let (read, problems) = Setup::load(&path);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(read.buffer, 256);
+    assert_eq!(read.output_channels, Some(vec![3, 4]));
+    assert_eq!(read.play["cue"].channels, vec![5, 6]);
+    assert_eq!(
+        second, read,
+        "the saving Signal takes the other's change in"
+    );
+    // A setting both changed takes the saving one's; a role the other
+    // removed stays removed.
+    first.buffer = 1024;
+    first.play.clear();
+    first_file.save(&mut first).unwrap();
+    second.buffer = 128;
+    second_file.save(&mut second).unwrap();
+    let read = Setup::load(&path).0;
+    assert_eq!(read.buffer, 128);
+    assert!(read.play.is_empty());
+    assert_eq!(read.output_channels, Some(vec![3, 4]));
+    fs::remove_dir_all(&dir).unwrap();
 }

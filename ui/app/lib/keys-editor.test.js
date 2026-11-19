@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { DEFAULTS, buildKeymap } from '../../lib/keys.js';
-import { addWrites, changedCount, collisions, describeCollision, groups, recorded, removeWrite, resetMessage, setMessage, typed } from './keys-editor.js';
+import { addWrites, changedCount, collisions, describeCollision, groups, recorded, removeWrite, resetMessage, setMessage, taken, typed } from './keys-editor.js';
 
 test('groups: every scope with its commands, searched by name, id, chord or scope', () => {
   const map = buildKeymap(DEFAULTS, {});
@@ -71,4 +71,11 @@ test('recording: a key press for a key command, a wheel for a wheel command; typ
   assert.ok(typed('Wheel', save).error);
   assert.ok(typed('Shift+=', save).error);
   assert.deepEqual(typed('ctrl+wheel', wheel), { chord: 'Ctrl+Wheel' });
+});
+
+test('a fixed command\'s chord is taken before any choice: no Replace offered', () => {
+  const map = buildKeymap(DEFAULTS, {});
+  assert.equal(taken(map, 'file.save', 'Cmd+C'), '⌘C is Signal.app ▸ Copy, a fixed key; choose another');
+  assert.equal(taken(map, 'window.new_schematic', 'Shift+Cmd+N'), null, 'a rebindable holder can be replaced');
+  assert.equal(taken(map, 'file.save', 'F19'), null);
 });

@@ -7,7 +7,7 @@
 //! what was read and a replay is exact.
 //!
 //! The names a `midi` slot may capture ([`MIDI_NAMES`]): `note_gate`,
-//! `note_key`, `note_velocity` (the last note held, last-note priority:
+//! `note_key`, `note_velocity` (the last note held, a key on its channel, last-note priority:
 //! releasing it returns to the one held before), `cc0` … `cc127` (0–1),
 //! `bend` (−1–1), and from a MIDI clock (24 ticks a quarter note)
 //! `clock_position` (beats since its start), `clock_running` (0/1) and
@@ -89,7 +89,10 @@ pub struct MidiState {
     status: u8,
     data: [u8; 2],
     have: usize,
-    held: Vec<(u8, u8)>,
+    /// The notes held, oldest first: (channel, key, velocity). A note is
+    /// its key on its channel: releasing it on one channel leaves the
+    /// same key held on another.
+    held: Vec<(u8, u8, u8)>,
     ticks: u64,
     running: bool,
     /// When the last beat's first tick came (control thread only: a tempo).
@@ -128,7 +131,7 @@ impl MidiState {
 
     fn note_values(&mut self) {
         match self.held.last().copied() {
-            Some((key, velocity)) => {
+            Some((_, key, velocity)) => {
                 self.set(Value::Gate, 1.0);
                 self.set(Value::Key, f32::from(key));
                 self.set(Value::Velocity, f32::from(velocity) / 127.0);
@@ -165,17 +168,18 @@ impl MidiState {
         }
         self.have = 0;
         let [a, b] = self.data;
+        let channel = self.status & 0x0F;
         match self.status & 0xF0 {
             0x90 if b > 0 => {
-                self.held.retain(|(key, _)| *key != a);
+                self.held.retain(|&(c, key, _)| (c, key) != (channel, a));
                 if self.held.len() == HELD {
                     self.held.remove(0);
                 }
-                self.held.push((a, b));
+                self.held.push((channel, a, b));
                 self.note_values();
             }
             0x80 | 0x90 => {
-                self.held.retain(|(key, _)| *key != a);
+                self.held.retain(|&(c, key, _)| (c, key) != (channel, a));
                 self.note_values();
             }
             0xB0 => self.set(Value::Cc(a), f32::from(b) / 127.0),
@@ -369,6 +373,16 @@ mod tests {
         assert_eq!(s.values[..2], [1.0, 60.0], "back to the note held before");
         feed(&mut s, &[0x90, 60, 0]);
         assert_eq!(s.values[0], 0.0, "a note-on of velocity 0 is a release");
+    }
+
+    #[test]
+    fn a_release_on_one_channel_keeps_the_key_held_on_another() {
+        let mut s = MidiState::new(&names(&["note_gate", "note_key"]));
+        feed(&mut s, &[0x90, 60, 100, 0x91, 60, 100]);
+        feed(&mut s, &[0x80, 60, 0]);
+        assert_eq!(s.values, [1.0, 60.0], "still held on channel 2");
+        feed(&mut s, &[0x81, 60, 0]);
+        assert_eq!(s.values[0], 0.0);
     }
 
     #[test]
