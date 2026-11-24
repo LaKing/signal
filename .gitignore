@@ -3,6 +3,8 @@
 /renders/
 *.wav
 !tests/golden/**/*.wav
+# A project's samples are its source (ADR 0056 §1): kept, or it does not load.
+!projects/*/samples/*.wav
 .DS_Store
 # insta writes a pending snapshot beside a failing one; never commit it.
 *.snap.new

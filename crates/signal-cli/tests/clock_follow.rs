@@ -120,14 +120,16 @@ fn the_drums_follow_a_midi_clock_and_replay_exactly() {
         "nothing before the first Start (sound from frame {first})"
     );
     // The first run of the clock: kicks on beats 0, 1 and 2, half a second
-    // apart (within a block and the feed's poll); after the Stop, the next
-    // Start plays the downbeat again, then beat 1.
+    // apart (within a block, the feed's poll and the test's own sleeps,
+    // which a shared CI machine delays by up to ~80 ms: 20 %); after the
+    // Stop, the next Start plays the downbeat again, then beat 1. What was
+    // played is checked exactly by the replay below.
     let kicks = onsets(&left, 0.3, 9_600);
     assert_eq!(kicks.len(), 5, "five kicks: {kicks:?}\n{stderr}");
     for pair in [[0, 1], [1, 2], [3, 4]] {
         let apart = kicks[pair[1]] - kicks[pair[0]];
         assert!(
-            (22_000..26_000).contains(&apart),
+            (19_200..28_800).contains(&apart),
             "a beat at 120 bpm is 24000 frames: {kicks:?}"
         );
     }
