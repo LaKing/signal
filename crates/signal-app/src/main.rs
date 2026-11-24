@@ -45,12 +45,14 @@ use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
 use clap::Parser;
 use muda::accelerator::KeyAccelerator;
 use muda::{AboutMetadata, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
 use objc2::MainThreadMarker;
+use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSModalResponseOK, NSOpenPanel, NSSavePanel,
+    NSAlert, NSAlertFirstButtonReturn, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel,
 };
 use objc2_foundation::NSString;
 use serde_json::{Value, json};
@@ -109,6 +111,25 @@ enum UserEvent {
     Keys(Vec<(MenuAction, Option<String>)>),
     /// A file under the UI library changed (`SIGNAL_UI_DEV`): every page reloads.
     UiChanged,
+    /// A system panel closed: what it was for, and the path chosen (None:
+    /// cancelled). The panels run modeless ([`begin_panel`]).
+    Chosen(Choice, Option<PathBuf>),
+}
+
+/// What a system panel was opened for.
+#[derive(Debug)]
+enum Choice {
+    /// Open…: a project to open.
+    Open,
+    /// Save As…: the `.signal` file to save the project as.
+    SaveAs,
+    /// ADR 0051 §10: a folder for an instrument's export or import, answered
+    /// to the page of `window` under the request's `id`.
+    Folder {
+        window: WindowId,
+        id: Value,
+        export: bool,
+    },
 }
 
 type Target = EventLoopWindowTarget<UserEvent>;
@@ -855,6 +876,34 @@ impl Windows {
     }
 
     /// The window's page said `text`.
+    /// The answer to a page's `folder.choose`: the folder chosen (an import's
+    /// `project.toml` names its folder; another file is none), or null.
+    fn folder_chosen(&mut self, window: WindowId, id: Value, export: bool, path: Option<PathBuf>) {
+        let chosen = if export {
+            path
+        } else {
+            path.and_then(|path| {
+                if path.is_dir() {
+                    Some(path)
+                } else if path.file_name().is_some_and(|n| n == "project.toml") {
+                    path.parent().map(Path::to_owned)
+                } else {
+                    None
+                }
+            })
+        };
+        let Some(index) = self.index(Some(window)) else {
+            return;
+        };
+        let detail = serde_json::json!({
+            "id": id,
+            "path": chosen.map(|p| p.display().to_string()),
+        });
+        self.list[index].run(&format!(
+            "window.dispatchEvent(new CustomEvent('signal-folder', {{ detail: {detail} }}))"
+        ));
+    }
+
     fn page(&mut self, target: &Target, proxy: &Proxy, id: WindowId, text: &str) {
         let Ok(message) = serde_json::from_str::<Value>(text) else {
             return;
@@ -944,26 +993,16 @@ impl Windows {
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("instrument");
-                let chosen = if purpose == "export" {
-                    choose_folder_to_save(name)
-                } else {
-                    choose_project().and_then(|path| {
-                        if path.is_dir() {
-                            Some(path)
-                        } else if path.file_name().is_some_and(|n| n == "project.toml") {
-                            path.parent().map(Path::to_owned)
-                        } else {
-                            None
-                        }
-                    })
+                let choice = Choice::Folder {
+                    window: id,
+                    id: message.get("id").cloned().unwrap_or(Value::Null),
+                    export: purpose == "export",
                 };
-                let detail = serde_json::json!({
-                    "id": message.get("id").cloned().unwrap_or(Value::Null),
-                    "path": chosen.map(|p| p.display().to_string()),
-                });
-                self.list[index].run(&format!(
-                    "window.dispatchEvent(new CustomEvent('signal-folder', {{ detail: {detail} }}))"
-                ));
+                if purpose == "export" {
+                    choose_folder_to_save(name, proxy, choice);
+                } else {
+                    choose_project(proxy, choice);
+                }
             }
             (Some("window.fit"), _) => {
                 let height = message.get("height").and_then(Value::as_f64);
@@ -1323,8 +1362,21 @@ fn main() -> ExitCode {
             Event::UserEvent(UserEvent::Menu(MenuAction::Open))
                 if MainThreadMarker::new().is_some() =>
             {
-                if let (Some(path), Some(server)) = (choose_project(), server.as_ref()) {
-                    open_project(server, &mut windows, target, &proxy, &path);
+                choose_project(&proxy, Choice::Open);
+                None
+            }
+            Event::UserEvent(UserEvent::Chosen(choice, path)) => {
+                match (choice, path, server.as_ref()) {
+                    (Choice::Open, Some(path), Some(server)) => {
+                        open_project(server, &mut windows, target, &proxy, &path);
+                    }
+                    (Choice::SaveAs, Some(file), Some(server)) => {
+                        save_as(server, &mut windows, target, &proxy, file);
+                    }
+                    (Choice::Folder { window, id, export }, path, _) => {
+                        windows.folder_chosen(window, id, export, path);
+                    }
+                    _ => {}
                 }
                 None
             }
@@ -1338,7 +1390,9 @@ fn main() -> ExitCode {
             }
             Event::UserEvent(UserEvent::Menu(MenuAction::SaveAs)) => {
                 if let Some(server) = server.as_ref() {
-                    save_as(server, &mut windows, target, &proxy);
+                    // The name only: never waits for a save still running.
+                    let name = default_save_name(server.project_shown().as_ref());
+                    choose_save(&name, &proxy);
                 }
                 None
             }
@@ -1567,14 +1621,15 @@ fn ask_revert(name: &str) -> Option<RevertPrompt> {
     RevertPrompt::of(usize::try_from(index).ok()?)
 }
 
-/// Save As…: the system's save panel with `<project name>.signal`; the
-/// project is that file from then on.
-fn save_as(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
-    // The name only: never waits for a save still running.
-    let name = default_save_name(server.project_shown().as_ref());
-    let Some(file) = choose_save(&name) else {
-        return;
-    };
+/// Save As… to `file`, chosen in the system's save panel with `<project
+/// name>.signal`; the project is that file from then on.
+fn save_as(
+    server: &AppServer,
+    windows: &mut Windows,
+    target: &Target,
+    proxy: &Proxy,
+    file: PathBuf,
+) {
     let file = match save_target(file) {
         Ok(file) => file,
         Err(message) => return windows.tell(target, proxy, "signal-app-error", &message),
@@ -1607,11 +1662,35 @@ fn ask(route: QuitRoute, name: &str) -> Option<Prompt> {
     Prompt::of(route, usize::try_from(index).ok()?)
 }
 
-/// The system's chooser for a project (NSOpenPanel, modal): a folder, a
+/// Shows `panel` modeless and returns at once; when it closes, `proxy` is
+/// sent [`UserEvent::Chosen`] with `choice` and the path chosen (None when
+/// cancelled). A modal panel (`runModal`) would run inside tao's event
+/// handler, and a quit asked meanwhile (`./start.sh`, a logout) re-enters
+/// that handler from the panel's loop and waits for itself forever.
+fn begin_panel(panel: Retained<NSSavePanel>, proxy: &Proxy, choice: Choice) {
+    let shown = panel.clone();
+    let proxy = proxy.clone();
+    let choice = std::cell::Cell::new(Some(choice));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        let Some(choice) = choice.take() else {
+            return;
+        };
+        let path = (response == NSModalResponseOK)
+            .then(|| shown.URL().and_then(|url| url.path()))
+            .flatten()
+            .map(|path| PathBuf::from(path.to_string()));
+        let _ = proxy.send_event(UserEvent::Chosen(choice, path));
+    });
+    panel.beginWithCompletionHandler(&handler);
+}
+
+/// The system's chooser for a project (NSOpenPanel, modeless): a folder, a
 /// project's `project.toml` (which opens its folder) or a `.signal` file,
-/// on the main thread; the choice, or None when cancelled.
-fn choose_project() -> Option<PathBuf> {
-    let mtm = MainThreadMarker::new()?;
+/// on the main thread; the choice comes back as [`UserEvent::Chosen`].
+fn choose_project(proxy: &Proxy, choice: Choice) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(true);
@@ -1620,17 +1699,15 @@ fn choose_project() -> Option<PathBuf> {
     panel.setMessage(Some(&NSString::from_str(
         "Choose a project folder, its project.toml, or a .signal file",
     )));
-    if panel.runModal() != NSModalResponseOK {
-        return None;
-    }
-    let path = panel.URL()?.path()?;
-    Some(PathBuf::from(path.to_string()))
+    begin_panel(Retained::into_super(panel), proxy, choice);
 }
 
-/// The system's save panel (NSSavePanel, modal) named `name`; the chosen
-/// file, or None when cancelled.
-fn choose_save(name: &str) -> Option<PathBuf> {
-    let mtm = MainThreadMarker::new()?;
+/// The system's save panel (NSSavePanel, modeless) named `name`, for Save
+/// As…; the file comes back as [`UserEvent::Chosen`].
+fn choose_save(name: &str, proxy: &Proxy) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let panel = NSSavePanel::savePanel(mtm);
     panel.setNameFieldStringValue(&NSString::from_str(name));
     panel.setCanCreateDirectories(true);
@@ -1638,17 +1715,16 @@ fn choose_save(name: &str) -> Option<PathBuf> {
     panel.setMessage(Some(&NSString::from_str(
         "Save the project as one .signal file",
     )));
-    if panel.runModal() != NSModalResponseOK {
-        return None;
-    }
-    let path = panel.URL()?.path()?;
-    Some(PathBuf::from(path.to_string()))
+    begin_panel(panel, proxy, Choice::SaveAs);
 }
 
 /// The system's save panel for a new project folder named `name` (ADR
-/// 0051 §10: an instrument saved as a project); the chosen path, or None.
-fn choose_folder_to_save(name: &str) -> Option<PathBuf> {
-    let mtm = MainThreadMarker::new()?;
+/// 0051 §10: an instrument saved as a project); the path comes back as
+/// [`UserEvent::Chosen`].
+fn choose_folder_to_save(name: &str, proxy: &Proxy, choice: Choice) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let panel = NSSavePanel::savePanel(mtm);
     panel.setNameFieldStringValue(&NSString::from_str(name));
     panel.setCanCreateDirectories(true);
@@ -1656,11 +1732,7 @@ fn choose_folder_to_save(name: &str) -> Option<PathBuf> {
     panel.setMessage(Some(&NSString::from_str(
         "Save the instrument as a project folder",
     )));
-    if panel.runModal() != NSModalResponseOK {
-        return None;
-    }
-    let path = panel.URL()?.path()?;
-    Some(PathBuf::from(path.to_string()))
+    begin_panel(panel, proxy, choice);
 }
 
 /// Development (`SIGNAL_UI_DEV`): polls the UI library's files every 200 ms

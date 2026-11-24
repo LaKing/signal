@@ -57,10 +57,13 @@ tao = "0.37.1"
 muda = { version = "0.21.2", default-features = false }
 # The native folder chooser (NSOpenPanel), Save As (NSSavePanel) and the "Save changes?"
 # alert (NSAlert with its buttons; M2.8-12), safe API only: already locked through tao and
-# muda, so these features add no package to Cargo.lock.
+# muda, so these features add no package to Cargo.lock. The panels run modeless
+# (`beginWithCompletionHandler`, a `block2` block, locked through tao and wry): a modal
+# one inside tao's event handler deadlocks when the app is asked to quit meanwhile.
 objc2 = "0.6.5"
+block2 = "0.6.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
 # Project files (`.signal`, a zip of the project folder; owner's request 2026-10-16). MIT; only
 # deflate through flate2 and zlib-rs, which muda already locked.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
