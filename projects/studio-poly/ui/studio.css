@@ -64,6 +64,11 @@ body { margin: 0; padding: 0.75rem; background: #1b1a18; color: var(--signal-fg)
   box-shadow: inset 0 1px 0 #2c333d, 0 2px 8px #000;
 }
 .poly-pad > h2 { color: #eef1f4; }
+.poly-pad .signal-group::before { color: #eef1f4; }
+.poly-pad .modifiers::before { content: "Modifiers \00B7  filter"; }
+.poly-pad .filter-contour::before { content: "Filter contour"; }
+.poly-pad .loudness-contour::before { content: "Loudness contour"; }
+.poly-pad .output::before { content: "Output"; }
 
 /* TRANSPORT (ADR 0051 §12): the tempo alone, the first instrument of the primary Stack. */
 .transport { --signal-knob-size: 46px; }

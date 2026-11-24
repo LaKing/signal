@@ -3,8 +3,8 @@
      look ui/studio.css and the SVG skins in ui/assets/), with the cards this
      project has. The transport's tempo; the mono synth with the melody's
      piano roll; the poly pad (the eight-voice slot `pad`, ADR 0044) with the
-     chords' piano roll (its sound is set in the slot's `set`, which the
-     panel does not write yet, ADR 0037 §7; its level is the mixer's pad); the rhythm composer with the beat's step
+     chords' piano roll and the pad's sound (the slot's interface
+     parameters, shared by every voice; its level is the mixer's pad); the rhythm composer with the beat's step
      grid; the tape echo; the mixer (std.mix: one level per bus input:
      drums, toms, the echoed synth, the pad); and the master bus's scope and
      meters. `signal ui check projects/studio-poly` checks the bindings. -->
@@ -78,6 +78,30 @@
     </section>
     <section class="signal-card wide poly-pad">
       <h2>POLY PAD</h2>
+      <div class="row">
+        <div class="signal-group modifiers">
+          <signal-knob bind="/pad.cutoff" taper="log" min="20" max="10000" label="cutoff" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.emphasis" min="0" max="1" label="emphasis" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.env_amount" min="0" max="8000" label="contour amount" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.key_track" min="0" max="2" label="key track" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group filter-contour">
+          <signal-knob bind="/pad.f_attack" taper="log" min="1" max="5000" label="attack" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.f_decay" taper="log" min="1" max="5000" label="decay" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.f_sustain" min="0" max="1" label="sustain" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.f_release" taper="log" min="1" max="5000" label="release" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group loudness-contour">
+          <signal-knob bind="/pad.a_attack" taper="log" min="1" max="5000" label="attack" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.a_decay" taper="log" min="1" max="5000" label="decay" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.a_sustain" min="0" max="1" label="sustain" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.a_release" taper="log" min="1" max="5000" label="release" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group output">
+          <signal-knob bind="/pad.glide" min="0" max="2000" label="glide" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/pad.volume" min="-30" max="6" label="volume" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+      </div>
       <signal-piano-roll pattern="chords" position-bind="/chords.position" label="chords" snap="1/16"></signal-piano-roll>
     </section>
     <section class="signal-card wide rhythm">

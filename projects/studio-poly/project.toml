@@ -42,7 +42,6 @@ drums = { module = "std.step_seq8", pattern = "drums", ppq = 96, accent_level = 
 chords = { module = "std.note_seq", pattern = "chords", ppq = 96 }
 
 synth = { module = "moog_voice" }
-pad = { slot = "lib.poly_voice", load = "moog_voice", voices = 8, set = { volume = -8, glide = 0, cutoff = 900, env_amount = 600, a_attack = 250, a_decay = 400, a_sustain = 0.8, a_release = 900, f_attack = 300, f_release = 900 } }
 echo = { module = "tape_delay" }
 
 kick = { module = "kick909" }
@@ -61,6 +60,24 @@ bus = { module = "std.mix", gain_a = 0.45, gain_b = 0.45, gain_c = 0.55, gain_d 
 dc = { module = "std.dc_block" }
 limiter = { module = "std.tanh_shaper", drive = 1 }
 out = { module = "std.audio_out", gain = 0.25 }
+
+# The pad's sound is its interface's parameters (the POLY PAD card's
+# knobs write them, shared by every voice); its notes, pitch and outputs are
+# lib.poly_voice's.
+[instances.pad]
+slot = { from = "lib.poly_voice", parameters = { volume = { unit = "dB" }, glide = { unit = "ms" }, cutoff = { unit = "Hz" }, emphasis = {}, env_amount = {}, key_track = {}, f_attack = { unit = "ms" }, f_decay = { unit = "ms" }, f_sustain = {}, f_release = { unit = "ms" }, a_attack = { unit = "ms" }, a_decay = { unit = "ms" }, a_sustain = {}, a_release = { unit = "ms" } } }
+load = "moog_voice"
+voices = 8
+volume = -8
+glide = 0
+cutoff = 900
+env_amount = 600
+a_attack = 250
+a_decay = 400
+a_sustain = 0.8
+a_release = 900
+f_attack = 300
+f_release = 900
 
 [wiring]
 connections = [
