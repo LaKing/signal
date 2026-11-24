@@ -365,7 +365,17 @@ impl Panel {
                     .and_then(|r| r.matches.iter().find(|m| m.port == *name))
                     .and_then(|m| m.content.clone())
                     .unwrap_or_else(|| name.clone());
-                let targets = resolve(&with_content, registry, address, &def.module, &content);
+                // ADR 0044 §6: a poly slot's parameter is every voice's
+                // (`/pad/v0` … `/pad/v<N-1>`), shared.
+                let targets = match slot.and_then(|r| r.voices.as_ref()) {
+                    Some(voices) => (0..voices.count)
+                        .filter_map(|e| format!("{address}/v{e}").parse::<InstanceAddress>().ok())
+                        .flat_map(|voice| {
+                            resolve(&with_content, registry, &voice, &def.module, &content)
+                        })
+                        .collect(),
+                    None => resolve(&with_content, registry, address, &def.module, &content),
+                };
                 let Some((_, first, inner_value, _)) = targets.first() else {
                     continue;
                 };
@@ -1473,6 +1483,12 @@ mod tests {
             Some(SlotPort::Port(port)) => port.to_string(),
             other => panic!("{address}: {other:?}"),
         };
+        // ADR 0044 §6: a parameter set on the slot reaches every voice.
+        let cutoff = panel.target("pad", "cutoff").expect("the pad's cutoff");
+        let ports: Vec<String> = cutoff.ports.iter().map(ToString::to_string).collect();
+        assert_eq!(ports.len(), 8, "{ports:?}");
+        assert_eq!(ports[0], "/pad/v0/cutoff_knob.value");
+        assert_eq!(ports[7], "/pad/v7/cutoff_knob.value");
         assert_eq!(reach("/pad.out"), "/pad/sum_out.sum");
         assert_eq!(reach("/pad.notes"), "/pad/alloc.notes");
         assert_eq!(reach("/pad/v3.out"), "/pad/v3/volume.out");
