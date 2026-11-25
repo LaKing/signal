@@ -56,7 +56,7 @@ drum_a = { module = "std.mix" }
 drum_b = { module = "std.mix" }
 # Drums on a and b, the echoed voice on c, the pad on d, levelled so that the limiter
 # only rounds off the loudest hits.
-bus = { module = "std.mix", gain_a = 0.45, gain_b = 0.45, gain_c = 0.55, gain_d = 0.5 }
+bus = { module = "std.mix", gain_a = 0.8044196739059004, gain_b = 0.7695907651388048, gain_c = 0.02576630737900991, gain_d = 0.7032525892908218 }
 dc = { module = "std.dc_block" }
 limiter = { module = "std.tanh_shaper", drive = 1 }
 out = { module = "std.audio_out", gain = 0.25 }
@@ -68,16 +68,20 @@ out = { module = "std.audio_out", gain = 0.25 }
 slot = { from = "lib.poly_voice", parameters = { volume = { unit = "dB" }, glide = { unit = "ms" }, cutoff = { unit = "Hz" }, emphasis = {}, env_amount = {}, key_track = {}, f_attack = { unit = "ms" }, f_decay = { unit = "ms" }, f_sustain = {}, f_release = { unit = "ms" }, a_attack = { unit = "ms" }, a_decay = { unit = "ms" }, a_sustain = {}, a_release = { unit = "ms" } } }
 load = "moog_voice"
 voices = 8
-volume = -8
-glide = 0
-cutoff = 900
-env_amount = 600
-a_attack = 250
-a_decay = 400
+volume = -0.8864062499999825
+glide = 1691.2499999999998
+cutoff = 20
+env_amount = 3137.9687500000005
+a_attack = 1
+a_decay = 1
 a_sustain = 0.8
-a_release = 900
-f_attack = 300
-f_release = 900
+a_release = 35.37160017393504
+f_attack = 1.0096950786170815
+f_release = 84.9193198082219
+emphasis = 0.01423828125
+key_track = 0
+f_sustain = 0.2701562499999999
+f_decay = 1
 
 [wiring]
 connections = [

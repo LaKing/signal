@@ -1,0 +1,8 @@
+[[layout."Monitor #41253 3840x2160@1 +0+0 | Monitor #41253 3840x2160@1 +3840+0 | Monitor #41252 3840x2160@1 +7680+0".windows]]
+view = "main"
+screen = 0
+x = 0
+y = 30
+width = 1206
+height = 1543
+cards = []

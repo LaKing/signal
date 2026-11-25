@@ -1,4 +1,7 @@
-//! `projects/studio-poly` (ADR 0044 phase 1, decision 3): the studio with a
+//! `tests/fixtures/studio-poly` (the project's text files as committed on
+//! 2026-11-24; the owner tunes `projects/studio-poly` since 2026-11-25, as
+//! `studio_transport.rs` does for its project) (ADR 0044 phase 1, decision
+//! 3): the studio with a
 //! pad of eight `moog_voice` voices in a `lib.poly_voice` slot, played by
 //! `std.note_seq`'s `notes`. Its golden render (16 s, with no fault, no mute
 //! and a safe peak), added with the project (not a regeneration); the same
@@ -22,7 +25,7 @@ fn repository() -> PathBuf {
 }
 
 fn project() -> PathBuf {
-    repository().join("projects/studio-poly")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/studio-poly")
 }
 
 fn scratch(name: &str) -> PathBuf {
