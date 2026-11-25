@@ -52,7 +52,8 @@ use muda::{AboutMetadata, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, Subme
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponse, NSModalResponseOK,
+    NSOpenPanel, NSSavePanel,
 };
 use objc2_foundation::NSString;
 use serde_json::{Value, json};
@@ -68,7 +69,7 @@ use signal_app::state::Backend;
 use signal_app::window::{
     ExitPlan, HELP_MENU, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
     REVERT_BUTTONS, REVERT_INFORMATIVE, RevertPlan, RevertPrompt, SETTINGS_TITLE, WINDOW_MENU,
-    answer, can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
+    answer, asks, can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
     origin_of, page_url, panel_page_url, prompt_buttons, prompt_text, revert_plan, revert_text,
     save_target, settings_path, view_path, view_title, window_of, window_title,
 };
@@ -114,6 +115,25 @@ enum UserEvent {
     /// A system panel closed: what it was for, and the path chosen (None:
     /// cancelled). The panels run modeless ([`begin_panel`]).
     Chosen(Choice, Option<PathBuf>),
+    /// An alert closed: what it asked, and the button answered (its index,
+    /// the first 0; None for another answer). The alerts run as sheets
+    /// ([`begin_alert`]).
+    Answered(Asked, Option<usize>),
+}
+
+/// What an alert asked.
+#[derive(Debug)]
+enum Asked {
+    /// "Save changes?" before closing by the route (a window's close
+    /// button, Quit).
+    Close(QuitRoute),
+    /// "Save changes?" before the project at the path (already checked by
+    /// `dropped`) opens.
+    Open(PathBuf),
+    /// "Revert to Saved?".
+    Revert,
+    /// "Open which project?": the includes' paths, in button order.
+    Include(Vec<PathBuf>),
 }
 
 /// What a system panel was opened for.
@@ -373,6 +393,9 @@ struct Windows {
     /// The Settings window (ADR 0034), when open: no project window, never
     /// in the layout.
     settings: Option<Settings>,
+    /// An alert is showing ([`begin_alert`]): nothing else is asked until
+    /// it is answered.
+    asking: bool,
 }
 
 /// The Settings window: its WebView and window (dropped in this order).
@@ -875,7 +898,20 @@ impl Windows {
         }
     }
 
-    /// The window's page said `text`.
+    /// Shows `alert` asking `asked` ([`begin_alert`]), unless another alert
+    /// is showing (the request is dropped: one question at a time) or there
+    /// is none (off the main thread).
+    fn ask(&mut self, proxy: &Proxy, alert: Option<Retained<NSAlert>>, asked: Asked) {
+        let (Some(alert), Some(mtm)) = (alert, MainThreadMarker::new()) else {
+            return;
+        };
+        if self.asking {
+            return;
+        }
+        self.asking = true;
+        begin_alert(&alert, mtm, proxy, asked);
+    }
+
     /// The answer to a page's `folder.choose`: the folder chosen (an import's
     /// `project.toml` names its folder; another file is none), or null.
     fn folder_chosen(&mut self, window: WindowId, id: Value, export: bool, path: Option<PathBuf>) {
@@ -904,6 +940,7 @@ impl Windows {
         ));
     }
 
+    /// The window's page said `text`.
     fn page(&mut self, target: &Target, proxy: &Proxy, id: WindowId, text: &str) {
         let Ok(message) = serde_json::from_str::<Value>(text) else {
             return;
@@ -1223,6 +1260,7 @@ fn main() -> ExitCode {
         written: None,
         writing: None,
         settings: None,
+        asking: false,
     };
     windows.tracker = Tracker::new(&windows.screens.key, Instant::now());
     let layout = windows.stored();
@@ -1235,7 +1273,9 @@ fn main() -> ExitCode {
     let mut server = Some(server);
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
-        // What closes the app, and the prompt's route.
+        // What closes the app, and the prompt's route; the prompt's answer
+        // when it was asked already.
+        let mut answered = None;
         let quit = match event {
             // The application exists now: its menu bar is set.
             Event::NewEvents(StartCause::Init) => {
@@ -1309,6 +1349,32 @@ fn main() -> ExitCode {
                 _ => None,
             },
             Event::UserEvent(UserEvent::Menu(MenuAction::Quit)) => Some(QuitRoute::Menu),
+            Event::UserEvent(UserEvent::Answered(asked, index)) => {
+                windows.asking = false;
+                match (asked, server.as_ref()) {
+                    (Asked::Close(route), _) => {
+                        answered = Some(sheet_answer(route, index));
+                        Some(route)
+                    }
+                    (Asked::Open(path), Some(server)) => {
+                        let answer = sheet_answer(QuitRoute::Open, index);
+                        open_answered(server, &mut windows, target, &proxy, &path, answer);
+                        None
+                    }
+                    (Asked::Revert, Some(server)) => {
+                        let answer = index.and_then(RevertPrompt::of);
+                        revert_answered(server, &mut windows, target, &proxy, answer);
+                        None
+                    }
+                    (Asked::Include(paths), Some(server)) => {
+                        if let Some(path) = index.and_then(|i| paths.get(i)) {
+                            open_project(server, &mut windows, target, &proxy, path);
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
             // The Dock's Quit or logout: termination is already decided.
             // `./start.sh` asks the same way after writing its request:
             // then nothing is asked (`signal_app::restart`).
@@ -1398,7 +1464,7 @@ fn main() -> ExitCode {
             }
             Event::UserEvent(UserEvent::Menu(MenuAction::Revert)) => {
                 if let Some(server) = server.as_ref() {
-                    revert(server, &mut windows, target, &proxy);
+                    revert(server, &mut windows, &proxy);
                 }
                 None
             }
@@ -1452,7 +1518,7 @@ fn main() -> ExitCode {
         };
         // The layout's last change first, so the prompt asks about it too.
         windows.save(running, true);
-        let Some(discard) = closing(running, &mut windows, target, &proxy, route) else {
+        let Some(discard) = closing(running, &mut windows, target, &proxy, route, answered) else {
             return;
         };
         let size = windows.main_size();
@@ -1464,20 +1530,30 @@ fn main() -> ExitCode {
 }
 
 /// Before the app closes by `route`: an edited `.signal` project's prompt.
-/// `None` stays (Cancel, or a failed save); else whether the edits are let
-/// go (an unanswered prompt keeps them in the working folder).
+/// `None` stays (Cancel, a failed save, or the prompt shown as a sheet and
+/// not yet `answered`); else whether the edits are let go (an unanswered
+/// prompt keeps them in the working folder). Terminating asks modally: the
+/// loop is ending, so a sheet's answer would never come back.
 fn closing(
     server: &AppServer,
     windows: &mut Windows,
     target: &Target,
     proxy: &Proxy,
     route: QuitRoute,
+    answered: Option<Option<Prompt>>,
 ) -> Option<bool> {
     let project = server.project();
     let edited = project.as_ref().is_some_and(|p| p.edited);
-    let answer = match &project {
-        Some(project) => answer(route, edited, || ask(route, &project.name)),
-        None => None,
+    let answer = match (&project, answered) {
+        (_, Some(answer)) => answer,
+        (Some(project), None) if route == QuitRoute::Terminate => {
+            answer(route, edited, || ask(route, &project.name))
+        }
+        (Some(project), None) if edited && asks(route) => {
+            windows.ask(proxy, save_alert(route, &project.name), Asked::Close(route));
+            return None;
+        }
+        (_, None) => None,
     };
     match exit_plan(edited, answer) {
         ExitPlan::Go | ExitPlan::Keep => Some(false),
@@ -1516,17 +1592,35 @@ fn open_project(
         Err(refusal) => return windows.tell(target, proxy, "signal-app-error", refusal),
     };
     windows.save(server, true);
-    let project = server.project();
-    let edits = match &project {
+    match server.project() {
         Some(project) if project.edited => {
-            match exit_plan(true, ask(QuitRoute::Open, &project.name)) {
-                ExitPlan::Save => Edits::Save,
-                ExitPlan::Discard => Edits::Discard,
-                // Cancel, or no answer: nothing is opened.
-                _ => return,
-            }
+            let alert = save_alert(QuitRoute::Open, &project.name);
+            windows.ask(proxy, alert, Asked::Open(target_path.to_path_buf()));
         }
-        _ => Edits::Ask,
+        _ => open_answered(server, windows, target, proxy, target_path, None),
+    }
+}
+
+/// Opens `target_path` once an edited project's prompt is `answer`ed (None:
+/// it was not edited when asked about); the project is looked at again,
+/// as it may have been saved meanwhile.
+fn open_answered(
+    server: &AppServer,
+    windows: &mut Windows,
+    target: &Target,
+    proxy: &Proxy,
+    target_path: &Path,
+    answer: Option<Prompt>,
+) {
+    let edited = server.project().is_some_and(|p| p.edited);
+    let edits = match (edited, answer) {
+        (false, _) | (true, None) => Edits::Ask,
+        (true, Some(answer)) => match exit_plan(true, Some(answer)) {
+            ExitPlan::Save => Edits::Save,
+            ExitPlan::Discard => Edits::Discard,
+            // Cancel: nothing is opened.
+            _ => return,
+        },
     };
     if let Err(message) = server.open(target_path, edits) {
         windows.tell(target, proxy, "signal-app-error", &message);
@@ -1549,18 +1643,19 @@ fn open_included(server: &AppServer, windows: &mut Windows, target: &Target, pro
             return windows.tell(target, proxy, "signal-app-error", &message);
         }
         [(_, path)] => path.clone(),
-        several => match choose_include(&project.name, several) {
-            Some(path) => path,
-            None => return,
-        },
+        several => {
+            let paths = several.iter().map(|(_, path)| path.clone()).collect();
+            let alert = include_alert(&project.name, several);
+            return windows.ask(proxy, alert, Asked::Include(paths));
+        }
     };
     open_project(server, windows, target, proxy, &path);
 }
 
 /// "Open which project does <name> include?" as a native alert, a button
-/// per include (`<key> — <folder or file>`) and Cancel; the chosen path,
-/// or None when cancelled or it cannot run.
-fn choose_include(name: &str, includes: &[(String, PathBuf)]) -> Option<PathBuf> {
+/// per include (`<key> — <folder or file>`) and Cancel; None off the main
+/// thread.
+fn include_alert(name: &str, includes: &[(String, PathBuf)]) -> Option<Retained<NSAlert>> {
     let mtm = MainThreadMarker::new()?;
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&format!(
@@ -1577,10 +1672,7 @@ fn choose_include(name: &str, includes: &[(String, PathBuf)]) -> Option<PathBuf>
         alert.addButtonWithTitle(&NSString::from_str(&format!("{key} — {shown}")));
     }
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-    let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
-    includes
-        .get(usize::try_from(index).ok()?)
-        .map(|(_, path)| path.clone())
+    Some(alert)
 }
 
 /// Revert to Saved…: asked first ("Revert to the last saved version of
@@ -1589,25 +1681,36 @@ fn choose_include(name: &str, includes: &[(String, PathBuf)]) -> Option<PathBuf>
 /// still running is waited for, both by the look at the project here and
 /// by the open). Nothing is asked when there is nothing to revert, and the
 /// layout's pending change is not written: the file's `ui/` comes back.
-fn revert(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
-    let project = server.project();
-    let answer = match &project {
-        Some(shown) if can_revert(Some(shown)) => ask_revert(&shown.name),
-        _ => None,
-    };
-    if revert_plan(project.as_ref(), answer) == RevertPlan::Revert
+fn revert(server: &AppServer, windows: &mut Windows, proxy: &Proxy) {
+    if let Some(shown) = server.project()
+        && can_revert(Some(&shown))
+    {
+        windows.ask(proxy, revert_alert(&shown.name), Asked::Revert);
+    }
+}
+
+/// Reverts once the prompt is `answer`ed, if there is still something to
+/// revert.
+fn revert_answered(
+    server: &AppServer,
+    windows: &mut Windows,
+    target: &Target,
+    proxy: &Proxy,
+    answer: Option<RevertPrompt>,
+) {
+    if revert_plan(server.project().as_ref(), answer) == RevertPlan::Revert
         && let Err(message) = server.revert()
     {
         windows.tell(target, proxy, "signal-app-error", &message);
     }
 }
 
-/// "Revert to the last saved version of <name>?" as a native alert
-/// (NSAlert, modal, safe API, as the "Save changes?" prompt) with Cancel
-/// first and Revert, each given its key equivalent explicitly (Escape on
-/// Cancel, none on Revert: `RevertPrompt::key_equivalent`), Revert marked
-/// destructive; the answer, or None when it cannot run.
-fn ask_revert(name: &str) -> Option<RevertPrompt> {
+/// "Revert to the last saved version of <name>?" as a native alert (as
+/// the "Save changes?" prompt) with Cancel first and Revert, each given its
+/// key equivalent explicitly (Escape on Cancel, none on Revert:
+/// `RevertPrompt::key_equivalent`), Revert marked destructive; None off the
+/// main thread.
+fn revert_alert(name: &str) -> Option<Retained<NSAlert>> {
     let mtm = MainThreadMarker::new()?;
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&revert_text(name)));
@@ -1617,8 +1720,7 @@ fn ask_revert(name: &str) -> Option<RevertPrompt> {
         added.setKeyEquivalent(&NSString::from_str(button.key_equivalent()));
         added.setHasDestructiveAction(button.destructive());
     }
-    let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
-    RevertPrompt::of(usize::try_from(index).ok()?)
+    Some(alert)
 }
 
 /// Save As… to `file`, chosen in the system's save panel with `<project
@@ -1646,9 +1748,28 @@ fn save_as(
     }
 }
 
-/// "Save changes to <name>?" as a native alert (NSAlert, modal, safe API)
-/// with the buttons of `route`; the answer, or None when it cannot run.
+/// "Save changes to <name>?" run modally (terminating only: see
+/// [`closing`]); the answer, or None when it cannot run.
 fn ask(route: QuitRoute, name: &str) -> Option<Prompt> {
+    let index = save_alert(route, name)?
+        .runModal()
+        .checked_sub(NSAlertFirstButtonReturn)?;
+    Prompt::of(route, usize::try_from(index).ok()?)
+}
+
+/// A sheet's answer to "Save changes?" on `route`: anything but a button of
+/// the prompt (the sheet closed otherwise) stays, as Cancel does.
+fn sheet_answer(route: QuitRoute, index: Option<usize>) -> Option<Prompt> {
+    Some(
+        index
+            .and_then(|i| Prompt::of(route, i))
+            .unwrap_or(Prompt::Cancel),
+    )
+}
+
+/// "Save changes to <name>?" as a native alert (NSAlert, safe API) with the
+/// buttons of `route`; None off the main thread.
+fn save_alert(route: QuitRoute, name: &str) -> Option<Retained<NSAlert>> {
     let mtm = MainThreadMarker::new()?;
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&prompt_text(name)));
@@ -1658,8 +1779,35 @@ fn ask(route: QuitRoute, name: &str) -> Option<Prompt> {
     for prompt in prompt_buttons(route) {
         alert.addButtonWithTitle(&NSString::from_str(prompt.label()));
     }
-    let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
-    Prompt::of(route, usize::try_from(index).ok()?)
+    Some(alert)
+}
+
+/// Shows `alert` as a sheet on the key (or main) window and returns at
+/// once; when it closes, `proxy` is sent [`UserEvent::Answered`] with
+/// `asked` and the button's index. A modal alert (`runModal`) would run
+/// inside tao's event handler, where a quit asked meanwhile waits for
+/// itself forever (as [`begin_panel`]). With no window to attach to, it
+/// runs modally after all.
+fn begin_alert(alert: &NSAlert, mtm: MainThreadMarker, proxy: &Proxy, asked: Asked) {
+    let proxy = proxy.clone();
+    let asked = std::cell::Cell::new(Some(asked));
+    let answered = move |response: NSModalResponse| {
+        let Some(asked) = asked.take() else {
+            return;
+        };
+        let index = response
+            .checked_sub(NSAlertFirstButtonReturn)
+            .and_then(|i| usize::try_from(i).ok());
+        let _ = proxy.send_event(UserEvent::Answered(asked, index));
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    match app.keyWindow().or_else(|| app.mainWindow()) {
+        Some(window) => {
+            let handler = RcBlock::new(answered);
+            alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+        }
+        None => answered(alert.runModal()),
+    }
 }
 
 /// Shows `panel` modeless and returns at once; when it closes, `proxy` is
@@ -1780,9 +1928,20 @@ fn watch_ui(dir: PathBuf, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::{Args, sheet_answer};
     use clap::Parser;
+    use signal_app::window::{Prompt, QuitRoute};
     use std::path::PathBuf;
+
+    #[test]
+    fn a_sheet_closed_without_a_button_stays() {
+        let menu = |index| sheet_answer(QuitRoute::Menu, index);
+        assert_eq!(menu(Some(0)), Some(Prompt::Save));
+        assert_eq!(menu(Some(1)), Some(Prompt::Cancel));
+        assert_eq!(menu(Some(2)), Some(Prompt::DontSave));
+        assert_eq!(menu(Some(3)), Some(Prompt::Cancel));
+        assert_eq!(menu(None), Some(Prompt::Cancel));
+    }
 
     #[test]
     fn setup_and_project_flags() {
