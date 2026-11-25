@@ -62,9 +62,9 @@ pub use config::{
     fault_message, rate_moved, rate_notice, start_failure,
 };
 pub use coreaudio::{
-    CaptureSideSpec, CaptureSpec, CaptureStatus, CoreAudioDriver, DeviceSelector, InputCapture,
-    SecondarySpec, SecondaryStatus, device_state, devices, live_rate, output_period, output_rate,
-    physical_format,
+    CaptureSideSpec, CaptureSpec, CaptureStatus, CoreAudioDriver, DeviceSelector, DevicesSeen,
+    InputCapture, SecondarySpec, SecondaryStatus, device_state, devices, devices_seen, live_rate,
+    output_period, output_rate, physical_format,
 };
 pub use input::{InputCallback, InputMeters};
 pub use join::{BufferRequest, DeviceState, FALLBACK_PERIOD, JoinPlan, plan_join};

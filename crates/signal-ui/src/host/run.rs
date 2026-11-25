@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use signal_audio::{ChannelMap, CoreAudioDriver, Scheduling, rt_thread};
+use signal_audio::{ChannelMap, CoreAudioDriver, DeviceInfo, Direction, Scheduling, rt_thread};
 use signal_core::{Frame, PortAddress};
 use signal_engine::{
     ControlSink, FaultReason, HangLine, LogLine, ParameterValue, RealtimeConfig, Report,
@@ -270,6 +270,38 @@ pub(super) struct Run {
 /// How often the host polls a run's secondary devices (ADR 0052 §6).
 const SECONDARY_POLL: Duration = Duration::from_millis(500);
 
+/// How often the host looks whether the device list changed
+/// ([`Host::watch_devices`]).
+const DEVICE_LOOK: Duration = Duration::from_millis(500);
+
+/// What changed between the device lists `before` and `after`, one line per
+/// device name: one gone, one plugged in, and another default output.
+pub(super) fn device_changes(before: &[DeviceInfo], after: &[DeviceInfo]) -> Vec<String> {
+    let key = |d: &DeviceInfo| d.id.clone().unwrap_or_else(|| d.name.clone());
+    let keys = |list: &[DeviceInfo]| list.iter().map(key).collect::<BTreeSet<_>>();
+    let (had, has) = (keys(before), keys(after));
+    let mut lines = Vec::new();
+    let mut said = BTreeSet::new();
+    for (list, keys, what) in [(before, &has, "gone"), (after, &had, "plugged in")] {
+        for device in list {
+            if !keys.contains(&key(device)) && said.insert((device.name.clone(), what)) {
+                lines.push(format!("{}: {what}", device.name));
+            }
+        }
+    }
+    let default = |list: &[DeviceInfo]| {
+        list.iter()
+            .find(|d| d.direction == Direction::Output && d.default)
+            .map(|d| (key(d), d.name.clone()))
+    };
+    if let (Some(old), Some((new, name))) = (default(before), default(after))
+        && old.0 != new
+    {
+        lines.push(format!("the system's default output is now {name}"));
+    }
+    lines
+}
+
 impl Host {
     /// The run's output stopped by the audio system (the device's rate
     /// changed, it went away). App mode: the run stops, with the reason in
@@ -306,6 +338,62 @@ impl Host {
             return;
         };
         self.output_faulted(fault);
+    }
+
+    /// A device came or went, or another default was chosen (the owner's,
+    /// 2026-11-25: the SSL unplugged and plugged in again, and the UI did
+    /// not follow): the list is read again and every page told, with what
+    /// changed. App mode: a run on the system's default output (the Setup
+    /// names none) whose default is now another device plays again on it
+    /// from frame 0, as a run stopped by its device plays again when one is
+    /// there ([`Self::retry_device`]); never a run that records.
+    pub(super) fn watch_devices(&mut self) {
+        if !matches!(self.backend, Backend::CoreAudio)
+            || self.devices_looked.elapsed() < DEVICE_LOOK
+        {
+            return;
+        }
+        self.devices_looked = Instant::now();
+        let Some(seen) = signal_audio::devices_seen() else {
+            return;
+        };
+        match self.devices_seen.replace(seen.clone()) {
+            Some(before) if before != seen => {}
+            // The first look, or nothing changed.
+            _ => return,
+        }
+        let (setup, _) = crate::devices::effective_setup(&self.setup, &self.local_dir());
+        let before = std::mem::take(&mut self.devices);
+        let playing_on = output_state(&before, &setup);
+        self.list_devices();
+        let mut notices = device_changes(&before, &self.devices);
+        let now = output_state(&self.devices, &setup);
+        if setup.output.is_none()
+            && self.app.is_some()
+            && self.run.is_some()
+            && !self.recording
+            && now != playing_on
+            && ready_at(now.as_ref())
+        {
+            self.stop_app();
+            let message = match self.play_app() {
+                Ok(()) => format!(
+                    "the output follows the system's default: playing again from frame 0 at {} Hz",
+                    self.rate
+                ),
+                Err(failure) => failure.message,
+            };
+            if let Some(mode) = self.app.as_mut() {
+                mode.message = Some(message.clone());
+            }
+            notices.push(message);
+        }
+        let mut push = self.setup_push();
+        if let Some(map) = push.as_object_mut() {
+            map.insert("notices".to_owned(), json!(notices));
+        }
+        self.broadcast(&push);
+        self.messages.extend(notices);
     }
 
     /// The run's output stopped with `fault`: [`Self::check_output`]'s
@@ -881,6 +969,40 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device(name: &str, id: &str, direction: Direction, default: bool) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_owned(),
+            id: Some(id.to_owned()),
+            direction,
+            default,
+            rate: Some(48_000),
+            configs: Vec::new(),
+        }
+    }
+
+    /// The owner's SSL unplugged and plugged in again: a line per device
+    /// name (its output and input together), and the default output moving.
+    #[test]
+    fn a_device_unplugged_and_back_is_said_once_with_the_default() {
+        let ssl_out = |default| device("SSL 2+", "coreaudio:ssl", Direction::Output, default);
+        let ssl_in = device("SSL 2+", "coreaudio:ssl", Direction::Input, false);
+        let dell = |default| device("DELL", "coreaudio:dell", Direction::Output, default);
+        let with = vec![ssl_out(true), dell(false), ssl_in];
+        let without = vec![dell(true)];
+        assert_eq!(
+            device_changes(&with, &without),
+            ["SSL 2+: gone", "the system's default output is now DELL"]
+        );
+        assert_eq!(
+            device_changes(&without, &with),
+            [
+                "SSL 2+: plugged in",
+                "the system's default output is now SSL 2+"
+            ]
+        );
+        assert!(device_changes(&with, &with).is_empty());
+    }
 
     fn muted(address: &str, reason: FaultReason) -> Muted {
         Muted {

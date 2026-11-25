@@ -216,6 +216,10 @@ pub struct Host {
     backend: Backend,
     devices: Vec<DeviceInfo>,
     devices_error: Option<String>,
+    /// The device list's look when last looked at, and when
+    /// ([`Self::watch_devices`]).
+    devices_seen: Option<signal_audio::DevicesSeen>,
+    devices_looked: Instant,
     compute: Vec<String>,
     first: FirstRun,
     rt: RtOptions,
@@ -451,6 +455,8 @@ impl Host {
             backend: config.backend,
             devices: Vec::new(),
             devices_error: None,
+            devices_seen: None,
+            devices_looked: Instant::now(),
             compute: config.compute,
             first: config.first,
             rt: config.rt,
@@ -723,6 +729,7 @@ impl Host {
         self.send_releases();
         self.check_output();
         self.retry_device();
+        self.watch_devices();
         self.watch();
         self.watch_stopped();
         self.watch_keys();

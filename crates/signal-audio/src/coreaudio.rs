@@ -135,6 +135,29 @@ pub fn devices() -> Result<Vec<DeviceInfo>, AudioError> {
     Ok(list)
 }
 
+/// The device list as it looks now, cheaply: the system's device objects
+/// and the default output's and input's ids. It differs when a device came
+/// or went or another default was chosen, without [`devices`]' reading of
+/// every device's configurations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevicesSeen {
+    objects: Vec<u32>,
+    output: Option<String>,
+    input: Option<String>,
+}
+
+/// The device list's look now ([`DevicesSeen`]); `None` when the system's
+/// list cannot be read.
+pub fn devices_seen() -> Option<DevicesSeen> {
+    let host = cpal::default_host();
+    let key = |d: Device| id_of(&d).or_else(|| name_of(&d).ok());
+    Some(DevicesSeen {
+        objects: rt_thread::device_ids().ok()?,
+        output: host.default_output_device().and_then(key),
+        input: host.default_input_device().and_then(key),
+    })
+}
+
 /// Which device to open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceSelector {
